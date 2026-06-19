@@ -277,32 +277,32 @@ public: // Action getters
     StringAction& getTopSelectedHierarchyStatus() { return _topSelectedHierarchyStatus; }
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
 
-    Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
+   mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
 
     QStringList   getCurrentHierarchyItemsMiddleForTable() { return _currentHierarchyItemsMiddleForTable; }
     //IntegralAction& setPerformGeneTableTsnePerplexity() { return _performGeneTableTsnePerplexity; }
     //tsne relatedDatasets
     /*
-        Dataset<Points>        _selectedPointsTSNEDataset;
-    Dataset<Points>        _selectedPointsDataset;
-    Dataset<Points>        _selectedPointsEmbeddingDataset;
+       mv::Dataset<Points>        _selectedPointsTSNEDataset;
+   mv::Dataset<Points>        _selectedPointsDataset;
+   mv::Dataset<Points>        _selectedPointsEmbeddingDataset;
 
-    Dataset<Clusters>        _tsneDatasetSpeciesColors;
-    Dataset<Clusters>        _tsneDatasetClusterColors;
-    Dataset<Points>        _tsneDatasetExpressionColors;
+   mv::Dataset<Clusters>        _tsneDatasetSpeciesColors;
+   mv::Dataset<Clusters>        _tsneDatasetClusterColors;
+   mv::Dataset<Points>        _tsneDatasetExpressionColors;
     */
 
-    Dataset<Points>& getSelectedPointsTSNEDataset() { return _selectedPointsTSNEDataset; }
-    Dataset<Points>& getSelectedPointsDataset() { return _selectedPointsDataset; }
-    Dataset<Points>& getSelectedPointsEmbeddingDataset() { return _selectedPointsEmbeddingDataset; }
+   mv::Dataset<Points>& getSelectedPointsTSNEDataset() { return _selectedPointsTSNEDataset; }
+   mv::Dataset<Points>& getSelectedPointsDataset() { return _selectedPointsDataset; }
+   mv::Dataset<Points>& getSelectedPointsEmbeddingDataset() { return _selectedPointsEmbeddingDataset; }
 
-    Dataset<Clusters>& getTsneDatasetSpeciesColors() { return _tsneDatasetSpeciesColors; }
-    Dataset<Clusters>& getTsneDatasetClusterColors() { return _tsneDatasetClusterColors; }
-    Dataset<Points>& getTsneDatasetExpressionColors() { return _tsneDatasetExpressionColors; }
+   mv::Dataset<Clusters>& getTsneDatasetSpeciesColors() { return _tsneDatasetSpeciesColors; }
+   mv::Dataset<Clusters>& getTsneDatasetClusterColors() { return _tsneDatasetClusterColors; }
+   mv::Dataset<Points>& getTsneDatasetExpressionColors() { return _tsneDatasetExpressionColors; }
     std::vector<std::seed_seq::result_type>& getSelectedIndicesFromStorage() { return _selectedIndicesFromStorage; }
-    Dataset<Points> & getFilteredUMAPDatasetPoints() { return _filteredUMAPDatasetPoints; }
-    Dataset<Points> & getFilteredUMAPDatasetColors() { return _filteredUMAPDatasetColors; }
-    Dataset<Points> & getFilteredUMAPDatasetClusters() { return _filteredUMAPDatasetClusters; }
+   mv::Dataset<Points> & getFilteredUMAPDatasetPoints() { return _filteredUMAPDatasetPoints; }
+   mv::Dataset<Points> & getFilteredUMAPDatasetColors() { return _filteredUMAPDatasetColors; }
+   mv::Dataset<Points> & getFilteredUMAPDatasetClusters() { return _filteredUMAPDatasetClusters; }
     QStatusBar* getStatusBarActionWidget() const { return _statusBarActionWidget; }
     QMessageBox* getPopupMessageInit() const { return _popupMessageInit; }
     QMessageBox* getPopupMessageTreeCreationCompletion() const { return _popupMessageTreeCreationCompletion; }
@@ -323,9 +323,9 @@ public: // Action getters
     
     QSet<QString>& getUniqueReturnGeneList() { return _uniqueReturnGeneList; }
     std::vector<QString>& getTotalGeneList() { return _totalGeneList; }
-    Dataset<Points>& getGeneSimilarityPoints() { return _geneSimilarityPoints; }
+   mv::Dataset<Points>& getGeneSimilarityPoints() { return _geneSimilarityPoints; }
     //std::vector<QString>& getGeneSimilarityClusters() { return _geneSimilarityClusters; }
-    Dataset<Clusters>& getGeneSimilarityClusterColoring() { return _geneSimilarityClusterColoring; }
+   mv::Dataset<Clusters>& getGeneSimilarityClusterColoring() { return _geneSimilarityClusterColoring; }
     std::vector<QString>& getGeneOrder() { return _geneOrder; }
     bool& getPauseStatusUpdates() { return _pauseStatusUpdates; }
     bool& setPauseStatusUpdates(bool flag) { return _pauseStatusUpdates = flag; }
@@ -407,20 +407,20 @@ protected:
     StringAction            _selectedSpeciesVals;
     OptionAction                    _typeofTopNGenes;
 
-    Dataset<Points>        _selectedPointsTSNEDataset;
-    Dataset<Points>        _selectedPointsDataset;
-    Dataset<Points>        _selectedPointsEmbeddingDataset;
-    Dataset<Points>        _filteredUMAPDatasetPoints;
-    Dataset<Points>        _filteredUMAPDatasetColors;
-    Dataset<Points>        _filteredUMAPDatasetClusters;
+   mv::Dataset<Points>        _selectedPointsTSNEDataset;
+   mv::Dataset<Points>        _selectedPointsDataset;
+   mv::Dataset<Points>        _selectedPointsEmbeddingDataset;
+   mv::Dataset<Points>        _filteredUMAPDatasetPoints;
+   mv::Dataset<Points>        _filteredUMAPDatasetColors;
+   mv::Dataset<Points>        _filteredUMAPDatasetClusters;
 
-    Dataset<Clusters>        _tsneDatasetSpeciesColors;
-    Dataset<Clusters>        _tsneDatasetClusterColors;  
-    Dataset<Points>        _tsneDatasetExpressionColors;
+   mv::Dataset<Clusters>        _tsneDatasetSpeciesColors;
+   mv::Dataset<Clusters>        _tsneDatasetClusterColors;  
+   mv::Dataset<Points>        _tsneDatasetExpressionColors;
 
-    Dataset<Points>             _geneSimilarityPoints;
+   mv::Dataset<Points>             _geneSimilarityPoints;
     //std::vector<QString>        _geneSimilarityClusters;
-    Dataset<Clusters>           _geneSimilarityClusterColoring;
+   mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
 
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
@@ -459,7 +459,7 @@ protected:
     OptionAction                   _performGeneTableTsneDistance;
     TriggerAction                  _performGeneTableTsneTrigger;
     TriggerAction                 _computeTreesToDisplayFromHierarchy;
-    Dataset<Points>                _selectedPointsTSNEDatasetForGeneTable;
+   mv::Dataset<Points>                _selectedPointsTSNEDatasetForGeneTable;
     bool                           _pauseStatusUpdates=false;
     QStringList                   _deleteDatasetIds;
     std::vector<QString> _geneOrder;
