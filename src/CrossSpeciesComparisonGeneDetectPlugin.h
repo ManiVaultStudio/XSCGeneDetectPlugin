@@ -77,9 +77,9 @@ protected:
     SettingsAction _settingsAction;
     //HorizontalToolbarAction     _toolbarAction;    // Toolbar action that is shown in the main window
     //VerticalToolbarAction         _verticalGroupAction; // Vertical group action that is shown in the main window
-    Dataset<Points> _pointsDataset;
-    Dataset<Clusters> _clusterDataset;
-    Dataset<Points> _lowDimTSNEDataset;
+    mv::Dataset<Points> _pointsDataset;
+    mv::Dataset<Clusters> _clusterDataset;
+    mv::Dataset<Points> _lowDimTSNEDataset;
 
 };
 
