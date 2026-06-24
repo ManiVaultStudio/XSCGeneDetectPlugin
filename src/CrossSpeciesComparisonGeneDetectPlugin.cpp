@@ -1,5 +1,7 @@
 #include "CrossSpeciesComparisonGeneDetectPlugin.h"
 
+#include <util/Serialization.h>
+
 #include <event/Event.h>
 #include <CrossSpeciesComparisonTreeData/CrossSpeciesComparisonTreeData.h>
 #include <DatasetsMimeData.h>
