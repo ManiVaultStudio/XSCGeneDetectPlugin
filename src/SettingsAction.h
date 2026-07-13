@@ -39,6 +39,7 @@
 #include <set>
 #include <QLineEdit>
 #include <QColor>
+#include <QMessageBox>
 
 #include <QMouseEvent>
 using namespace mv::gui;
