@@ -1,6 +1,6 @@
-# CrossSpeciesComparisonGeneDetectPlugin
+# XSCGeneDetectPlugin
 
-`CrossSpeciesComparisonGeneDetectPlugin` is a ManiVault view plugin for exploring cross-species gene expression differences from point-based single-cell style datasets.
+`XSCGeneDetectPlugin` is a ManiVault view plugin for exploring cross-species gene expression differences from point-based single-cell style datasets.
 
 The plugin is designed for workflows where a user:
 
@@ -18,7 +18,7 @@ At a high level, the plugin combines five pieces of information:
 - a low-dimensional embedding dataset (`Points`),
 - a species assignment dataset (`Cluster`),
 - one or more hierarchy / cell-type cluster datasets (`Cluster`),
-- and a reference phylogenetic tree dataset (`CrossSpeciesComparisonTree`).
+- and a reference phylogenetic tree dataset (`XSCTree`).
 
 From these inputs, it computes:
 
@@ -32,16 +32,16 @@ From these inputs, it computes:
 
 ## Repository Layout
 
-- [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/CMakeLists.txt): CMake target definition and ManiVault/Qt integration.
-- [src/CrossSpeciesComparisonGeneDetectPlugin.h](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/CrossSpeciesComparisonGeneDetectPlugin.h): plugin class declaration.
-- [src/CrossSpeciesComparisonGeneDetectPlugin.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/CrossSpeciesComparisonGeneDetectPlugin.cpp): plugin wiring, view integration, table rendering, and scatterplot/tree coordination.
-- [src/SettingsAction.h](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.h): main state container and action declarations.
-- [src/SettingsAction.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.cpp): shared helpers and compilation unit for the split inline implementation.
-- [src/SettingsAction.Ui.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.Ui.inl): UI/action wiring.
-- [src/SettingsAction.Analysis.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.Analysis.inl): main analysis and ranking logic.
-- [src/SettingsAction.Data.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.Data.inl): dataset creation, model generation, and export helpers.
-- [src/SettingsAction.Tree.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.Tree.inl): tree-related logic.
-- [src/SettingsAction.Serialization.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/src/SettingsAction.Serialization.inl): serialization support.
+- [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/CMakeLists.txt): CMake target definition and ManiVault/Qt integration.
+- [src/XSCGeneDetectPlugin.h](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.h): plugin class declaration.
+- [src/XSCGeneDetectPlugin.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.cpp): plugin wiring, view integration, table rendering, and scatterplot/tree coordination.
+- [src/SettingsAction.h](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.h): main state container and action declarations.
+- [src/SettingsAction.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.cpp): shared helpers and compilation unit for the split inline implementation.
+- [src/SettingsAction.Ui.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Ui.inl): UI/action wiring.
+- [src/SettingsAction.Analysis.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Analysis.inl): main analysis and ranking logic.
+- [src/SettingsAction.Data.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Data.inl): dataset creation, model generation, and export helpers.
+- [src/SettingsAction.Tree.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Tree.inl): tree-related logic.
+- [src/SettingsAction.Serialization.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Serialization.inl): serialization support.
 
 ## Build Requirements
 
@@ -50,13 +50,13 @@ The project expects a ManiVault development environment with:
 - CMake 3.22 or newer,
 - Qt 6 with `Widgets`, `WebEngineWidgets`, and `Concurrent`,
 - ManiVault packages for `Core`, `PointData`, and `ClusterData`,
-- the `CrossSpeciesComparisonTreeData` plugin/library available at build or install time.
+- the `XSCTreeData` plugin/library available at build or install time.
 
 Relevant CMake variables:
 
 - `ManiVault_INSTALL_DIR`: ManiVault installation root.
-- `MV_CSCTD_INSTALL_DIR`: installation root for `CrossSpeciesComparisonTreeData`.
-- `CROSSSPECIESCOMPARISONTREEDATA_LINK_LIBRARY`: optional explicit override for the tree data plugin library.
+- `MV_CSCTD_INSTALL_DIR`: installation root for `XSCTreeData`.
+- `XSCTREEDATA_LINK_LIBRARY`: optional explicit override for the tree data plugin library.
 
 ## Building
 
@@ -67,7 +67,7 @@ cmake -S . -B build -DManiVault_INSTALL_DIR="C:\Path\To\ManiVault"
 cmake --build build --config Release
 ```
 
-On successful build, the plugin is installed into the ManiVault `Plugins` directory via the post-build install step defined in [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/CrossSpeciesComparisonGeneDetectPlugin/CMakeLists.txt).
+On successful build, the plugin is installed into the ManiVault `Plugins` directory via the post-build install step defined in [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/CMakeLists.txt).
 
 ## Runtime Data Expectations
 

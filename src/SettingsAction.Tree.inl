@@ -216,7 +216,7 @@ QString SettingsAction::createJsonTreeFromNewick(QString tree, std::vector<QStri
 
     nlohmann::json json = nlohmann::json::parse(jsonString);
     std::string jsonStr = json.dump(4);
-    //qDebug()<< "CrossSpeciesComparisonClusterRankPlugin::createJsonTree: jsonStr: " << QString::fromStdString(jsonStr);
+    //qDebug()<< "XSCClusterRankPlugin::createJsonTree: jsonStr: " << QString::fromStdString(jsonStr);
     QString formattedTree = QString::fromStdString(jsonStr);
 
 

@@ -1,9 +1,9 @@
-#include "CrossSpeciesComparisonGeneDetectPlugin.h"
+#include "XSCGeneDetectPlugin.h"
 
 #include <util/Serialization.h>
 
 #include <event/Event.h>
-#include <CrossSpeciesComparisonTreeData/CrossSpeciesComparisonTreeData.h>
+#include <XSCTreeData/XSCTreeData.h>
 #include <DatasetsMimeData.h>
 #include <QHeaderView> 
 #include <QDebug>
@@ -23,7 +23,7 @@
 #ifdef _WIN32
 #include <execution>
 #endif
-Q_PLUGIN_METADATA(IID "studio.manivault.CrossSpeciesComparisonGeneDetectPlugin")
+Q_PLUGIN_METADATA(IID "studio.manivault.XSCGeneDetectPlugin")
 
 using namespace mv;
 
@@ -251,14 +251,14 @@ std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& for
 
 
 
-CrossSpeciesComparisonGeneDetectPlugin::CrossSpeciesComparisonGeneDetectPlugin(const PluginFactory* factory) :
+XSCGeneDetectPlugin::XSCGeneDetectPlugin(const PluginFactory* factory) :
     ViewPlugin(factory),
     _settingsAction(*this)
 {
 
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::init()
+void XSCGeneDetectPlugin::init()
 {
     auto& shortcuts = getShortcuts();
 
@@ -284,7 +284,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::init()
 
             if (_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().isValid())
             {
-                auto treeDataset = mv::data().getDataset<CrossSpeciesComparisonTree>(_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().getDatasetId());
+                auto treeDataset = mv::data().getDataset<XSCTree>(_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().getDatasetId());
               
                 QStringList selectedRowsStrList = _settingsAction.getSelectedRowIndexAction().getString().split(",");
                 QList<int> selectedRows;
@@ -796,13 +796,6 @@ void CrossSpeciesComparisonGeneDetectPlugin::init()
 
 
 
-
-
-
-
-
-
-
     auto mainLayout = new QVBoxLayout();
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
@@ -978,7 +971,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::init()
 
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::geneExplorer()
+void XSCGeneDetectPlugin::geneExplorer()
 {
     std::vector<std::seed_seq::result_type> selectedSpeciesIndices;
     auto speciesDataset = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
@@ -1159,7 +1152,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::geneExplorer()
 }
 
 
-void CrossSpeciesComparisonGeneDetectPlugin::geneExplorer(QString selectedSpecies)
+void XSCGeneDetectPlugin::geneExplorer(QString selectedSpecies)
 {
     std::vector<std::seed_seq::result_type> selectedSpeciesIndices;
     auto speciesDataset = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
@@ -1340,7 +1333,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::geneExplorer(QString selectedSpecie
     }
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::adjustTableWidths(const QString& value) {
+void XSCGeneDetectPlugin::adjustTableWidths(const QString& value) {
    /*
     // Assuming _settingsAction.getHorizontalLayout() returns your QHBoxLayout
     QHBoxLayout* layout = _settingsAction.getTableSplitter();
@@ -1394,7 +1387,7 @@ QColor getColorFromValue(int value, int min, int max) {
 
 
 
-void CrossSpeciesComparisonGeneDetectPlugin::modifyListData()
+void XSCGeneDetectPlugin::modifyListData()
 {
     try {
     //qDebug() << "It's here";
@@ -1692,7 +1685,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::modifyListData()
 
         auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
         if (referenceTreeDataset.isValid()) {
-            auto referenceTree = mv::data().getDataset<CrossSpeciesComparisonTree>(referenceTreeDataset.getDatasetId());
+            auto referenceTree = mv::data().getDataset<XSCTree>(referenceTreeDataset.getDatasetId());
             if (referenceTree.isValid()) {
                 QJsonObject speciesDataJson = referenceTree->getTreeData();
                 updateSpeciesData(speciesDataJson, speciesExpressionMap);
@@ -1818,7 +1811,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::modifyListData()
 
 
 }
-void CrossSpeciesComparisonGeneDetectPlugin::selectedCellCountStatusBarAdd()
+void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 {
     if (!_settingsAction.getSelectedSpeciesCellCountMap().empty())
     {
@@ -2113,7 +2106,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::selectedCellCountStatusBarAdd()
 
 
 
-void CrossSpeciesComparisonGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, SpeciesDetailsStats> statisticsValues, QStringList selectedSpecies)
+void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, SpeciesDetailsStats> statisticsValues, QStringList selectedSpecies)
 {
     if (!_settingsAction.getSelectedSpeciesCellCountMap().empty())
     {
@@ -2603,7 +2596,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(
     adjustTableWidths("large");
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::updatePhylogeneticTree()
+void XSCGeneDetectPlugin::updatePhylogeneticTree()
 {
     if (_settingsAction.getGeneTableView())
     {
@@ -2630,7 +2623,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::updatePhylogeneticTree()
 
                 auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
                 if (referenceTreeDataset.isValid()) {
-                    auto referenceTree = mv::data().getDataset<CrossSpeciesComparisonTree>(referenceTreeDataset.getDatasetId());
+                    auto referenceTree = mv::data().getDataset<XSCTree>(referenceTreeDataset.getDatasetId());
                     if (referenceTree.isValid()) {
                         QJsonObject speciesDataJson = referenceTree->getTreeData();
                         updateTreeData(speciesDataJson, statisticsValues);
@@ -2650,16 +2643,16 @@ void CrossSpeciesComparisonGeneDetectPlugin::updatePhylogeneticTree()
     }
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::selectedCellCountStatusBarRemove()
+void XSCGeneDetectPlugin::selectedCellCountStatusBarRemove()
 {
     _settingsAction.getSelectionDetailsTable()->setModel(new QStandardItemModel());
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::selectedCellStatisticsStatusBarRemove()
+void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove()
 {
     _settingsAction.getSelectionDetailsTable()->setModel(new QStandardItemModel());
 }
-void CrossSpeciesComparisonGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
+void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -2754,7 +2747,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::updateSpeciesData(QJsonObject& node
     }
 }
 
-void CrossSpeciesComparisonGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
+void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -2847,7 +2840,7 @@ void CrossSpeciesComparisonGeneDetectPlugin::updateTreeData(QJsonObject& node, c
     }
 }
 /*
-void CrossSpeciesComparisonGeneDetectPlugin::onDataEvent(mv::DatasetEvent* dataEvent)
+void XSCGeneDetectPlugin::onDataEvent(mv::DatasetEvent* dataEvent)
 {
     // Get smart pointer to dataset that changed
     const auto changedDataSet = dataEvent->getDataset();
@@ -2915,18 +2908,18 @@ void CrossSpeciesComparisonGeneDetectPlugin::onDataEvent(mv::DatasetEvent* dataE
 }
 */
 
-void CrossSpeciesComparisonGeneDetectPlugin::fromVariantMap(const QVariantMap& variantMap)
+void XSCGeneDetectPlugin::fromVariantMap(const QVariantMap& variantMap)
 {
     ViewPlugin::fromVariantMap(variantMap);
 
-    mv::util::variantMapMustContain(variantMap, "CSCGDV:CrossSpeciesComparison Gene Detect Plugin Settings");
-    _settingsAction.fromVariantMap(variantMap["CSCGDV:CrossSpeciesComparison Gene Detect Plugin Settings"].toMap());
+    mv::util::variantMapMustContain(variantMap, "CSCGDV:XSC Gene Detect Plugin Settings");
+    _settingsAction.fromVariantMap(variantMap["CSCGDV:XSC Gene Detect Plugin Settings"].toMap());
    // modifyTableData();
    // _settingsAction.getStartComputationTriggerAction().trigger();
 
 }
 
-QVariantMap CrossSpeciesComparisonGeneDetectPlugin::toVariantMap() const
+QVariantMap XSCGeneDetectPlugin::toVariantMap() const
 {
     QVariantMap variantMap = ViewPlugin::toVariantMap();
 
@@ -2934,12 +2927,12 @@ QVariantMap CrossSpeciesComparisonGeneDetectPlugin::toVariantMap() const
 
     return variantMap;
 }
-ViewPlugin* CrossSpeciesComparisonGeneDetectPluginFactory::produce()
+ViewPlugin* XSCGeneDetectPluginFactory::produce()
 {
-    return new CrossSpeciesComparisonGeneDetectPlugin(this);
+    return new XSCGeneDetectPlugin(this);
 }
 
-mv::DataTypes CrossSpeciesComparisonGeneDetectPluginFactory::supportedDataTypes() const
+mv::DataTypes XSCGeneDetectPluginFactory::supportedDataTypes() const
 {
     DataTypes supportedTypes;
 
@@ -2949,18 +2942,18 @@ mv::DataTypes CrossSpeciesComparisonGeneDetectPluginFactory::supportedDataTypes(
     return supportedTypes;
 }
 
-mv::gui::PluginTriggerActions CrossSpeciesComparisonGeneDetectPluginFactory::getPluginTriggerActions(const mv::Datasets& datasets) const
+mv::gui::PluginTriggerActions XSCGeneDetectPluginFactory::getPluginTriggerActions(const mv::Datasets& datasets) const
 {
     PluginTriggerActions pluginTriggerActions;
     /*
-    const auto getPluginInstance = [this]() -> CrossSpeciesComparisonGeneDetectPlugin* {
-        return dynamic_cast<CrossSpeciesComparisonGeneDetectPlugin*>(plugins().requestViewPlugin(getKind()));
+    const auto getPluginInstance = [this]() -> XSCGeneDetectPlugin* {
+        return dynamic_cast<XSCGeneDetectPlugin*>(plugins().requestViewPlugin(getKind()));
     };
 
     const auto numberOfDatasets = datasets.count();
 
     if (numberOfDatasets >= 1 && PluginFactory::areAllDatasetsOfTheSameType(datasets, PointType)) {
-        auto pluginTriggerAction = new PluginTriggerAction(const_cast<CrossSpeciesComparisonGeneDetectPluginFactory*>(this), this, "CrossSpeciesComparisonGeneDetect View", "View gene data", getIcon(), [this, getPluginInstance, datasets](PluginTriggerAction& pluginTriggerAction) -> void {
+        auto pluginTriggerAction = new PluginTriggerAction(const_cast<XSCGeneDetectPluginFactory*>(this), this, "XSCGeneDetect View", "View gene data", getIcon(), [this, getPluginInstance, datasets](PluginTriggerAction& pluginTriggerAction) -> void {
             for (auto dataset : datasets)
                 getPluginInstance();
         });

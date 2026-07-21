@@ -22,7 +22,7 @@ using namespace mv::util;
 
 class QLabel;
 
-class CrossSpeciesComparisonGeneDetectPlugin : public ViewPlugin
+class XSCGeneDetectPlugin : public ViewPlugin
 {
     Q_OBJECT
 
@@ -32,10 +32,10 @@ public:
      * Constructor
      * @param factory Pointer to the plugin factory
      */
-    CrossSpeciesComparisonGeneDetectPlugin(const PluginFactory* factory);
+    XSCGeneDetectPlugin(const PluginFactory* factory);
 
     /** Destructor */
-    ~CrossSpeciesComparisonGeneDetectPlugin() override = default;
+    ~XSCGeneDetectPlugin() override = default;
     
     /** This function is called by the core after the view plugin has been created */
     void init() override;
@@ -84,24 +84,24 @@ protected:
 };
 
 /**
- * CrossSpeciesComparisonGeneDetect plugin factory class
+ * XSCGeneDetect plugin factory class
  *
  * Note: Factory does not need to be altered (merely responsible for generating new plugins when requested)
  */
-class CrossSpeciesComparisonGeneDetectPluginFactory : public ViewPluginFactory
+class XSCGeneDetectPluginFactory : public ViewPluginFactory
 {
     Q_INTERFACES(mv::plugin::ViewPluginFactory mv::plugin::PluginFactory)
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID   "studio.manivault.CrossSpeciesComparisonGeneDetectPlugin"
-                      FILE  "CrossSpeciesComparisonGeneDetectPlugin.json")
+    Q_PLUGIN_METADATA(IID   "studio.manivault.XSCGeneDetectPlugin"
+                      FILE  "XSCGeneDetectPlugin.json")
 
 public:
 
     /** Default constructor */
-    CrossSpeciesComparisonGeneDetectPluginFactory() {}
+    XSCGeneDetectPluginFactory() {}
 
     /** Destructor */
-    ~CrossSpeciesComparisonGeneDetectPluginFactory() override {}
+    ~XSCGeneDetectPluginFactory() override {}
     
     /** Creates an instance of the example view plugin */
     ViewPlugin* produce() override;

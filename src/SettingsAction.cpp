@@ -1,10 +1,10 @@
 #include "SettingsAction.h"
-#include "CrossSpeciesComparisonGeneDetectPlugin.h"
+#include "XSCGeneDetectPlugin.h"
 #include<string>  
 #include <QFileDialog>
 #include <QPageLayout>
 #include <QWebEngineView>
-#include <CrossSpeciesComparisonTreeData/CrossSpeciesComparisonTreeData.h>
+#include <XSCTreeData/XSCTreeData.h>
 #include <numeric>   // for std::reduce
 //#include "lib/Distance/annoylib.h"
 //#include "lib/Distance/kissrandom.h"

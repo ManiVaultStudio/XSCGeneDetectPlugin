@@ -1,5 +1,5 @@
 {
-    "name" : "CrossSpeciesComparisonGeneDetect",
+    "name" : "XSCGeneDetect",
     "version" : "1.1",
     "dependencies" : ["Points"]
 }

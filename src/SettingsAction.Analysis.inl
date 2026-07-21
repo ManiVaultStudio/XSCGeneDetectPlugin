@@ -1294,7 +1294,7 @@ void SettingsAction::precomputeTreesFromHierarchy()
     auto middleClusterNamesDataset = mv::data().getDataset<Clusters>(_middleClusterNamesDataset.getCurrentDataset().getDatasetId());
     auto bottomClusterNamesDataset = mv::data().getDataset<Clusters>(_bottomClusterNamesDataset.getCurrentDataset().getDatasetId());
 
-    auto referenceTreeDataset = mv::data().getDataset<CrossSpeciesComparisonTree>(_referenceTreeDataset.getCurrentDataset().getDatasetId());
+    auto referenceTreeDataset = mv::data().getDataset<XSCTree>(_referenceTreeDataset.getCurrentDataset().getDatasetId());
     QJsonObject speciesDataJson = referenceTreeDataset->getTreeData();
     QStringList speciesNamesVerify = referenceTreeDataset->getTreeLeafNames();
     if (speciesDataJson.isEmpty() || speciesNamesVerify.isEmpty())

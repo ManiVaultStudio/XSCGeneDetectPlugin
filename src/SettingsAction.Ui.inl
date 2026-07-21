@@ -1,6 +1,6 @@
-SettingsAction::SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpeciesComparisonGeneDetectPlugin) :
-    WidgetAction(&CrossSpeciesComparisonGeneDetectPlugin, "CrossSpeciesComparisonGeneDetectPlugin Settings"),
-    _crossSpeciesComparisonGeneDetectPlugin(CrossSpeciesComparisonGeneDetectPlugin),
+SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
+    WidgetAction(&XSCGeneDetectPlugin, "XSCGeneDetectPlugin Settings"),
+    _XSCGeneDetectPlugin(XSCGeneDetectPlugin),
     _listModel(this, "List Model"),
     _selectedGene(this, "Selected Gene"),
     _filteringEditTreeDataset(this, "Filtering Tree Dataset"),
@@ -54,7 +54,7 @@ SettingsAction::SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpec
     _saveGeneTable(this, "Save Right Species Selection Table")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
-    setSerializationName("CSCGDV:CrossSpeciesComparison Gene Detect Plugin Settings");
+    setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
     _statusBarActionWidget = new QStatusBar();
 
 
@@ -326,10 +326,10 @@ SettingsAction::SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpec
         return dataset->getDataType() == PointType;
         });
     _filteringEditTreeDataset.setFilterFunction([this](mv::Dataset<DatasetImpl> dataset) -> bool {
-        return dataset->getDataType() == CrossSpeciesComparisonTreeType;
+        return dataset->getDataType() == XSCTreeType;
         });
     _referenceTreeDataset.setFilterFunction([this](mv::Dataset<DatasetImpl> dataset) -> bool {
-        return dataset->getDataType() == CrossSpeciesComparisonTreeType;
+        return dataset->getDataType() == XSCTreeType;
         });
     _mainPointsDataset.setFilterFunction([this](mv::Dataset<DatasetImpl> dataset) -> bool {
         return dataset->getDataType() == PointType;
@@ -432,7 +432,7 @@ SettingsAction::SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpec
 
         if (_filteringEditTreeDataset.getCurrentDataset().isValid())
         {
-            auto treeDataset = mv::data().getDataset<CrossSpeciesComparisonTree>(_filteringEditTreeDataset.getCurrentDataset().getDatasetId());
+            auto treeDataset = mv::data().getDataset<XSCTree>(_filteringEditTreeDataset.getCurrentDataset().getDatasetId());
 
             QStringList selectedRowsStrList = _geneNamesConnection.getString().split("*%$@*@$%*");
 
@@ -960,7 +960,7 @@ SettingsAction::SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpec
 
             auto referenceTreeDataset = _referenceTreeDataset.getCurrentDataset();
             if (referenceTreeDataset.isValid()) {
-                auto referenceTree = mv::data().getDataset<CrossSpeciesComparisonTree>(referenceTreeDataset.getDatasetId());
+                auto referenceTree = mv::data().getDataset<XSCTree>(referenceTreeDataset.getDatasetId());
                 if (referenceTree.isValid()) {
                     QString speciesData = _precomputedTreesFromTheHierarchy[clusterLevel][clusterName][geneName];
                     QJsonObject speciesDataJson = QJsonDocument::fromJson(speciesData.toUtf8()).object();

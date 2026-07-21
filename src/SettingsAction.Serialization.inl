@@ -1,5 +1,5 @@
 inline SettingsAction::OptionSelectionAction::OptionSelectionAction(SettingsAction& SettingsAction) :
-    GroupAction(nullptr, "CrossSpeciesComparisonGeneDetectPluginOptionSelectionAction"),
+    GroupAction(nullptr, "XSCGeneDetectPluginOptionSelectionAction"),
     _settingsAction(SettingsAction)
 {
     setText("Options");

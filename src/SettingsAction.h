@@ -44,7 +44,7 @@
 #include <QMouseEvent>
 using namespace mv::gui;
 class QMenu;
-class CrossSpeciesComparisonGeneDetectPlugin;
+class XSCGeneDetectPlugin;
 
 class FetchMetaData;
 namespace mv
@@ -227,7 +227,7 @@ protected:
     };
 
 public:
-    SettingsAction(CrossSpeciesComparisonGeneDetectPlugin& CrossSpeciesComparisonGeneDetectPlugins);
+    SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugins);
 
 public: // Action getters
 
@@ -380,7 +380,7 @@ public: // Serialization
     QVariantMap toVariantMap() const override;
 
 protected:
-    CrossSpeciesComparisonGeneDetectPlugin& _crossSpeciesComparisonGeneDetectPlugin;
+    XSCGeneDetectPlugin& _XSCGeneDetectPlugin;
     VariantAction                 _listModel;
     StringAction                  _selectedGene;
     DatasetPickerAction          _filteringEditTreeDataset;
