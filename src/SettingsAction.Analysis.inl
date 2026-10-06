@@ -1116,19 +1116,55 @@ void SettingsAction::updateClusterInfoStatusBar()
                 }
             }
             QString selectedClustersString = "";
+            bool isFirst = _selectedClusterName.isEmpty();
+
             for (const auto& clustersFromSet : orderedClustersSet)
             {
-                auto clusterLabel = new ClickableLabel(); // Create the label without text
+                auto clusterLabel = new ClickableLabel();
                 QString labelText = QString("%1: %2").arg(clustersFromSet.name).arg(clustersFromSet.count);
-                clusterLabel->setText(labelText); // Set the text on the label
+                clusterLabel->setText(labelText);
                 selectedClustersString = selectedClustersString + clustersFromSet.name + ",";
+
                 QColor textColor = clustersFromSet.color.lightness() > 127 ? Qt::black : Qt::white;
-                clusterLabel->setStyleSheet(QString("ClickableLabel { color: %1; background-color: %2; padding: 2px; border: 0.5px solid %3; }")
-                    .arg(textColor.name()).arg(clustersFromSet.color.name(QColor::HexArgb)).arg(textColor.name()));
-                //connect(clusterLabel, &ClickableLabel::clicked, this, [this, clusterLabel]() {
-                connect(clusterLabel, &ClickableLabel::clicked, this, [this, clusterLabel]() {
+
+                QString normalStyle = QString("ClickableLabel { color: %1; background-color: %2; padding: 2px; border: 0.5px solid %3; }")
+                    .arg(textColor.name()).arg(clustersFromSet.color.name(QColor::HexArgb)).arg(textColor.name());
+
+                QString selectedStyle = QString("ClickableLabel { color: %1; background-color: %2; padding: 2px; border: 2px solid #00A3EE; }")
+                    .arg(textColor.name()).arg(clustersFromSet.color.name(QColor::HexArgb));
+
+                clusterLabel->setProperty("normalStyle", normalStyle);
+                clusterLabel->setProperty("selectedStyle", selectedStyle);
+
+                // Maintain selection across rebuilds: select if name matches, or default to first item on initial run
+                bool shouldSelect = false;
+                if (_selectedClusterName.isEmpty() && isFirst)
+                {
+                    shouldSelect = true;
+                    isFirst = false;
+                }
+                else if (_selectedClusterName == clustersFromSet.name)
+                {
+                    shouldSelect = true;
+                }
+
+                if (shouldSelect)
+                {
+                    clusterLabel->setStyleSheet(selectedStyle);
+                    _selectedClusterLabel = clusterLabel;
+                    _selectedClusterName = clustersFromSet.name;
+                }
+                else
+                {
+                    clusterLabel->setStyleSheet(normalStyle);
+                }
+
+                connect(clusterLabel, &ClickableLabel::clicked, this, [this, clusterLabel, clusterName = clustersFromSet.name]() {
                     Qt::MouseButtons buttons = QGuiApplication::mouseButtons();
-                    if (buttons.testFlag(Qt::RightButton)) {
+
+                    if (buttons.testFlag(Qt::RightButton))
+                    {
+                        // Right-click changes sorting order; selection state stays preserved in _selectedClusterName
                         int current = _clusterCountSortingType.getCurrentIndex();
                         int newIndex;
                         if (current == 0)
@@ -1137,7 +1173,6 @@ void SettingsAction::updateClusterInfoStatusBar()
                         }
                         else if (current == 1)
                         {
-
                             if (!_customOrderClustersFromHierarchy.empty())
                             {
                                 newIndex = 2;
@@ -1153,13 +1188,27 @@ void SettingsAction::updateClusterInfoStatusBar()
                         }
                         _clusterCountSortingType.setCurrentIndex(newIndex);
                     }
-
                     else if (buttons.testFlag(Qt::LeftButton))
                     {
-                        return;
+                        // Ignore click if clicking the currently selected label
+                        if (_selectedClusterLabel == clusterLabel)
+                        {
+                            return;
+                        }
+
+                        // Deselect previous widget
+                        if (_selectedClusterLabel != nullptr)
+                        {
+                            QString prevNormal = _selectedClusterLabel->property("normalStyle").toString();
+                            _selectedClusterLabel->setStyleSheet(prevNormal);
+                        }
+
+                        // Select new widget
+                        QString newSelected = clusterLabel->property("selectedStyle").toString();
+                        clusterLabel->setStyleSheet(newSelected);
+                        _selectedClusterLabel = clusterLabel;
+                        _selectedClusterName = clusterName;
                     }
-
-
                     });
 
                 _selectedCellClusterInfoStatusBar->addWidget(clusterLabel);

@@ -478,4 +478,6 @@ protected:
     QStringList                   _currentHierarchyItemsMiddleForTable;
     StringAction               _topSelectedHierarchyStatus;
     bool                      _projectOpened=false;
+    ClickableLabel* _selectedClusterLabel = nullptr;
+    QString _selectedClusterName;
 };
