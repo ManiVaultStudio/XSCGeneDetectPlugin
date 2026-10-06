@@ -13,6 +13,7 @@
 #include "DataHierarchyItem.h"
 #include "Set.h"
 #include <AnalysisPlugin.h>
+#include <QGuiApplication>
 #include <memory>
 #include <algorithm>    
 #include <QDebug>

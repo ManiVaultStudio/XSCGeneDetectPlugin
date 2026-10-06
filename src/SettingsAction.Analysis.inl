@@ -1125,32 +1125,41 @@ void SettingsAction::updateClusterInfoStatusBar()
                 QColor textColor = clustersFromSet.color.lightness() > 127 ? Qt::black : Qt::white;
                 clusterLabel->setStyleSheet(QString("ClickableLabel { color: %1; background-color: %2; padding: 2px; border: 0.5px solid %3; }")
                     .arg(textColor.name()).arg(clustersFromSet.color.name(QColor::HexArgb)).arg(textColor.name()));
+                //connect(clusterLabel, &ClickableLabel::clicked, this, [this, clusterLabel]() {
                 connect(clusterLabel, &ClickableLabel::clicked, this, [this, clusterLabel]() {
-
-
-                    int current = _clusterCountSortingType.getCurrentIndex();
-                    int newIndex;
-                    if (current == 0)
-                    {
-                        newIndex = 1;
-                    }
-                    else if (current == 1)
-                    {
-
-                        if (!_customOrderClustersFromHierarchy.empty())
+                    Qt::MouseButtons buttons = QGuiApplication::mouseButtons();
+                    if (buttons.testFlag(Qt::RightButton)) {
+                        int current = _clusterCountSortingType.getCurrentIndex();
+                        int newIndex;
+                        if (current == 0)
                         {
-                            newIndex = 2;
+                            newIndex = 1;
+                        }
+                        else if (current == 1)
+                        {
+
+                            if (!_customOrderClustersFromHierarchy.empty())
+                            {
+                                newIndex = 2;
+                            }
+                            else
+                            {
+                                newIndex = 0;
+                            }
                         }
                         else
                         {
                             newIndex = 0;
                         }
+                        _clusterCountSortingType.setCurrentIndex(newIndex);
                     }
-                    else
+
+                    else if (buttons.testFlag(Qt::LeftButton))
                     {
-                        newIndex = 0;
+                        return;
                     }
-                    _clusterCountSortingType.setCurrentIndex(newIndex);
+
+
                     });
 
                 _selectedCellClusterInfoStatusBar->addWidget(clusterLabel);
