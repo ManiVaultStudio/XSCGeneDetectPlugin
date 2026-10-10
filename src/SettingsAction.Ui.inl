@@ -51,7 +51,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _toggleScatterplotSelection(this, "Show Scatterplot Selection"),
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker(this, "Map For Hierarchy Items Change Method Stop For Project Load Blocker"),
     _saveSpeciesTable(this, "Save Left Gene Table"),
-    _saveGeneTable(this, "Save Right Species Selection Table")
+    _saveGeneTable(this, "Save Right Species Selection Table"),
+    _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -246,6 +247,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedSpeciesVals.setSerializationName("CSCGDV:Selected Species Vals");
     _clusterOrderHierarchy.setSerializationName("CSCGDV:Cluster Order Hierarchy");
     _rightClickedCluster.setSerializationName("CSCGDV:Right Clicked Cluster");
+    _reverseSearchTraitSelectionString.setSerializationName("CSCGDV:Reverse Search Trait Selection String");
     _topSelectedHierarchyStatus.setSerializationName("CSCGDV:Top Selected Hierarchy Status");
     _clearRightClickedCluster.setSerializationName("CSCGDV:Clear Right Clicked Cluster");
     _removeRowSelection.setSerializationName("CSCGDV:Remove Row Selection");
@@ -271,6 +273,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _performGeneTableTsneTrigger.setDisabled(true);
     _clusterOrderHierarchy.setString("");
     _rightClickedCluster.setString("");
+    _reverseSearchTraitSelectionString.setString("");
     _topSelectedHierarchyStatus.setString("");
     _tsnePerplexity.setSerializationName("CSCGDV:TSNE Perplexity");
     _tsnePerplexity.setMinimum(1);
@@ -993,6 +996,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_rightClickedCluster, &StringAction::stringChanged, this, updateRightClickedCluster);
+    const auto updateReverseSearchTraitSelectionString = [this]() -> void {
+
+
+
+        };
+
+    connect(&_reverseSearchTraitSelectionString, &StringAction::stringChanged, this, updateReverseSearchTraitSelectionString);
+
     const auto updateTopSelectedHierarchyStatus = [this]() -> void {
 
 

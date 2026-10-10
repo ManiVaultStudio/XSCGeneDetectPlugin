@@ -7,7 +7,7 @@ void SettingsAction::triggerTrippleHierarchyFrequencyChange()
     }
     _clusterSpeciesFrequencyMap.clear();
     auto startTimer = std::chrono::high_resolution_clock::now();
-    qDebug() << "computeFrequencyMapForHierarchyItemsChange for all 3 levels Start";
+    //qDebug() << "computeFrequencyMapForHierarchyItemsChange for all 3 levels Start";
 
     if (!_speciesNamesDataset.getCurrentDataset().isValid() || !_mainPointsDataset.getCurrentDataset().isValid() || !_topClusterNamesDataset.getCurrentDataset().isValid() || !_middleClusterNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
         qDebug() << "Datasets are not valid";
@@ -1115,8 +1115,13 @@ void SettingsAction::updateClusterInfoStatusBar()
                     _clusterCountSortingType.setCurrentText("Count");
                 }
             }
+            // Clear or rebuild the status bar, and reset the stale pointer first
+            _selectedClusterLabel = nullptr;
+
             QString selectedClustersString = "";
-            bool isFirst = _selectedClusterName.isEmpty();
+            bool foundPrevious = false;
+            ClickableLabel* firstLabel = nullptr;
+            QString firstName = "";
 
             for (const auto& clustersFromSet : orderedClustersSet)
             {
@@ -1124,6 +1129,13 @@ void SettingsAction::updateClusterInfoStatusBar()
                 QString labelText = QString("%1: %2").arg(clustersFromSet.name).arg(clustersFromSet.count);
                 clusterLabel->setText(labelText);
                 selectedClustersString = selectedClustersString + clustersFromSet.name + ",";
+
+                // Save reference to the very first item as a fallback
+                if (!firstLabel)
+                {
+                    firstLabel = clusterLabel;
+                    firstName = clustersFromSet.name;
+                }
 
                 QColor textColor = clustersFromSet.color.lightness() > 127 ? Qt::black : Qt::white;
 
@@ -1136,16 +1148,17 @@ void SettingsAction::updateClusterInfoStatusBar()
                 clusterLabel->setProperty("normalStyle", normalStyle);
                 clusterLabel->setProperty("selectedStyle", selectedStyle);
 
-                // Maintain selection across rebuilds: select if name matches, or default to first item on initial run
+                // Select if name matches previous selection, or if it's completely empty on initial run
                 bool shouldSelect = false;
-                if (_selectedClusterName.isEmpty() && isFirst)
+                if (_selectedClusterName.isEmpty() && !foundPrevious && firstLabel == clusterLabel)
                 {
                     shouldSelect = true;
-                    isFirst = false;
+                    foundPrevious = true;
                 }
                 else if (_selectedClusterName == clustersFromSet.name)
                 {
                     shouldSelect = true;
+                    foundPrevious = true;
                 }
 
                 if (shouldSelect)
@@ -1212,6 +1225,14 @@ void SettingsAction::updateClusterInfoStatusBar()
                     });
 
                 _selectedCellClusterInfoStatusBar->addWidget(clusterLabel);
+            }
+
+            // Fallback: If previous selection was specified but is no longer present in the new set, select the first item instead
+            if (!foundPrevious && !orderedClustersSet.empty() && firstLabel != nullptr)
+            {
+                firstLabel->setStyleSheet(firstLabel->property("selectedStyle").toString());
+                _selectedClusterLabel = firstLabel;
+                _selectedClusterName = firstName;
             }
 
             auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");

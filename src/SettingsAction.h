@@ -278,6 +278,7 @@ public: // Action getters
     StringAction& getRightClickedCluster() { return _rightClickedCluster; }
     StringAction& getTopSelectedHierarchyStatus() { return _topSelectedHierarchyStatus; }
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
+    StringAction&  getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
 
    mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
 
@@ -472,6 +473,7 @@ protected:
     //std::vector<QString> _speciesOrder;
     StringAction              _rightClickedCluster;
     TriggerAction              _clearRightClickedCluster;
+    StringAction              _reverseSearchTraitSelectionString;
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
