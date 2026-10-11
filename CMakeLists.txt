@@ -23,7 +23,12 @@ endif(MSVC)
 # Dependencies
 # -----------------------------------------------------------------------------
 if(NOT DEFINED MV_CSCTD_INSTALL_DIR) 
-    set(MV_CSCTD_INSTALL_DIR ${ManiVault_INSTALL_DIR} CACHE PATH "Directory where CellMorphologyData is installed")
+    set(MV_CSCTD_INSTALL_DIR ${ManiVault_INSTALL_DIR} CACHE PATH "Directory where tree data is installed")
+endif()
+
+
+if(NOT DEFINED MV_CSCTMD_INSTALL_DIR) 
+    set(MV_CSCTMD_INSTALL_DIR ${ManiVault_INSTALL_DIR} CACHE PATH "Directory where tree meta data is installed")
 endif()
 
 #find_package(OpenSSL REQUIRED)
@@ -106,12 +111,19 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::WebEngineWidgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Concurrent )
 
 
-# Allow override of plugin library path from the build system
+# Allow override of plugin library paths from the build system
 set(XSCTREEDATA_LINK_LIBRARY "${XSCTREEDATA_LINK_LIBRARY}" CACHE STRING "Path to XSCTreeData library")
 if(NOT XSCTREEDATA_LINK_LIBRARY)
     set(CSCTDPLUGIN_LINK_PATH "${MV_CSCTD_INSTALL_DIR}/$<CONFIGURATION>/$<IF:$<CXX_COMPILER_ID:MSVC>,lib,Plugins>")
     set(MV_LINK_SUFFIX $<IF:$<CXX_COMPILER_ID:MSVC>,${CMAKE_LINK_LIBRARY_SUFFIX},${CMAKE_SHARED_LIBRARY_SUFFIX}>)
     set(XSCTREEDATA_LINK_LIBRARY "${CSCTDPLUGIN_LINK_PATH}/${CMAKE_SHARED_LIBRARY_PREFIX}XSCTreeData${MV_LINK_SUFFIX}")
+endif()
+
+set(XSCTREEMETADATA_LINK_LIBRARY "${XSCTREEMETADATA_LINK_LIBRARY}" CACHE STRING "Path to XSCTreeMetaData library")
+if(NOT XSCTREEMETADATA_LINK_LIBRARY)
+    set(CSCTMDPLUGIN_LINK_PATH "${MV_CSCTMD_INSTALL_DIR}/$<CONFIGURATION>/$<IF:$<CXX_COMPILER_ID:MSVC>,lib,Plugins>")
+    set(MV_LINK_SUFFIX $<IF:$<CXX_COMPILER_ID:MSVC>,${CMAKE_LINK_LIBRARY_SUFFIX},${CMAKE_SHARED_LIBRARY_SUFFIX}>)
+    set(XSCTREEMETADATA_LINK_LIBRARY "${CSCTMDPLUGIN_LINK_PATH}/${CMAKE_SHARED_LIBRARY_PREFIX}XSCTreeMetaData${MV_LINK_SUFFIX}")
 endif()
 
 # Link to ManiVault and data plugins
@@ -120,6 +132,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ManiVault::PointData)
 target_link_libraries(${PROJECT_NAME} PRIVATE ManiVault::ClusterData)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE "${XSCTREEDATA_LINK_LIBRARY}")
+target_link_libraries(${PROJECT_NAME} PRIVATE "${XSCTREEMETADATA_LINK_LIBRARY}")
 
 # -----------------------------------------------------------------------------
 # Target installation
