@@ -7,6 +7,8 @@
 #include "actions/DatasetPickerAction.h"
 #include "PointData/PointData.h"
 #include "ClusterData/ClusterData.h"
+#include <XSCTreeData/XSCTreeData.h>
+#include <XSCTreeMetaData/XSCTreeMetaData.h>
 #include "event/EventListener.h"
 #include "actions/Actions.h"
 #include "Plugin.h"
@@ -354,6 +356,7 @@ public: // Action getters
     void updateClusterInfoStatusBar();
     QVariant createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap,const int& n);
     void findTopNGenesPerCluster();
+    QString filterData(QString& target, const QString& filter, const QJsonObject& config);
     QString generateTooltip(const ViewPluginSamplerAction::SampleContext& toolTipContext, const QString& clusterDatasetId, bool showTooltip, QString indicesType);
     void createClusterPositionMap();
     //void computeGeneMeanExpressionMapForHierarchyItemsChangeExperimental(QString hierarchyType);
@@ -425,7 +428,7 @@ protected:
    mv::Dataset<Points>             _geneSimilarityPoints;
     //std::vector<QString>        _geneSimilarityClusters;
    mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
-
+   std::unordered_map<QString, float> _geneTraitValuesComputed;
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
     DatasetPickerAction           _scatterplotEmbeddingPointsUMAPOption;

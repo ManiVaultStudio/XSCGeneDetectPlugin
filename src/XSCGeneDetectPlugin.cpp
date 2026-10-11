@@ -473,6 +473,7 @@ void XSCGeneDetectPlugin::init()
             selectedCellStatisticsStatusBarRemove();
             selectedCellCountStatusBarAdd();
             _settingsAction.getSelectedGeneAction().setString("");
+            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 477";
             _settingsAction.getSpeciesExplorerInMap().setSelectedOptions(QStringList{});
             _settingsAction.getClearRightClickedCluster().trigger();
             updatePhylogeneticTree();
@@ -506,6 +507,7 @@ void XSCGeneDetectPlugin::init()
                     if (!(autoSpecies.size() == 1 && autoSpecies.first().isEmpty())) {
                         if (_settingsAction.getSpeciesExplorerInMap().getNumberOfOptions() > 0)
                         {
+                            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 511";
                             _settingsAction.getSpeciesExplorerInMap().setSelectedOptions(autoSpecies);
                             //_settingsAction.getRevertRowSelectionChangesToInitial().setDisabled(true);
                             geneExplorer();
@@ -2533,6 +2535,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                     rowItems[i]->setForeground(QBrush(QColor("#000000")));
                 }
             }
+            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 2539";
             _settingsAction.getSpeciesExplorerInMap().setSelectedOptions(selectedSpecies);
 
             model->appendRow(rowItems);
@@ -2586,6 +2589,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
             if (!(autoSpecies.size() == 1 && autoSpecies.first().isEmpty())) {
                 if (_settingsAction.getSpeciesExplorerInMap().getNumberOfOptions() > 0) {
+                    qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 2593";
                     _settingsAction.getSpeciesExplorerInMap().setSelectedOptions(autoSpecies);
                     geneExplorer();
                 }

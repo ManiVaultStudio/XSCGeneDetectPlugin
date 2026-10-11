@@ -93,14 +93,14 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     }
     //startCodeTimer("createModelFromData");
     QStandardItemModel* model = new QStandardItemModel();
-    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics" };
+    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait Correlation" };
     model->setColumnCount(_initColumnNames.size());
     model->setRowCount(static_cast<int>(_totalGeneList.size()));
     model->setHorizontalHeaderLabels(_initColumnNames);
 
     QStringList headers = _initColumnNames;
     _hiddenShowncolumns.setOptions(headers);
-    _hiddenShowncolumns.setSelectedOptions({ headers[0], headers[1] });
+    _hiddenShowncolumns.setSelectedOptions({ headers[0], headers[1], headers[4] });
 
     // Pre-index the nested species map once so row construction does not scan
     // every species for every gene.
@@ -145,7 +145,6 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         countItem->setData(count, Qt::UserRole); // Use Qt::UserRole or another custom role for sorting by integer
         model->setItem(rowIndex, 1, countItem);
 
-        //row.push_back(new QStandardItem(QString::number(count))); // Gene Appearances (int) should sort by int
         model->setItem(rowIndex, 2, new QStandardItem(speciesGeneAppearancesComb)); // Gene Appearance Species Names (string) should sort by string
 
         QString formattedStatistics;
@@ -153,7 +152,7 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         for (const auto& speciesStats : statisticsValuesForSpecies) {
             const auto& species = speciesStats.first;
             const auto& stats = speciesStats.second;
-            formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")//, MeanAll: %7, CountAll: %8
+            formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
                 .arg(species)
                 .arg(rankcounter.value(species))
                 .arg(stats.abundanceTop)
@@ -162,19 +161,32 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
                 .arg(stats.meanSelected, 0, 'f', 2)
                 .arg(stats.countSelected)
                 .arg(stats.meanNonSelected, 0, 'f', 2)
-                .arg(stats.countNonSelected)
-                //.arg(stats.meanAll, 0, 'f', 2)
-                //.arg(stats.countAll)
-                ;
+                .arg(stats.countNonSelected);
         }
         model->setItem(rowIndex, 3, new QStandardItem(formattedStatistics)); // Statistics (string) should sort by string
+
+        // Retrieve pre-calculated Trait Correlation from _geneTraitValuesComputed
+        float correlation = 0.0f;
+        auto itCorr = _geneTraitValuesComputed.find(gene);
+        if (itCorr != _geneTraitValuesComputed.end()) {
+            correlation = itCorr->second;
+        }
+        else {
+            // Uncomment to debug key mismatches in your Application Output
+            // qDebug() << "Gene not found in _geneTraitValuesComputed:" << gene;
+        }
+
+        auto* correlationItem = new QStandardItem();
+        correlationItem->setData(QString::number(correlation, 'f', 3), Qt::DisplayRole); // Formatted text for display
+        correlationItem->setData(correlation, Qt::UserRole); // Raw float for numeric sorting
+        model->setItem(rowIndex, 4, correlationItem); // Trait Correlation (float)
     }
 
     //stopCodeTimer("createModelFromData");
 
     return QVariant::fromValue(model);
-
 }
+
 void SettingsAction::createClusterPositionMap()
 {
     _clusterPositionMap;

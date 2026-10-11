@@ -419,6 +419,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         {
             disableActions();
             _pauseStatusUpdates = true;
+            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 423";
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
             //_erroredOutFlag = false;
             QApplication::processEvents();

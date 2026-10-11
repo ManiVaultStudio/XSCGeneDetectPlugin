@@ -112,6 +112,24 @@ void SettingsAction::triggerTrippleHierarchyFrequencyChange()
     qDebug() << "Time taken for computeFrequencyMapForHierarchyItemsChange for all 3 levels: " + QString::number(duration / 1000.0) + " s";
 }
 */
+
+QString SettingsAction::filterData( QString& key, const QString& category, const QJsonObject& data) {
+    QJsonObject result;
+    QJsonObject keyObject;
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        QJsonObject subObject = it.value().toObject();
+        if (subObject.contains(category)) {
+            QJsonObject categoryObject = subObject.value(category).toObject();
+            if (categoryObject.contains(key)) {
+                keyObject.insert(it.key(), categoryObject.value(key)); // Directly insert the value
+            }
+        }
+    }
+    result.insert("type", key);
+    result.insert("data", keyObject);
+    QJsonDocument doc(result);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact)); // Use Compact to remove newlines
+}
 void SettingsAction::updateButtonTriggered()
 {
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
@@ -2008,9 +2026,143 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 void::SettingsAction::updateTraitReverseSearchFeature()
 {
 
-#pragma message("TODO: write this function")
+
+
+    //find points with the species name and cluster name
+    if (!_mainPointsDataset.getCurrentDataset().isValid() && !_speciesNamesDataset.getCurrentDataset().isValid() && !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
+        return;
+    }
+
+    QString clusterName = _selectedClusterName;
+    if (clusterName.isEmpty()) {
+        return;
+    }
+
+    QStringList speciesName = _speciesExplorerInMap.getSelectedOptions();
+    //find species name
+    if (speciesName.isEmpty()) {
+        return;
+    }
+    QString traitName = _reverseSearchTraitSelectionString.getString();
+
+    //find trait name
+    if (traitName.isEmpty()) {
+        return;
+    }
+
+
+    //get selectedPoints from the mainPointsDataset
+
+    std::vector<std::seed_seq::result_type> selectedPointsTemp = _mainPointsDataset.getCurrentDataset()->getSelectionIndices();
+    std::vector<int> selectedPoints(selectedPointsTemp.begin(), selectedPointsTemp.end());
+    Dataset<Points> mainPointsDataset = _mainPointsDataset.getCurrentDataset();
+    std::vector<QString> mainPointDimensionNames = mainPointsDataset->getDimensionNames();
+    std::unordered_map<QString, float> geneTraitValuesComputed;
+    //find cluster name
+
+    std::vector<std::seed_seq::result_type> clusterIndicesTemp;
+
+    Dataset<Clusters> clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
+    // find cluster indices
+    for (const auto& cluster : clusterDataset->getClusters()) {
+        if (cluster.getName() == clusterName) {
+            clusterIndicesTemp = cluster.getIndices();
+            break;
+        }
+    }
+    std::vector<int> clusterIndices(clusterIndicesTemp.begin(), clusterIndicesTemp.end());
+
+
+    std::set<QString> speciesNameSet(speciesName.begin(), speciesName.end());
+    std::vector<std::seed_seq::result_type> speciesIndicesTemp;
+
+    Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
+    // find species indices
+    for (const auto& species : speciesDataset->getClusters()) {
+        if (speciesNameSet.find(species.getName()) != speciesNameSet.end()) {
+            const auto& indices = species.getIndices();
+            speciesIndicesTemp.insert(speciesIndicesTemp.end(), indices.begin(), indices.end());
+        }
+    }
+    std::vector<int> speciesIndices(speciesIndicesTemp.begin(), speciesIndicesTemp.end());
+
+    std::vector<int> intersectedIndices;
+    //find intersection of selectedPoints, clusterIndices and speciesIndices
+    intersectedIndices = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
+    intersectedIndices = intersectSortedIndicesToInt(intersectedIndices, speciesIndices);
+
+
+
+
+
+    //for each gene find mean of points 
+    for (int i = 0; i < mainPointDimensionNames.size(); i++) {
+        QString geneName = mainPointDimensionNames[i];
+        std::vector<int> geneIndices;
+        geneIndices.push_back(i);
+        int geneIndex = i;
+        std::vector<float> resultContainer(intersectedIndices.size());
+        mainPointsDataset->populateDataForDimensions(resultContainer, geneIndices, intersectedIndices);
+        float meanValue = calculateMean(resultContainer);
+        geneTraitValuesComputed[geneName] = meanValue;
+    }
+
+    //for current trait find mean value for species names
+    float traitMeanValue = 0.0f;
+    QString metaOptions = "";
+    //TODO: implement trait mean value computation for species names
+    auto phytv = mv::plugins().getPluginFactory("XSCPhyTVu");
+    if (phytv)
+    {
+        for (auto phytvwPlugin : mv::plugins().getPluginsByFactory(phytv))
+        {
+            if (phytvwPlugin->getGuiName() == "Phylogenetic Tree View")
+            {
+                //legendPlugin->printChildren();
+                auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
+                if (traitDatasetPickerAction)
+                {
+                    auto traitDataset = traitDatasetPickerAction->getCurrentDataset();
+
+
+                    {
+                        auto data = mv::data().getDataset<XSCTreeMeta>(traitDataset->getId());
+                        if (data.isValid())
+                        {
+                            auto dataString = data->getTreeMetaData();
+                            metaOptions = filterData(traitName, "Numeric", dataString);
+
+
+                        }
+
+                    }
+
+
+                }
+
+            }
+        }
+    }
+    traitMeanValue = std::accumulate(speciesNameSet.begin(), speciesNameSet.end(), 0.0f, [&](float sum, const QString& species) { return sum + QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject()[species].toString().toFloat(); }) / speciesNameSet.size();
+    //find correlation for each gene with the trait mean value in geneTraitValuesComputed
+    //compute correlation using Pearson correlation coefficient for each value in geneTraitValuesComputed with traitMeanValue and store in a geneTraitValuesComputed
+    for (auto& [geneName, meanValue] : geneTraitValuesComputed) {
+        float correlation = 0.0f;
+        //compute correlation using Pearson correlation coefficient
+        correlation = (meanValue - traitMeanValue) / (meanValue + traitMeanValue);
+        _geneTraitValuesComputed[geneName] = correlation;
+    }
+    qDebug() << "Gene Trait Values Computed: " << _geneTraitValuesComputed;
+
+    //update gene table column with correlation value
+
+
+
+
 
 }
+
+
 
 void SettingsAction::findTopNGenesPerCluster() {
 
