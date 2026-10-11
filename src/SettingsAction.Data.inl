@@ -177,8 +177,9 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         }
 
         auto* correlationItem = new QStandardItem();
-        correlationItem->setData(QString::number(correlation, 'f', 3), Qt::DisplayRole); // Formatted text for display
-        correlationItem->setData(correlation, Qt::UserRole); // Raw float for numeric sorting
+        // Numeric DisplayRole so sorting is numeric; the bar delegate formats the text and draws the bar
+        correlationItem->setData(static_cast<double>(correlation), Qt::DisplayRole);
+        correlationItem->setData(static_cast<double>(correlation), Qt::UserRole);
         model->setItem(rowIndex, 4, correlationItem); // Trait Correlation (float)
     }
 
@@ -208,6 +209,39 @@ QStringList SettingsAction::getSystemModeColor() {
 }
 
 
+namespace {
+
+    // A field is quoted when it contains a separator, a quote or a line break.
+    QString csvEscape(const QString& value)
+    {
+        if (value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r')) {
+            QString escaped = value;
+            escaped.replace('"', "\"\"");
+            return '"' + escaped + '"';
+        }
+        return value;
+    }
+
+    // The gene table is recognised by its header, not by its column count: it grew a fifth
+    // "Trait Correlation" column, so a hard coded "== 4" check no longer matches.
+    bool isGeneTableModel(const QAbstractItemModel* model)
+    {
+        return model && model->columnCount() >= 4 && model->headerData(3, Qt::Horizontal).toString() == "Statistics";
+    }
+
+    // The correlation column (if present) holds a double in DisplayRole.
+    QString correlationText(const QAbstractItemModel* model, int row)
+    {
+        if (!model || model->columnCount() < 5) {
+            return QString();
+        }
+        bool ok = false;
+        const double value = model->data(model->index(row, 4), Qt::UserRole).toDouble(&ok);
+        return ok ? QString::number(value, 'f', 3) : model->data(model->index(row, 4)).toString();
+    }
+
+} // namespace
+
 void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
     if (!tableView) {
         qWarning() << "TableView is null.";
@@ -234,23 +268,21 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
 
     QTextStream stream(&file);
 
-    if (model->columnCount() == 4) 
+    if (isGeneTableModel(model))
     {
-        //ID,Species Appearance,Gene Appearance Species Names,Statistics
-        QString headerString = "ID,Species Appearance,Gene Appearance Species Names";
-        stream << headerString;
+        const bool hasCorrelation = model->columnCount() >= 5;
+        stream << "ID,Species Appearance,Gene Appearance Species Names";
+        if (hasCorrelation) {
+            stream << ",Trait Correlation";
+        }
         stream << "\n";
 
         for (int row = 0; row < model->rowCount(); ++row) {
-            for (int col = 0; col < model->columnCount(); ++col)
-            {
-                if(col < 3){
-                if (col > 0) {
-                    stream << ",";
-                }
-
-                stream << model->data(model->index(row, col)).toString();
-            }
+            stream << csvEscape(model->data(model->index(row, 0)).toString()) << ","
+                << csvEscape(model->data(model->index(row, 1)).toString()) << ","
+                << csvEscape(model->data(model->index(row, 2)).toString());
+            if (hasCorrelation) {
+                stream << "," << correlationText(model, row);
             }
             stream << "\n";
         }
@@ -282,7 +314,7 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
     file.close();
 }
 
-QString computeMapFromStatistics(QString geneName, QStringList geneAppearanceSpeciesNamesList, QStringList statisticsList)
+QString computeMapFromStatistics(QString geneName, QStringList geneAppearanceSpeciesNamesList, QStringList statisticsList, const QString& traitCorrelation = QString())
 {
     QString finalString = "";
 
@@ -337,14 +369,14 @@ QString computeMapFromStatistics(QString geneName, QStringList geneAppearanceSpe
             }
         }
 
-        finalString += geneName;
+        finalString += csvEscape(geneName);
         if (geneAppearanceSpeciesNamesList.contains(speciesName)) {
             finalString += ", True";
         }
         else {
             finalString += ", False";
         }
-        finalString += ", " + speciesName;
+        finalString += ", " + csvEscape(speciesName);
         finalString += ", " + QString::number(meanSelected.toFloat() - meanNotSelected.toFloat());
         finalString += ", " + rank;
         finalString += ", " + abundanceTop;
@@ -353,6 +385,9 @@ QString computeMapFromStatistics(QString geneName, QStringList geneAppearanceSpe
         finalString += ", " + meanSelected;
         finalString += ", " + countNotSelected;
         finalString += ", " + meanNotSelected;
+        if (!traitCorrelation.isNull()) {
+            finalString += ", " + traitCorrelation;
+        }
         if (i < statisticsList.size() - 1) {
             finalString += "\n";
         }
@@ -402,10 +437,13 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
 
     // If the gene row index is found, write the matching row
 
-    if (model->columnCount()==4) {
+    if (isGeneTableModel(model)) {
         //ID,Species Appearance,Gene Appearance Species Names,Statistics
-        QString ergicString = "Fraction in "+ _topSelectedHierarchyStatus.getString();
+        QString ergicString = "Fraction in " + _topSelectedHierarchyStatus.getString();
         QStringList headers = { "Gene", "Species Appearance", "Species", "Mean Gene Differential Expression", "Gene Appearance Rank", "Fraction in Neuronal", ergicString ,"Count of Selected", "Mean Gene Expression of Selected", "Count of Non Selected","Mean Gene Expression of Non Selected" };
+        if (model->columnCount() >= 5) {
+            headers << "Trait Correlation";
+        }
         QString headerNames = headers.join(",");
         stream << headerNames;
         stream << "\n";
@@ -421,10 +459,10 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
             if (!statisticsList.isEmpty() && statisticsList.last().isEmpty()) {
                 statisticsList.removeLast();
             }
-            QString finalString=computeMapFromStatistics(geneName,  geneAppearanceSpeciesNamesList, statisticsList);
+            QString finalString = computeMapFromStatistics(geneName, geneAppearanceSpeciesNamesList, statisticsList, correlationText(model, geneRowIndex));
             stream << finalString;
 
-      }
+        }
         else
         {
             for (int row = 0; row < model->rowCount(); ++row) {
@@ -437,15 +475,15 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
                 if (!statisticsList.isEmpty() && statisticsList.last().isEmpty()) {
                     statisticsList.removeLast();
                 }
-                QString finalString = computeMapFromStatistics(geneName, geneAppearanceSpeciesNamesList, statisticsList);
+                QString finalString = computeMapFromStatistics(geneName, geneAppearanceSpeciesNamesList, statisticsList, correlationText(model, row));
                 stream << finalString;
                 if (row < model->rowCount() - 1) {
                     stream << "\n";
                 }
             }
         }
-   
-    
+
+
     }
     else
     {
@@ -460,9 +498,9 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
             stream << headerVal;
         }
         stream << "\n";
-        
-        
-        
+
+
+
         for (int row = 0; row < model->rowCount(); ++row) {
             for (int col = 0; col < model->columnCount(); ++col) {
                 if (col > 0) {
@@ -473,7 +511,7 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
             stream << "\n";
         }
     }
-  
+
     file.close();
 }
 
@@ -592,6 +630,7 @@ void SettingsAction::enableDisableButtonsAutomatically()
     bool stringActionHasOptions = !_selectedSpeciesVals.getString().isEmpty();
 
     bool bothListsEqual = false;
+    Q_UNUSED(bothListsEqual); // kept for the (currently disabled) button-state logic below
     if (optionsActionHasOptions && stringActionHasOptions) {
         QStringList temp = _selectedSpeciesVals.getString().split(" @%$,$%@ ");
         QStringList species = _speciesExplorerInMap.getSelectedOptions();
@@ -716,7 +755,7 @@ void SettingsAction::clearTableSelection(QTableView* tableView) {
 void SettingsAction::removeSelectionTableRows(QStringList* selectedLeaves)
 {
     //check if _selectionDetailsTable is valid
-    if (_selectionDetailsTable == nullptr) {
+    if (_selectionDetailsTable == nullptr || selectedLeaves == nullptr) {
         return;
     }
 

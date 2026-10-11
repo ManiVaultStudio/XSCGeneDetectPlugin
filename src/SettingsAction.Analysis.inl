@@ -113,7 +113,7 @@ void SettingsAction::triggerTrippleHierarchyFrequencyChange()
 }
 */
 
-QString SettingsAction::filterData( QString& key, const QString& category, const QJsonObject& data) {
+QString SettingsAction::filterData(QString& key, const QString& category, const QJsonObject& data) {
     QJsonObject result;
     QJsonObject keyObject;
     for (auto it = data.begin(); it != data.end(); ++it) {
@@ -410,15 +410,15 @@ void SettingsAction::updateButtonTriggered()
                         {
 
 
-                            mv::plugin::AnalysisPlugin* analysisPlugin;
+                            mv::plugin::AnalysisPlugin* analysisPlugin = nullptr;
                             bool usePreTSNE = _usePreComputedTSNE.isChecked();
 
                             auto scatterplotModificationsLowDimUMAP = [this]() {
                                 if (_selectedPointsTSNEDataset.isValid()) {
                                     auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-                                    mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-                                    mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-                                    mv::gui::ViewPluginSamplerAction* samplerActionAction;
+                                    mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+                                    mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+                                    mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
                                     if (scatterplotViewFactory) {
                                         for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                                             if (plugin->getGuiName() == "Scatterplot Cell Selection Overview") {
@@ -690,7 +690,7 @@ void SettingsAction::updateButtonTriggered()
                             {
                                 _currentHierarchyItemsMiddleForTable.push_back(item);
                             }
-                            
+
                         }
                     }
                     else
@@ -703,12 +703,12 @@ void SettingsAction::updateButtonTriggered()
                     //
                     /*for (const auto& [key, clusterIndicesMap] : _topHierarchyClusterMap)
                     {
-                        
+
                         for (const auto& index : _selectedIndicesFromStorage)
                         {
                             if (clusterIndicesMap.at(index))
                             {
-                                
+
                                 if (inclusionList.contains(key))
                                 {
                                     _currentHierarchyItemsMiddleForTable.insert(key);
@@ -721,7 +721,7 @@ void SettingsAction::updateButtonTriggered()
 
                     //
 
-                    
+
                     // The expensive part of the update path is computing
                     // selected means for every gene across all affected species.
                     // We therefore separate cheap per-species metadata from the
@@ -1274,7 +1274,7 @@ void SettingsAction::updateClusterInfoStatusBar()
                         auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
                         if (selectionClustersString)
                         {
-                            selectionClustersString->setString(selectedClustersString); 
+                            selectionClustersString->setString(selectedClustersString);
                         }
                     }
                 }
@@ -1433,6 +1433,28 @@ void SettingsAction::precomputeTreesFromHierarchy()
                 {"bottom", bottomClusters}
             };
 
+            // Read the option once on the GUI thread instead of from every worker thread
+            const QString optionValueText = _typeofTopNGenes.getCurrentText();
+
+            // Abundance bookkeeping: number of cells of each species that sit in every included top cluster.
+            // Computed once here so the (cluster x species) loop below only has to look at the cluster cells.
+            std::map<QString, std::map<QString, int>> speciesTopClusterSizes;
+            for (const auto& species : speciesClusters) {
+                const auto speciesIndicesForSizes = species.getIndices();
+                auto& sizesForSpecies = speciesTopClusterSizes[species.getName()];
+                for (const auto& topEntry : _topHierarchyClusterMap) {
+                    int clusterSize = 0;
+                    for (const auto idx : speciesIndicesForSizes) {
+                        if (static_cast<size_t>(idx) < topEntry.second.size() && topEntry.second[idx]) {
+                            ++clusterSize;
+                        }
+                    }
+                    sizesForSpecies[topEntry.first] = clusterSize;
+                }
+            }
+
+            QMutex precomputedTreesMutex;
+
             QtConcurrent::blockingMap(combinedClusters, [&](const auto& pair) {
                 const auto& hierarchyType = pair.first;
                 const auto& clusters = pair.second;
@@ -1468,8 +1490,35 @@ void SettingsAction::precomputeTreesFromHierarchy()
                             });
 
                         const int selectedCellCount = static_cast<int>(commonPointsIndices.size());
-                        const int topHierarchyCountValue = (_clusterSpeciesFrequencyMap.find(speciesName) != _clusterSpeciesFrequencyMap.end()) ? _clusterSpeciesFrequencyMap[speciesName]["topCells"] : 0;
-                        const int middleHierarchyCountValue = (_clusterSpeciesFrequencyMap.find(speciesName) != _clusterSpeciesFrequencyMap.end()) ? _clusterSpeciesFrequencyMap[speciesName]["middleCells"] : 0;
+
+                        // Same abundance definition as the main table (see updateButtonTriggered):
+                        //  top    = species cells inside the included top clusters
+                        //  middle = species cells inside the included top clusters that contain this cluster's cells
+                        //  numerator = this cluster's species cells inside the included top clusters
+                        int topHierarchyCountValue = 0;
+                        int middleHierarchyCountValue = 0;
+                        int abundanceNumerator = 0;
+                        const auto speciesSizesIt = speciesTopClusterSizes.find(speciesName);
+                        for (const auto& topEntry : _topHierarchyClusterMap) {
+                            int clusterSize = 0;
+                            if (speciesSizesIt != speciesTopClusterSizes.end()) {
+                                const auto sizeIt = speciesSizesIt->second.find(topEntry.first);
+                                if (sizeIt != speciesSizesIt->second.end()) {
+                                    clusterSize = sizeIt->second;
+                                }
+                            }
+                            bool present = false;
+                            for (const int idx : commonPointsIndices) {
+                                if (static_cast<size_t>(idx) < topEntry.second.size() && topEntry.second[idx]) {
+                                    ++abundanceNumerator;
+                                    present = true;
+                                }
+                            }
+                            topHierarchyCountValue += clusterSize;
+                            if (present) {
+                                middleHierarchyCountValue += clusterSize;
+                            }
+                        }
 
                         auto& geneStatsForSpecies = topSpeciesToGeneExpressionMap[speciesName];
                         for (int geneIndex = 0; geneIndex < static_cast<int>(mainPointDimensionNames.size()); ++geneIndex) {
@@ -1488,7 +1537,7 @@ void SettingsAction::precomputeTreesFromHierarchy()
 
                             StatisticsSingle calculateStatisticsShort = { selectedMean, selectedCellCount };
                             StatisticsSingle calculateStatisticsNot = { nonSelectedMean, nonSelectedCells };
-                            geneStatsForSpecies[geneName] = combineStatisticsSingle(calculateStatisticsShort, calculateStatisticsNot, topHierarchyCountValue, middleHierarchyCountValue, middleHierarchyCountValue);
+                            geneStatsForSpecies[geneName] = combineStatisticsSingle(calculateStatisticsShort, calculateStatisticsNot, topHierarchyCountValue, middleHierarchyCountValue, abundanceNumerator);
                         }
                     }
 
@@ -1498,12 +1547,11 @@ void SettingsAction::precomputeTreesFromHierarchy()
                         NegativeTopN
                     };
 
-                    auto optionValue = _typeofTopNGenes.getCurrentText();
                     SelectionOption option = SelectionOption::AbsoluteTopN;
-                    if (optionValue == "Positive") {
+                    if (optionValueText == "Positive") {
                         option = SelectionOption::PositiveTopN;
                     }
-                    else if (optionValue == "Negative") {
+                    else if (optionValueText == "Negative") {
                         option = SelectionOption::NegativeTopN;
                     }
 
@@ -1537,29 +1585,49 @@ void SettingsAction::precomputeTreesFromHierarchy()
                         }
                     }
 
+                    // Results for this cluster are collected locally and merged under a lock once,
+                    // because the three hierarchy levels are processed on different threads.
+                    std::unordered_map<QString, QString> treesForCluster;
+                    treesForCluster.reserve(rankingMap.size());
+
                     for (auto& [geneName, speciesRankVec] : rankingMap) {
                         std::map<QString, InitialStatistics> utilityMap;
                         for (const auto& [speciesName, rank] : speciesRankVec) {
+                            const auto speciesStatsIt = topSpeciesToGeneExpressionMap.find(speciesName);
+                            if (speciesStatsIt == topSpeciesToGeneExpressionMap.end()) {
+                                continue;
+                            }
+                            const auto geneStatsIt = speciesStatsIt->second.find(geneName);
+                            if (geneStatsIt == speciesStatsIt->second.end()) {
+                                continue;
+                            }
+                            const Stats& geneStats = geneStatsIt->second;
+
                             InitialStatistics tempStats;
                             tempStats.rankVal = rank;
                             tempStats.geneName = geneName;
-                            tempStats.meanVal = topSpeciesToGeneExpressionMap[speciesName][geneName].meanSelected;
-                            tempStats.differentialVal = topSpeciesToGeneExpressionMap[speciesName][geneName].meanSelected - topSpeciesToGeneExpressionMap[speciesName][geneName].meanNonSelected;
-
-                            tempStats.abundanceTop = (topSpeciesToGeneExpressionMap[speciesName][geneName].abundanceTop != 0) ? topSpeciesToGeneExpressionMap[speciesName][geneName].meanSelected / topSpeciesToGeneExpressionMap[speciesName][geneName].abundanceTop : 0.0f;
-
-                            tempStats.abundanceMiddle = (topSpeciesToGeneExpressionMap[speciesName][geneName].abundanceMiddle != 0) ? topSpeciesToGeneExpressionMap[speciesName][geneName].meanSelected / topSpeciesToGeneExpressionMap[speciesName][geneName].abundanceMiddle : 0.0f;
+                            tempStats.meanVal = geneStats.meanSelected;
+                            tempStats.differentialVal = geneStats.meanSelected - geneStats.meanNonSelected;
+                            // createTreeInitial() turns these three counts into the percentages shown in the tree
+                            tempStats.abundanceTop = geneStats.abundanceTop;
+                            tempStats.abundanceMiddle = geneStats.abundanceMiddle;
+                            tempStats.countAbundanceNumerator = geneStats.countAbundanceNumerator;
 
                             utilityMap[speciesName] = tempStats;
                         }
 
-                        createTreeInitial(speciesDataJson, utilityMap);
+                        // Work on a copy: the reference tree is shared by all threads and all genes, and
+                        // nodes that are missing from utilityMap must not keep the previous gene's values.
+                        QJsonObject treeForGene = speciesDataJson;
+                        createTreeInitial(treeForGene, utilityMap);
 
-                        //convert QJsonObjectToString to store in a more space efficientway and then again convert the string to QJSONObject
-                        QString jsonString = QJsonDocument(speciesDataJson).toJson(QJsonDocument::Compact);
+                        // store as a compact string (smaller than a QJsonObject) and parse it again on demand
+                        treesForCluster[geneName] = QString::fromUtf8(QJsonDocument(treeForGene).toJson(QJsonDocument::Compact));
+                    }
 
-
-                        _precomputedTreesFromTheHierarchy[hierarchyType][clusterName][geneName] = jsonString;
+                    {
+                        QMutexLocker locker(&precomputedTreesMutex);
+                        _precomputedTreesFromTheHierarchy[hierarchyType][clusterName] = std::move(treesForCluster);
                     }
                 }
                 });
@@ -1652,7 +1720,11 @@ void SettingsAction::computeHierarchyAppearanceVector()
     if (_mainPointsDataset.getCurrentDataset().isValid()) {
         auto fullMainDataset = mv::data().getDataset<Points>(_mainPointsDataset.getCurrentDataset().getDatasetId());
         auto numOfPoints = fullMainDataset->getNumPoints();
-        auto clusterDataset = mv::data().getDataset<Clusters>(_topClusterNamesDataset.getCurrentDataset().getDatasetId());
+        Dataset<Clusters> clusterDataset;
+        if (_topClusterNamesDataset.getCurrentDataset().isValid())
+        {
+            clusterDataset = mv::data().getDataset<Clusters>(_topClusterNamesDataset.getCurrentDataset().getDatasetId());
+        }
         QStringList inclusionList = _topHierarchyClusterNamesFrequencyInclusionList.getSelectedOptions();
         const auto inclusionSet = toStringSet(inclusionList);
         if (clusterDataset.isValid()) {
@@ -1660,18 +1732,20 @@ void SettingsAction::computeHierarchyAppearanceVector()
             if (!clusters.empty()) {
 
                 for (const auto& cluster : clusters) {
-                    
+
                     auto clusterName = cluster.getName();
                     if (inclusionSet.find(clusterName) != inclusionSet.end())
                     {
                         std::vector<bool> clusterNamesAppearance(numOfPoints, false);
                         for (const auto& index : cluster.getIndices()) {
-                            clusterNamesAppearance[index] = true;
+                            if (static_cast<size_t>(index) < clusterNamesAppearance.size()) {
+                                clusterNamesAppearance[index] = true;
+                            }
                         }
                         _topHierarchyClusterMap[clusterName] = clusterNamesAppearance;
                     }
 
-                
+
                 }
             }
         }
@@ -1732,7 +1806,10 @@ void SettingsAction::computeFrequencyMapForHierarchyItemsChange(QString hierarch
             {
                 for (const auto& index : cluster.getIndices())
                 {
-                    clusterNames[index] = false;
+                    if (static_cast<size_t>(index) < clusterNames.size())
+                    {
+                        clusterNames[index] = false;
+                    }
                 }
             }
         }
@@ -1744,9 +1821,9 @@ void SettingsAction::computeFrequencyMapForHierarchyItemsChange(QString hierarch
         for (const auto& species : speciesclusters) {
             auto speciesIndices = species.getIndices();
             auto speciesName = species.getName();
-            int count = std::count_if(speciesIndices.begin(), speciesIndices.end(), [&clusterNames](int index) {
-                return clusterNames[index];
-                });
+            int count = static_cast<int>(std::count_if(speciesIndices.begin(), speciesIndices.end(), [&clusterNames](size_t index) {
+                return index < clusterNames.size() && clusterNames[index];
+                }));
 
             if (hierarchyType == "top")
             {
@@ -2025,141 +2102,173 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 */
 void::SettingsAction::updateTraitReverseSearchFeature()
 {
-
-
-
-    //find points with the species name and cluster name
-    if (!_mainPointsDataset.getCurrentDataset().isValid() && !_speciesNamesDataset.getCurrentDataset().isValid() && !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
+    // Bail out unless every dataset we need is available.
+    if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
         return;
     }
 
-    QString clusterName = _selectedClusterName;
+    const QString clusterName = _selectedClusterName;
     if (clusterName.isEmpty()) {
         return;
     }
 
-    QStringList speciesName = _speciesExplorerInMap.getSelectedOptions();
-    //find species name
+    const QStringList speciesName = _speciesExplorerInMap.getSelectedOptions();
     if (speciesName.isEmpty()) {
         return;
     }
-    QString traitName = _reverseSearchTraitSelectionString.getString();
 
-    //find trait name
+    QString traitName = _reverseSearchTraitSelectionString.getString();
     if (traitName.isEmpty()) {
         return;
     }
 
-
-    //get selectedPoints from the mainPointsDataset
-
-    std::vector<std::seed_seq::result_type> selectedPointsTemp = _mainPointsDataset.getCurrentDataset()->getSelectionIndices();
-    std::vector<int> selectedPoints(selectedPointsTemp.begin(), selectedPointsTemp.end());
     Dataset<Points> mainPointsDataset = _mainPointsDataset.getCurrentDataset();
-    std::vector<QString> mainPointDimensionNames = mainPointsDataset->getDimensionNames();
-    std::unordered_map<QString, float> geneTraitValuesComputed;
-    //find cluster name
+    const std::vector<QString> mainPointDimensionNames = mainPointsDataset->getDimensionNames();
+    const int geneCount = static_cast<int>(mainPointDimensionNames.size());
+    if (geneCount == 0) {
+        return;
+    }
 
-    std::vector<std::seed_seq::result_type> clusterIndicesTemp;
+    // ---- Points that are selected AND in the chosen cluster ----
+    std::vector<std::seed_seq::result_type> selectedPointsTemp = mainPointsDataset->getSelectionIndices();
+    std::vector<int> selectedPoints(selectedPointsTemp.begin(), selectedPointsTemp.end());
+    std::sort(selectedPoints.begin(), selectedPoints.end());
 
+    std::vector<int> clusterIndices;
     Dataset<Clusters> clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
-    // find cluster indices
     for (const auto& cluster : clusterDataset->getClusters()) {
         if (cluster.getName() == clusterName) {
-            clusterIndicesTemp = cluster.getIndices();
+            const auto& idx = cluster.getIndices();
+            clusterIndices.assign(idx.begin(), idx.end());
             break;
         }
     }
-    std::vector<int> clusterIndices(clusterIndicesTemp.begin(), clusterIndicesTemp.end());
+    std::sort(clusterIndices.begin(), clusterIndices.end());
+    const std::vector<int> selectedInCluster = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
 
-
-    std::set<QString> speciesNameSet(speciesName.begin(), speciesName.end());
-    std::vector<std::seed_seq::result_type> speciesIndicesTemp;
-
-    Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
-    // find species indices
-    for (const auto& species : speciesDataset->getClusters()) {
-        if (speciesNameSet.find(species.getName()) != speciesNameSet.end()) {
-            const auto& indices = species.getIndices();
-            speciesIndicesTemp.insert(speciesIndicesTemp.end(), indices.begin(), indices.end());
-        }
-    }
-    std::vector<int> speciesIndices(speciesIndicesTemp.begin(), speciesIndicesTemp.end());
-
-    std::vector<int> intersectedIndices;
-    //find intersection of selectedPoints, clusterIndices and speciesIndices
-    intersectedIndices = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
-    intersectedIndices = intersectSortedIndicesToInt(intersectedIndices, speciesIndices);
-
-
-
-
-
-    //for each gene find mean of points 
-    for (int i = 0; i < mainPointDimensionNames.size(); i++) {
-        QString geneName = mainPointDimensionNames[i];
-        std::vector<int> geneIndices;
-        geneIndices.push_back(i);
-        int geneIndex = i;
-        std::vector<float> resultContainer(intersectedIndices.size());
-        mainPointsDataset->populateDataForDimensions(resultContainer, geneIndices, intersectedIndices);
-        float meanValue = calculateMean(resultContainer);
-        geneTraitValuesComputed[geneName] = meanValue;
-    }
-
-    //for current trait find mean value for species names
-    float traitMeanValue = 0.0f;
-    QString metaOptions = "";
-    //TODO: implement trait mean value computation for species names
+    // ---- Trait values per species (from the phylogenetic tree view metadata) ----
+    QString metaOptions;
     auto phytv = mv::plugins().getPluginFactory("XSCPhyTVu");
     if (phytv)
     {
         for (auto phytvwPlugin : mv::plugins().getPluginsByFactory(phytv))
         {
-            if (phytvwPlugin->getGuiName() == "Phylogenetic Tree View")
+            if (phytvwPlugin->getGuiName() != "Phylogenetic Tree View")
+                continue;
+
+            auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
+            if (!traitDatasetPickerAction)
+                continue;
+
+            auto traitDataset = traitDatasetPickerAction->getCurrentDataset();
+            if (!traitDataset.isValid())
+                continue;
+
+            auto data = mv::data().getDataset<XSCTreeMeta>(traitDataset->getId());
+            if (data.isValid())
             {
-                //legendPlugin->printChildren();
-                auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
-                if (traitDatasetPickerAction)
-                {
-                    auto traitDataset = traitDatasetPickerAction->getCurrentDataset();
-
-
-                    {
-                        auto data = mv::data().getDataset<XSCTreeMeta>(traitDataset->getId());
-                        if (data.isValid())
-                        {
-                            auto dataString = data->getTreeMetaData();
-                            metaOptions = filterData(traitName, "Numeric", dataString);
-
-
-                        }
-
-                    }
-
-
-                }
-
+                auto dataString = data->getTreeMetaData();
+                metaOptions = filterData(traitName, "Numeric", dataString);
             }
         }
     }
-    traitMeanValue = std::accumulate(speciesNameSet.begin(), speciesNameSet.end(), 0.0f, [&](float sum, const QString& species) { return sum + QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject()[species].toString().toFloat(); }) / speciesNameSet.size();
-    //find correlation for each gene with the trait mean value in geneTraitValuesComputed
-    //compute correlation using Pearson correlation coefficient for each value in geneTraitValuesComputed with traitMeanValue and store in a geneTraitValuesComputed
-    for (auto& [geneName, meanValue] : geneTraitValuesComputed) {
-        float correlation = 0.0f;
-        //compute correlation using Pearson correlation coefficient
-        correlation = (meanValue - traitMeanValue) / (meanValue + traitMeanValue);
-        _geneTraitValuesComputed[geneName] = correlation;
+    const QJsonObject traitObject = QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject();
+
+    // ---- Per-species point sets ----
+    std::unordered_map<QString, std::vector<int>> speciesToIndices;
+    {
+        const std::set<QString> speciesNameSet(speciesName.begin(), speciesName.end());
+        Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
+        for (const auto& species : speciesDataset->getClusters()) {
+            if (speciesNameSet.find(species.getName()) == speciesNameSet.end())
+                continue;
+            const auto& idx = species.getIndices();
+            std::vector<int> sorted(idx.begin(), idx.end());
+            std::sort(sorted.begin(), sorted.end());
+            speciesToIndices[species.getName()] = std::move(sorted);
+        }
     }
-    qDebug() << "Gene Trait Values Computed: " << _geneTraitValuesComputed;
 
-    //update gene table column with correlation value
+    // One data point per species: (trait value, mean expression of every gene in that species)
+    std::vector<double> traitValues;
+    std::vector<std::vector<float>> speciesGeneMeans; // [species][gene]
 
+    std::vector<int> allGeneIndices(geneCount);
+    std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
+    for (const auto& [species, indices] : speciesToIndices) {
+        if (!traitObject.contains(species))
+            continue;
 
+        bool ok = false;
+        const double traitValue = traitObject.value(species).toVariant().toString().toDouble(&ok);
+        if (!ok)
+            continue;
 
+        const std::vector<int> pointsForSpecies = intersectSortedIndicesToInt(selectedInCluster, indices);
+        if (pointsForSpecies.empty())
+            continue;
 
+        std::vector<float> means(geneCount, 0.0f);
+        computeChunkedGeneMeans(mainPointsDataset, allGeneIndices, pointsForSpecies,
+            [&means](int start, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
+                for (size_t g = 0; g < chunkGenes.size(); ++g)
+                    means[start + g] = chunkMeans[g];
+            });
+
+        traitValues.push_back(traitValue);
+        speciesGeneMeans.push_back(std::move(means));
+    }
+
+    // ---- Pearson correlation across species, per gene ----
+    _geneTraitValuesComputed.clear();
+
+    const size_t n = traitValues.size();
+    if (n >= 1) {
+        const double traitMean = std::accumulate(traitValues.begin(), traitValues.end(), 0.0) / n;
+        double traitVar = 0.0;
+        for (double t : traitValues)
+            traitVar += (t - traitMean) * (t - traitMean);
+
+        for (int g = 0; g < geneCount; ++g) {
+            double geneMean = 0.0;
+            for (size_t i = 0; i < n; ++i)
+                geneMean += speciesGeneMeans[i][g];
+            geneMean /= n;
+
+            double covariance = 0.0, geneVar = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                const double dg = speciesGeneMeans[i][g] - geneMean;
+                covariance += dg * (traitValues[i] - traitMean);
+                geneVar += dg * dg;
+            }
+
+            const double denominator = std::sqrt(geneVar * traitVar);
+            float correlation = denominator > 0.0 ? static_cast<float>(covariance / denominator) : 0.0f;
+            correlation = std::max(-1.0f, std::min(1.0f, correlation));
+            _geneTraitValuesComputed[mainPointDimensionNames[g]] = correlation;
+        }
+    }
+    else {
+        qDebug() << "Trait correlation needs at least 1 species with trait values and selected cells; found" << n;
+    }
+
+    // ---- Push the values into the already-built gene table ----
+    QVariant variant = _listModel.getVariant();
+    auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
+    if (model && model->columnCount() > 4) {
+        for (int row = 0; row < model->rowCount(); ++row) {
+            auto* idItem = model->item(row, 0);
+            auto* corrItem = model->item(row, 4);
+            if (!idItem || !corrItem)
+                continue;
+
+            auto it = _geneTraitValuesComputed.find(idItem->text());
+            const double value = it != _geneTraitValuesComputed.end() ? static_cast<double>(it->second) : 0.0;
+            corrItem->setData(value, Qt::DisplayRole);
+            corrItem->setData(value, Qt::UserRole);
+        }
+    }
 }
 
 
@@ -2266,6 +2375,11 @@ void SettingsAction::findTopNGenesPerCluster() {
             }
         }
 
+        if (!_geneSimilarityPoints.isValid())
+        {
+            qDebug() << "Gene similarity dataset is not valid";
+            return;
+        }
         QString pointDataId = _geneSimilarityPoints->getId();
         int pointDimSize = static_cast<int>(speciesOrder.size());
         int pointIndicesSize = static_cast<int>(_geneOrder.size());
@@ -2293,13 +2407,13 @@ void SettingsAction::findTopNGenesPerCluster() {
 
         populatePointData(pointDataId, rankOrder, pointIndicesSize, pointDimSize, speciesOrder);
 
-        mv::plugin::AnalysisPlugin* analysisPlugin;
+        mv::plugin::AnalysisPlugin* analysisPlugin = nullptr;
         auto scatterplotModificationsGeneSimilarity = [this]() {
             if (_selectedPointsTSNEDatasetForGeneTable.isValid()) {
                 auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-                mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-                mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-                mv::gui::ViewPluginSamplerAction* samplerActionAction;
+                mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+                mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+                mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
                 if (scatterplotViewFactory) {
                     for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                         if (plugin->getGuiName() == "Scatterplot Cell Selection Overview") {
@@ -2346,7 +2460,7 @@ void SettingsAction::findTopNGenesPerCluster() {
                                                     {
                                                         selectionStringDelimiter->setString(",");
                                                     }
-                                                    
+
                                                     auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
                                                     if (selectionClustersString)
                                                     {

@@ -19,6 +19,13 @@
 #include<actions/ColorMap1DAction.h>
 //#include<QTooltip>
 #include <QRegularExpression> 
+#include <QStyledItemDelegate>
+#include <QScrollBar>
+#include <QSortFilterProxyModel>
+#include <QStandardItemModel>
+#include <QPointer>
+#include <QPainter>
+#include <QApplication>
 
 #ifdef _WIN32
 #include <execution>
@@ -29,7 +36,7 @@ using namespace mv;
 
 
 void applyLogTransformation(std::vector<float>& values) {
-    
+
 
 #ifdef _WIN32
     std::transform(std::execution::par, values.begin(), values.end(), values.begin(),
@@ -55,6 +62,9 @@ float getNormalizedSizeRank(float value, float min, float max) {
 float getNormalizedSizePosNeg(float value, float min, float max) {
     // Calculate the maximum absolute value of min and max
     float maxAbs = std::max(std::abs(min), std::abs(max));
+    if (maxAbs <= 0.0f) {
+        return 0.0f; // all values are zero: avoid 0/0 -> NaN (casting NaN to int is undefined)
+    }
 
     if (value >= 0) {
         // Normalize positive values with respect to the maximum absolute value
@@ -94,6 +104,9 @@ float getNormalizedSize(float value, float min, float max) {
     if (value < min) value = min;
     if (value > max) value = max;
 
+    if (max <= min) {
+        return 0.0f; // flat range: avoid 0/0 -> NaN (casting NaN to int in the bar painting is undefined)
+    }
     float normalizedValue = (value - min) / (max - min);
     return normalizedValue * 100.0f; // Return size as a percentage
 }
@@ -200,17 +213,20 @@ std::pair<QColor, QColor> getColorMAp(float value, float min, float max, const Q
         int grayValue = static_cast<int>((1 - normalizedValue) * 255);
         color = QColor(grayValue, grayValue, grayValue);
         textColor = (grayValue > 127) ? QColor(0, 0, 0) : QColor(255, 255, 255);
-    } else if (colorMap == "bupu") {
+    }
+    else if (colorMap == "bupu") {
         int blueValue = static_cast<int>((1 - normalizedValue) * 255);
         int purpleValue = static_cast<int>(normalizedValue * 255);
         color = QColor(blueValue, 0, purpleValue);
         textColor = (blueValue + purpleValue > 255) ? QColor(0, 0, 0) : QColor(255, 255, 255);
-    } else if (colorMap == "gnpu") {
+    }
+    else if (colorMap == "gnpu") {
         int greenValue = static_cast<int>((1 - normalizedValue) * 255);
         int purpleValue = static_cast<int>(normalizedValue * 255);
         color = QColor(0, greenValue, purpleValue);
         textColor = (greenValue + purpleValue > 255) ? QColor(0, 0, 0) : QColor(255, 255, 255);
-    } else {
+    }
+    else {
         // Default to greyscale if an unknown color map is provided
         int grayValue = static_cast<int>((1 - normalizedValue) * 255);
         color = QColor(grayValue, grayValue, grayValue);
@@ -226,7 +242,7 @@ std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& for
     QStringList speciesStatsList = formattedStatistics.split(";", Qt::SkipEmptyParts); // Qt 5.14 and later
 
     // qDebug() << speciesStatsList;
-    QRegularExpression regex(R"(Species: (.*), Rank: (\d+), AbundanceTop: (\d+),  AbundanceMiddle: (\d+),  CountAbundanceNumerator: (\d+), MeanSelected: ([\d.]+), CountSelected: (\d+), MeanNotSelected: ([\d.]+), CountNotSelected: (\d+))");
+    QRegularExpression regex(R"(Species: (.*), Rank: (\d+), AbundanceTop: (\d+),  AbundanceMiddle: (\d+),  CountAbundanceNumerator: (\d+), MeanSelected: (-?[\d.]+), CountSelected: (\d+), MeanNotSelected: (-?[\d.]+), CountNotSelected: (\d+))");
 
     for (const QString& speciesStats : speciesStatsList) {
         QRegularExpressionMatch match = regex.match(speciesStats.trimmed());
@@ -250,6 +266,35 @@ std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& for
 }
 
 
+
+// Size the gene table to the columns that are actually visible. It used to be capped at a fixed
+// 165 px, which only fits the first two columns, so the Trait Correlation column was cut off.
+static void fitGeneTableWidth(QTableView* view)
+{
+    if (!view || !view->model()) {
+        return;
+    }
+    int width = 0;
+    for (int column = 0; column < view->model()->columnCount(); ++column) {
+        if (!view->isColumnHidden(column)) {
+            width += view->columnWidth(column);
+        }
+    }
+    width += view->verticalHeader()->isVisible() ? view->verticalHeader()->width() : 0;
+    width += view->verticalScrollBar()->sizeHint().width() + 2 * view->frameWidth() + 4;
+    view->setMaximumWidth(std::min(width, 640));
+}
+
+// Replace the model of the (proxy-less) selection details table and free the previous one.
+static void setSelectionDetailsModel(QTableView* view, QStandardItemModel* newModel)
+{
+    QAbstractItemModel* oldModel = view->model();
+    view->setModel(newModel);
+    // Only delete models we created: QTableView hands out a static empty model when none is set.
+    if (oldModel && oldModel != newModel && qobject_cast<QStandardItemModel*>(oldModel)) {
+        oldModel->deleteLater();
+    }
+}
 
 XSCGeneDetectPlugin::XSCGeneDetectPlugin(const PluginFactory* factory) :
     ViewPlugin(factory),
@@ -285,14 +330,14 @@ void XSCGeneDetectPlugin::init()
             if (_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().isValid())
             {
                 auto treeDataset = mv::data().getDataset<XSCTree>(_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().getDatasetId());
-              
+
                 QStringList selectedRowsStrList = _settingsAction.getSelectedRowIndexAction().getString().split(",");
                 QList<int> selectedRows;
                 for (const QString& str : selectedRowsStrList) {
                     selectedRows << str.toInt();
                 }
 
-                if (selectedRows.size()==1)
+                if (selectedRows.size() == 1)
                 {
                     int selectedRow = selectedRows[0];
                     if (treeDataset.isValid() && _settingsAction.getGeneTableView() && selectedRow >= 0)
@@ -322,8 +367,10 @@ void XSCGeneDetectPlugin::init()
                     _settingsAction.getCreateRowMultiSelectTree().setDisabled(true);
                 }
                 QStringList firstColumnValues;
-                for (int row : selectedRows) {
-                    firstColumnValues << _settingsAction.getGeneTableView()->model()->index(row, 0).data().toString();
+                if (auto* tableModel = _settingsAction.getGeneTableView()->model()) {
+                    for (int row : selectedRows) {
+                        firstColumnValues << tableModel->index(row, 0).data().toString();
+                    }
                 }
                 QString firstColumnValue = firstColumnValues.join("*%$@*@$%*");
                 //_settingsAction.getGeneNamesConnection().setString(firstColumnValue);
@@ -433,7 +480,7 @@ void XSCGeneDetectPlugin::init()
                                     {
                                         samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
                                             QString clusterDatasetId = _settingsAction.getSpeciesNamesDataset().getCurrentDataset().getDatasetId();
-                                            return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId,true, "GlobalPointIndices");
+                                            return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                             });
                                     }
 
@@ -454,7 +501,7 @@ void XSCGeneDetectPlugin::init()
 
 
 
-            if ( _settingsAction.getSelectedPointsTSNEDatasetForGeneTable().isValid())
+            if (_settingsAction.getSelectedPointsTSNEDatasetForGeneTable().isValid())
             {
 
                 {
@@ -484,7 +531,7 @@ void XSCGeneDetectPlugin::init()
 
     const auto updateSpeciesExplorerInMap = [this]() -> void
         {
-          
+
             geneExplorer();
             _settingsAction.enableDisableButtonsAutomatically();
             _settingsAction.clearTableSelection(_settingsAction.getSelectionDetailsTable());
@@ -512,7 +559,7 @@ void XSCGeneDetectPlugin::init()
                             //_settingsAction.getRevertRowSelectionChangesToInitial().setDisabled(true);
                             geneExplorer();
                         }
-                        
+
                     }
 
                 }
@@ -521,7 +568,7 @@ void XSCGeneDetectPlugin::init()
             //_settingsAction.getRevertRowSelectionChangesToInitial().setDisabled(true);
             _settingsAction.clearTableSelection(_settingsAction.getSelectionDetailsTable());
             _settingsAction.getClearRightClickedCluster().trigger();
-           
+
         };
 
     connect(&_settingsAction.getRevertRowSelectionChangesToInitial(), &TriggerAction::triggered, this, updateRevertRowSelectionChangesToInitial);
@@ -551,11 +598,11 @@ void XSCGeneDetectPlugin::init()
             _settingsAction.setPauseStatusUpdates(false);
             //_settingsAction.getStatusColorAction().setString("C");
         //}
-        
+
             updatePhylogeneticTree();
 
-            
-        
+
+
         };
 
     connect(&_settingsAction.getListModelAction(), &VariantAction::variantChanged, this, updateTableModel);
@@ -564,20 +611,28 @@ void XSCGeneDetectPlugin::init()
 
         auto shownColumns = _settingsAction.getHiddenShowncolumns().getSelectedOptions();
 
-        QStandardItemModel* model = qobject_cast<QStandardItemModel*>(_settingsAction.getGeneTableView()->model());
+        auto* view = _settingsAction.getGeneTableView();
+        QAbstractItemModel* viewModel = view ? view->model() : nullptr;
+
+        // modifyListData() installs a QSortFilterProxyModel, so look through it to the item model
+        QAbstractItemModel* sourceModel = viewModel;
+        if (auto* proxy = qobject_cast<QSortFilterProxyModel*>(viewModel)) {
+            sourceModel = proxy->sourceModel();
+        }
+        auto* model = qobject_cast<QStandardItemModel*>(sourceModel);
 
         if (model) {
             for (int i = 0; i < model->columnCount(); i++) {
-                if (!shownColumns.contains(model->horizontalHeaderItem(i)->text())) {
-                    _settingsAction.getGeneTableView()->hideColumn(i);
+                auto* headerItem = model->horizontalHeaderItem(i);
+                if (!headerItem || !shownColumns.contains(headerItem->text())) {
+                    view->hideColumn(i);
                 }
                 else
                 {
-                    _settingsAction.getGeneTableView()->showColumn(i);
-
+                    view->showColumn(i);
                 }
             }
-            emit model->layoutChanged();
+            fitGeneTableWidth(view);
         }
         };
     connect(&_settingsAction.getHiddenShowncolumns(), &OptionsAction::selectedOptionsChanged, this, updateHideShowColumns);
@@ -606,9 +661,9 @@ void XSCGeneDetectPlugin::init()
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                     if (plugin->getGuiName() == "Scatterplot Embedding View") {
-                        
+
                         /////////
-                        
+
                         auto colormapScatterplot = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("Settings/Coloring/1D Color map"));;
                         if (colormapScatterplot)
                         {
@@ -619,7 +674,7 @@ void XSCGeneDetectPlugin::init()
                                 {
                                     if (legendPlugin->getGuiName() == "Legend View")
                                     {
-                                        auto colormapLegend = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Color map"));;
+                                        auto colormapLegend = dynamic_cast<ColorMap1DAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Color map"));
                                         if (colormapLegend)
                                         {
                                             //TODO
@@ -627,15 +682,15 @@ void XSCGeneDetectPlugin::init()
                                             //colormapScatterplot->setConnectionPermissionsToAll();
                                             //colormapLegend->setConnectionPermissionsToAll();
                                            // mv::actions().connectPrivateActions(colormapScatterplot, colormapLegend,"EvoViewer:ScatterplotColorMap");
-                                            
+
                                            //colormapLegend->connectToPublicActionByName("EvoViewer:ScatterplotColorMap");
                                         }
                                     }
                                 }
                             }
                         }
-                        
-                        
+
+
                         ///////
                         pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
                         if (pointDatasetPickerAction) {
@@ -709,13 +764,13 @@ void XSCGeneDetectPlugin::init()
 
         };
 
-    connect(&mv::projects(), &AbstractProjectManager::projectOpened , this, triggerInit);
+    connect(&mv::projects(), &AbstractProjectManager::projectOpened, this, triggerInit);
 
-    
+
 
     //change height of headers
 
-    
+
 
     //make long strings in the cells visible and not ...shortened
     _settingsAction.getGeneTableView()->setTextElideMode(Qt::ElideNone);
@@ -853,7 +908,7 @@ void XSCGeneDetectPlugin::init()
     //tsneOptionsGroup->addAction(&_settingsAction.getPerformGeneTableTsneKnn());
     //tsneOptionsGroup->addAction(&_settingsAction.getPerformGeneTableTsneDistance());
     //tsneOptionsGroup->addAction(&_settingsAction.getPerformGeneTableTsneTrigger());
-    
+
 
     auto mainOptionsGroupLayout = new QVBoxLayout();
     auto mainOptionsGroup1 = new HorizontalGroupAction(this, "MainGroup1");
@@ -861,18 +916,18 @@ void XSCGeneDetectPlugin::init()
     mainOptionsGroup1->setIcon(mv::util::StyledIcon("database"));
     mainOptionsGroup2->setIcon(mv::util::StyledIcon("play"));
 
- 
+
     mainOptionsGroup1->addAction(&_settingsAction.getStartComputationTriggerAction());
     mainOptionsGroup1->addAction(&_settingsAction.getTopNGenesFilter());
     mainOptionsGroup1->addAction(&_settingsAction.getTypeofTopNGenes());
-    
-    
-    
+
+
+
     mainOptionsGroup2->addAction(&_settingsAction.getRemoveRowSelection());
     mainOptionsGroup2->addAction(&_settingsAction.getSpeciesExplorerInMapTrigger());
     mainOptionsGroup2->addAction(&_settingsAction.getRevertRowSelectionChangesToInitial());
-    mainOptionsGroup2->addAction(&_settingsAction.getToggleScatterplotSelection()); 
-    
+    mainOptionsGroup2->addAction(&_settingsAction.getToggleScatterplotSelection());
+
 
     auto group1Widget = mainOptionsGroup1->createWidget(&getWidget());
     group1Widget->setMaximumWidth(450);
@@ -887,7 +942,7 @@ void XSCGeneDetectPlugin::init()
     auto searchBoxWidget = _settingsAction.getSearchBox();
     searchBoxWidget->setMaximumWidth(600);
 
-    
+
 
     auto startsANDSearchLayout = new QVBoxLayout();
     startsANDSearchLayout->addWidget(statusBarWiddget);
@@ -907,7 +962,7 @@ void XSCGeneDetectPlugin::init()
     auto tsneWidget = tsneOptionsGroup->createCollapsedWidget(&getWidget());
     tsneWidget->setMaximumHeight(22);
     linkerandtsneLayout->addWidget(tsneWidget);
-    
+
     mainOptionsLayout->addLayout(linkerandtsneLayout);
 
     auto downloadOptionsGroup = new VerticalGroupAction(this, "Save table as CSV");
@@ -930,30 +985,16 @@ void XSCGeneDetectPlugin::init()
     fullSettingsLayout->addLayout(mainOptionsLayout);
     mainLayout->addLayout(fullSettingsLayout);
 
-    connect(_settingsAction.getGeneTableView(), &QTableView::entered, [this](const QModelIndex& index) {
-        if (index.isValid()) {
-            //QString text = index.model()->data(index).toString();
-            //QToolTip::showText(QCursor::pos(), text, _settingsAction.getGeneTableView());
-            //alternative to above because of linux errors
-            QAbstractItemModel* model = _settingsAction.getGeneTableView()->model();
-            for (int row = 0; row < model->rowCount(); ++row) {
-                for (int column = 0; column < model->columnCount(); ++column) {
-                    QModelIndex index = model->index(row, column);
-                    QString text = model->data(index).toString();
-                    model->setData(index, text, Qt::ToolTipRole);
-                }
-            }
-
-        }
-        });
-
-
+    // (Tooltips are already set per hovered cell by the handler registered above. The previous handler
+    //  here rewrote the ToolTipRole of EVERY cell in the model on every mouse-enter, which is O(rows x cols)
+    //  per hover and fired dataChanged for the whole table.)
 
     QFrame* verticalLine = new QFrame();
     verticalLine->setFrameShape(QFrame::VLine);
     verticalLine->setFrameShadow(QFrame::Sunken);
     verticalLine->setLineWidth(1);
 
+    // width is fitted to the visible columns in fitGeneTableWidth() once a model is available
     _settingsAction.getGeneTableView()->setMaximumWidth(165);
     _settingsAction.getTableSplitter()->addWidget(_settingsAction.getGeneTableView());
     _settingsAction.getTableSplitter()->addWidget(verticalLine);
@@ -1133,7 +1174,7 @@ void XSCGeneDetectPlugin::geneExplorer()
                             {
                                 samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
                                     QString clusterDatasetId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
-                                    return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId,true, "GlobalPointIndices");
+                                    return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                     });
                             }
                         }
@@ -1336,41 +1377,41 @@ void XSCGeneDetectPlugin::geneExplorer(QString selectedSpecies)
 }
 
 void XSCGeneDetectPlugin::adjustTableWidths(const QString& value) {
-   /*
-    // Assuming _settingsAction.getHorizontalLayout() returns your QHBoxLayout
-    QHBoxLayout* layout = _settingsAction.getTableSplitter();
-    if (!layout) return;
+    /*
+     // Assuming _settingsAction.getHorizontalLayout() returns your QHBoxLayout
+     QHBoxLayout* layout = _settingsAction.getTableSplitter();
+     if (!layout) return;
 
-    QWidget* parentWidget = layout->parentWidget();
-    if (!parentWidget) return;
+     QWidget* parentWidget = layout->parentWidget();
+     if (!parentWidget) return;
 
-    int totalWidth = parentWidget->width();
+     int totalWidth = parentWidget->width();
 
-    double tableViewRatio = 1;
-    double selectionDetailsTableRatio = 2;
+     double tableViewRatio = 1;
+     double selectionDetailsTableRatio = 2;
 
-    if (value == "small") {
-        tableViewRatio = 1.2;
-        selectionDetailsTableRatio = 1.2;
-    }
+     if (value == "small") {
+         tableViewRatio = 1.2;
+         selectionDetailsTableRatio = 1.2;
+     }
 
-    int tableViewWidth = static_cast<int>(totalWidth * tableViewRatio / (tableViewRatio + selectionDetailsTableRatio));
-    int selectionDetailsTableWidth = totalWidth - tableViewWidth;
+     int tableViewWidth = static_cast<int>(totalWidth * tableViewRatio / (tableViewRatio + selectionDetailsTableRatio));
+     int selectionDetailsTableWidth = totalWidth - tableViewWidth;
 
-    // Assuming the first two widgets in the layout are the ones we want to adjust
-    if (layout->count() >= 2) {
-        QWidget* tableViewWidget = layout->itemAt(0)->widget();
-        QWidget* selectionDetailsTableWidget = layout->itemAt(1)->widget();
+     // Assuming the first two widgets in the layout are the ones we want to adjust
+     if (layout->count() >= 2) {
+         QWidget* tableViewWidget = layout->itemAt(0)->widget();
+         QWidget* selectionDetailsTableWidget = layout->itemAt(1)->widget();
 
-        if (tableViewWidget && selectionDetailsTableWidget) {
-            tableViewWidget->setMinimumWidth(tableViewWidth);
-            tableViewWidget->setMaximumWidth(tableViewWidth);
+         if (tableViewWidget && selectionDetailsTableWidget) {
+             tableViewWidget->setMinimumWidth(tableViewWidth);
+             tableViewWidget->setMaximumWidth(tableViewWidth);
 
-            selectionDetailsTableWidget->setMinimumWidth(selectionDetailsTableWidth);
-            selectionDetailsTableWidget->setMaximumWidth(selectionDetailsTableWidth);
-        }
-    }
-    */
+             selectionDetailsTableWidget->setMinimumWidth(selectionDetailsTableWidth);
+             selectionDetailsTableWidget->setMaximumWidth(selectionDetailsTableWidth);
+         }
+     }
+     */
 }
 
 
@@ -1389,10 +1430,69 @@ QColor getColorFromValue(int value, int min, int max) {
 
 
 
+// Draws a centred bar (blue = positive, orange = negative) plus the value for
+// the Trait Correlation column. Expected value range is [-1, 1].
+class TraitCorrelationBarDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        opt.text.clear();
+        opt.features &= ~QStyleOptionViewItem::HasDecoration;
+
+        // background / selection
+        const QWidget* widget = option.widget;
+        QStyle* style = widget ? widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, widget);
+
+        bool ok = false;
+        const double value = index.data(Qt::UserRole).toDouble(&ok);
+        if (!ok)
+            return;
+
+        const int textWidth = 44;
+        QRect barArea = option.rect.adjusted(4, 4, -textWidth - 6, -4);
+        QRect textArea = option.rect.adjusted(option.rect.width() - textWidth - 4, 0, -4, 0);
+
+        const int middle = barArea.center().x();
+        const double clamped = std::max(-1.0, std::min(1.0, value));
+        const int halfWidth = barArea.width() / 2;
+        const int length = static_cast<int>(std::abs(clamped) * halfWidth);
+
+        painter->save();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(clamped >= 0 ? QColor("#00A2ED") : QColor("#ff5d12"));
+        if (clamped >= 0)
+            painter->drawRect(middle, barArea.top(), length, barArea.height());
+        else
+            painter->drawRect(middle - length, barArea.top(), length, barArea.height());
+
+        // zero axis
+        painter->setPen(QPen(option.palette.color(QPalette::Mid), 1));
+        painter->drawLine(middle, option.rect.top() + 2, middle, option.rect.bottom() - 2);
+
+        // value text
+        painter->setPen(option.state & QStyle::State_Selected ? option.palette.color(QPalette::HighlightedText) : option.palette.color(QPalette::Text));
+        painter->drawText(textArea, Qt::AlignRight | Qt::AlignVCenter, QString::number(value, 'f', 2));
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.setWidth(std::max(size.width(), 150));
+        return size;
+    }
+};
+
 void XSCGeneDetectPlugin::modifyListData()
 {
     try {
-    //qDebug() << "It's here";
+        //qDebug() << "It's here";
         auto variant = _settingsAction.getListModelAction().getVariant();
         QStandardItemModel* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
 
@@ -1417,43 +1517,67 @@ void XSCGeneDetectPlugin::modifyListData()
         proxyModel->setSourceModel(model);
         proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
         proxyModel->setFilterKeyColumn(0);
+        // Remember the previous proxy and item model so they can be released once the view uses the new ones.
+        // (Both were previously leaked on every recomputation.)
+        QAbstractItemModel* previousViewModel = _settingsAction.getGeneTableView()->model();
+        QAbstractItemModel* previousSourceModel = nullptr;
+        if (auto* previousProxy = qobject_cast<QSortFilterProxyModel*>(previousViewModel)) {
+            previousSourceModel = previousProxy->sourceModel();
+        }
         _settingsAction.getGeneTableView()->setModel(proxyModel);
+        if (qobject_cast<QSortFilterProxyModel*>(previousViewModel) && previousViewModel != proxyModel) {
+            previousViewModel->deleteLater();
+        }
+        if (previousSourceModel && previousSourceModel != model && qobject_cast<QStandardItemModel*>(previousSourceModel)) {
+            previousSourceModel->deleteLater();
+        }
         // This method runs on every recomputation, so we clear earlier hooks
         // before wiring search and selection behavior again.
         disconnect(_settingsAction.getSearchBox(), nullptr, this, nullptr);
         connect(_settingsAction.getSearchBox(), &CustomLineEdit::textboxSelectedForTyping, this, [this, proxyModel, model]() {
-            makeAllRowsVisible(_settingsAction.getGeneTableView(),proxyModel);
+            makeAllRowsVisible(_settingsAction.getGeneTableView(), proxyModel);
             });
 
         connect(_settingsAction.getSearchBox(), &CustomLineEdit::textboxDeselectedNotTypingAnymore, this, [this, proxyModel, model]() {
             proxyModel->setFilterRegularExpression(QRegularExpression());
-            updateRowVisibility(_settingsAction.getUniqueReturnGeneList(), _settingsAction.getGeneTableView(),proxyModel);
+            updateRowVisibility(_settingsAction.getUniqueReturnGeneList(), _settingsAction.getGeneTableView(), proxyModel);
             });
 
-        connect(_settingsAction.getSearchBox(), &CustomLineEdit::textChanged, this, [this, proxyModel,model](const QString& text) {
-            QTimer::singleShot(300, this, [this, proxyModel, text,model]() {
-                if (!text.isEmpty()) {
-                    //
-                    // proxyModel->setFilterWildcard("*" + text + "*");
-
-                    QRegularExpression regExp(text, QRegularExpression::CaseInsensitiveOption);
-                    proxyModel->setFilterRegularExpression(regExp);
-
+        connect(_settingsAction.getSearchBox(), &CustomLineEdit::textChanged, this, [this, proxyModel](const QString& text) {
+            // The proxy is replaced (and deleted) on every recomputation, so the delayed call must not
+            // touch a stale pointer if a new model arrives within the 300 ms debounce window.
+            QPointer<QSortFilterProxyModel> proxyGuard(proxyModel);
+            QTimer::singleShot(300, this, [proxyGuard, text]() {
+                if (!proxyGuard) {
+                    return;
                 }
-
+                if (!text.isEmpty()) {
+                    QRegularExpression regExp(text, QRegularExpression::CaseInsensitiveOption);
+                    if (regExp.isValid()) {
+                        proxyGuard->setFilterRegularExpression(regExp);
+                    }
+                }
+                else {
+                    // text was erased while the box still has focus: drop the previous filter
+                    proxyGuard->setFilterRegularExpression(QRegularExpression());
+                }
                 });
             });
 
 
         _settingsAction.getSearchBox()->setText("");
 
-        updateRowVisibility(_settingsAction.getUniqueReturnGeneList(), _settingsAction.getGeneTableView(),proxyModel);
+        updateRowVisibility(_settingsAction.getUniqueReturnGeneList(), _settingsAction.getGeneTableView(), proxyModel);
 
         // Hide columns not in the shown columns list
         auto shownColumns = _settingsAction.getHiddenShowncolumns().getSelectedOptions();
         for (int i = 0; i < _settingsAction.getGeneTableView()->model()->columnCount(); i++) {
-            if (!shownColumns.contains(model->horizontalHeaderItem(i)->text())) {
+            auto* headerItem = model->horizontalHeaderItem(i);
+            if (!headerItem || !shownColumns.contains(headerItem->text())) {
                 _settingsAction.getGeneTableView()->hideColumn(i);
+            }
+            else {
+                _settingsAction.getGeneTableView()->showColumn(i); // the view may still have it hidden from a previous model
             }
         }
 
@@ -1463,219 +1587,230 @@ void XSCGeneDetectPlugin::modifyListData()
         _settingsAction.getGeneTableView()->setColumnWidth(1, 80);
         _settingsAction.getGeneTableView()->setColumnWidth(2, 220);
         _settingsAction.getGeneTableView()->setColumnWidth(3, 420);
+        QTableView* geneTableView = _settingsAction.getGeneTableView();
+
+        if (!dynamic_cast<TraitCorrelationBarDelegate*>(
+            geneTableView->itemDelegateForColumn(4))) {
+            geneTableView->setItemDelegateForColumn(
+                4, new TraitCorrelationBarDelegate(geneTableView));
+        }
+        _settingsAction.getGeneTableView()->setColumnWidth(4, 160);
+        fitGeneTableWidth(_settingsAction.getGeneTableView());
         _settingsAction.getGeneTableView()->update();
 
 
         //disconnect(_settingsAction.getGeneTableView()->selectionModel(), &QItemSelectionModel::currentChanged, this, nullptr);
 
-    disconnect(_settingsAction.getGeneTableView()->selectionModel(), nullptr, this, nullptr);
-    connect(_settingsAction.getGeneTableView()->selectionModel(), &QItemSelectionModel::currentChanged, [this](const QModelIndex& current, const QModelIndex& previous) {
-        if (!current.isValid()) return;
+        disconnect(_settingsAction.getGeneTableView()->selectionModel(), nullptr, this, nullptr);
+        connect(_settingsAction.getGeneTableView()->selectionModel(), &QItemSelectionModel::currentChanged, [this](const QModelIndex& current, const QModelIndex& previous) {
+            if (!current.isValid()) return;
 
-        QString gene = current.siblingAtColumn(0).data().toString();
-        _settingsAction.getSelectedGeneAction().setString(gene);
-        _settingsAction.getSelectedRowIndexAction().setString(QString::number(current.row()));
-        _settingsAction.getRemoveRowSelection().setEnabled(true);
-        //_settingsAction.enableDisableButtonsAutomatically();
-        
+            QString gene = current.siblingAtColumn(0).data().toString();
+            _settingsAction.getSelectedGeneAction().setString(gene);
+            _settingsAction.getSelectedRowIndexAction().setString(QString::number(current.row()));
+            _settingsAction.getRemoveRowSelection().setEnabled(true);
+            //_settingsAction.enableDisableButtonsAutomatically();
 
-        std::map<QString, SpeciesDetailsStats> speciesExpressionMap;
-        QStringList finalsettingSpeciesNamesArray;
-        QString finalSpeciesNameString;
-        const auto* model = current.model();
-        const int columnCount = model->columnCount();
-        const auto initColumnNamesSize = _settingsAction.getInitColumnNames().size(); 
-        for (int i = 0; i < columnCount; ++i) {
-            const QString columnName = model->headerData(i, Qt::Horizontal).toString();
-            const auto data = current.siblingAtColumn(i).data();
 
-            if (columnName == "Gene Appearance Species Names") {
-                finalsettingSpeciesNamesArray = data.toString().split(";");
-                finalSpeciesNameString = finalsettingSpeciesNamesArray.join(" @%$,$%@ ");
-            }
-            else if (columnName == "Statistics") {
+            std::map<QString, SpeciesDetailsStats> speciesExpressionMap;
+            QStringList finalsettingSpeciesNamesArray;
+            QString finalSpeciesNameString;
+            const auto* model = current.model();
+            const int columnCount = model->columnCount();
+            const auto initColumnNamesSize = _settingsAction.getInitColumnNames().size();
+            for (int i = 0; i < columnCount; ++i) {
+                const QString columnName = model->headerData(i, Qt::Horizontal).toString();
+                const auto data = current.siblingAtColumn(i).data();
 
-                if (!finalsettingSpeciesNamesArray.isEmpty()) {
-                    std::map<QString, SpeciesDetailsStats> statisticsValues = convertToStatisticsMap(data.toString());
-                    speciesExpressionMap = statisticsValues;
-                    selectedCellCountStatusBarRemove();
-                    selectedCellStatisticsStatusBarAdd(statisticsValues, finalsettingSpeciesNamesArray);
+                if (columnName == "Gene Appearance Species Names") {
+                    finalsettingSpeciesNamesArray = data.toString().split(";");
+                    finalSpeciesNameString = finalsettingSpeciesNamesArray.join(" @%$,$%@ ");
                 }
-                else {
-    
-                    qDebug() << "Warning: Gene Appearance Species Names must be processed before Statistics.";
-                }
-            }
-        }
+                else if (columnName == "Statistics") {
 
+                    if (!finalsettingSpeciesNamesArray.isEmpty()) {
+                        std::map<QString, SpeciesDetailsStats> statisticsValues = convertToStatisticsMap(data.toString());
+                        speciesExpressionMap = statisticsValues;
+                        selectedCellCountStatusBarRemove();
+                        selectedCellStatisticsStatusBarAdd(statisticsValues, finalsettingSpeciesNamesArray);
+                    }
+                    else {
 
-
-        std::vector<std::seed_seq::result_type> selectedSpeciesIndices;
-        auto speciesDataset = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
-        auto umapDataset = _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset();
-        auto mainPointsDataset = _settingsAction.getMainPointsDataset().getCurrentDataset();
-        std::vector<std::seed_seq::result_type> filtSelectInndx;
-
-
-        if (!speciesDataset.isValid() || !umapDataset.isValid() || !mainPointsDataset.isValid() || !_settingsAction.getFilteredUMAPDatasetPoints().isValid() || !_settingsAction.getFilteredUMAPDatasetColors().isValid() || !_settingsAction.getFilteredUMAPDatasetClusters().isValid())
-        {
-            qDebug() << "One of the datasets is not valid";
-            return;
-        }
-
-
-        {
-            auto speciesClusterDataset = mv::data().getDataset<Clusters>(speciesDataset.getDatasetId());
-            auto umapPointsDataset = mv::data().getDataset<Points>(umapDataset.getDatasetId());
-            auto fullMainPointsDataset = mv::data().getDataset<Points>(mainPointsDataset.getDatasetId());
-            std::unordered_set<QString> speciesNamesSet(finalsettingSpeciesNamesArray.begin(), finalsettingSpeciesNamesArray.end());
-            std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
-            for (const auto& species : speciesClusterDataset->getClusters()) {
-                if (speciesNamesSet.find(species.getName()) != speciesNamesSet.end()) {
-                    const auto& indices = species.getIndices();
-
-                    selectedSpeciesIndices.insert(selectedSpeciesIndices.end(), indices.begin(), indices.end());
-                    selectedFilteredUMAPDatasetColorsMap[species.getName()] = std::make_pair(species.getColor(), std::vector<int>(indices.begin(), indices.end()));
+                        qDebug() << "Warning: Gene Appearance Species Names must be processed before Statistics.";
+                    }
                 }
             }
 
-            
-            std::vector<std::seed_seq::result_type>& selectedIndicesFromStorage = _settingsAction.getSelectedIndicesFromStorage();
-            std::unordered_set<std::seed_seq::result_type> indicesSet(selectedIndicesFromStorage.begin(), selectedIndicesFromStorage.end());
-            filtSelectInndx.reserve(selectedSpeciesIndices.size());
-            for (int i = 0; i < selectedSpeciesIndices.size(); ++i) {
-                if (indicesSet.find(selectedSpeciesIndices[i]) != indicesSet.end()) {
-                    filtSelectInndx.push_back(i);
-                }
-            }
-            auto dimensionNamesUmap = umapPointsDataset->getDimensionNames();
-            auto numDimensions = umapPointsDataset->getNumDimensions();
-            std::vector<int> geneIndicesSpecies(numDimensions);
-            std::iota(geneIndicesSpecies.begin(), geneIndicesSpecies.end(), 0);
 
 
-            if (selectedSpeciesIndices.size() > 0)
+            std::vector<std::seed_seq::result_type> selectedSpeciesIndices;
+            auto speciesDataset = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
+            auto umapDataset = _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset();
+            auto mainPointsDataset = _settingsAction.getMainPointsDataset().getCurrentDataset();
+            std::vector<std::seed_seq::result_type> filtSelectInndx;
+
+
+            if (!speciesDataset.isValid() || !umapDataset.isValid() || !mainPointsDataset.isValid() || !_settingsAction.getFilteredUMAPDatasetPoints().isValid() || !_settingsAction.getFilteredUMAPDatasetColors().isValid() || !_settingsAction.getFilteredUMAPDatasetClusters().isValid())
             {
-                std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size()* umapPointsDataset->getNumDimensions());
-                umapPointsDataset->populateDataForDimensions(resultContainerSpeciesUMAP, geneIndicesSpecies, selectedSpeciesIndices);
-                auto speciesDataId= _settingsAction.getFilteredUMAPDatasetPoints().getDatasetId();
-                int tempnumPoints = static_cast<int>(selectedSpeciesIndices.size());
-                int tempNumDimensions = static_cast<int>(geneIndicesSpecies.size());
-                _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap);
+                qDebug() << "One of the datasets is not valid";
+                return;
+            }
 
 
+            {
+                auto speciesClusterDataset = mv::data().getDataset<Clusters>(speciesDataset.getDatasetId());
+                auto umapPointsDataset = mv::data().getDataset<Points>(umapDataset.getDatasetId());
+                auto fullMainPointsDataset = mv::data().getDataset<Points>(mainPointsDataset.getDatasetId());
+                std::unordered_set<QString> speciesNamesSet(finalsettingSpeciesNamesArray.begin(), finalsettingSpeciesNamesArray.end());
+                std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
+                for (const auto& species : speciesClusterDataset->getClusters()) {
+                    if (speciesNamesSet.find(species.getName()) != speciesNamesSet.end()) {
+                        const auto& indices = species.getIndices();
 
-                std::vector<float> resultContainerSpeciesColors(selectedSpeciesIndices.size());
-                std::vector<int> selectedGeneIndex;
-
-                auto dimensionNames = fullMainPointsDataset->getDimensionNames();
-                auto it = std::find(dimensionNames.begin(), dimensionNames.end(), gene);
-                if (it != dimensionNames.end()) {
-                    selectedGeneIndex.push_back(std::distance(dimensionNames.begin(), it));
+                        selectedSpeciesIndices.insert(selectedSpeciesIndices.end(), indices.begin(), indices.end());
+                        selectedFilteredUMAPDatasetColorsMap[species.getName()] = std::make_pair(species.getColor(), std::vector<int>(indices.begin(), indices.end()));
+                    }
                 }
 
 
-                fullMainPointsDataset->populateDataForDimensions(resultContainerSpeciesColors, selectedGeneIndex, selectedSpeciesIndices);
-                auto speciesColorDataId = _settingsAction.getFilteredUMAPDatasetColors().getDatasetId();
-                auto speciesClusterDataId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
-                int tempnumPointsColors = static_cast<int>(selectedSpeciesIndices.size());
-                
-                std::vector<QString> columnGeneColors = { gene };
-                int tempNumDimensionsColors = static_cast<int>(columnGeneColors.size());
-                if (_settingsAction.getApplyLogTransformation().isChecked())
+                std::vector<std::seed_seq::result_type>& selectedIndicesFromStorage = _settingsAction.getSelectedIndicesFromStorage();
+                std::unordered_set<std::seed_seq::result_type> indicesSet(selectedIndicesFromStorage.begin(), selectedIndicesFromStorage.end());
+                filtSelectInndx.reserve(selectedSpeciesIndices.size());
+                for (int i = 0; i < selectedSpeciesIndices.size(); ++i) {
+                    if (indicesSet.find(selectedSpeciesIndices[i]) != indicesSet.end()) {
+                        filtSelectInndx.push_back(i);
+                    }
+                }
+                auto dimensionNamesUmap = umapPointsDataset->getDimensionNames();
+                auto numDimensions = umapPointsDataset->getNumDimensions();
+                std::vector<int> geneIndicesSpecies(numDimensions);
+                std::iota(geneIndicesSpecies.begin(), geneIndicesSpecies.end(), 0);
+
+
+                if (selectedSpeciesIndices.size() > 0)
                 {
-                    applyLogTransformation(resultContainerSpeciesColors);
-                }
-                _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors);
-
-                //std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
-                //TODO: populate the selectedFilteredUMAPDatasetColorsMap
-
-
-                _settingsAction.populateClusterData(speciesClusterDataId, selectedFilteredUMAPDatasetColorsMap);
+                    std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size() * umapPointsDataset->getNumDimensions());
+                    umapPointsDataset->populateDataForDimensions(resultContainerSpeciesUMAP, geneIndicesSpecies, selectedSpeciesIndices);
+                    auto speciesDataId = _settingsAction.getFilteredUMAPDatasetPoints().getDatasetId();
+                    int tempnumPoints = static_cast<int>(selectedSpeciesIndices.size());
+                    int tempNumDimensions = static_cast<int>(geneIndicesSpecies.size());
+                    _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap);
 
 
-                auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-                mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-                mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-                mv::gui::ViewPluginSamplerAction* samplerActionAction;
 
-                if (scatterplotViewFactory) {
-                    for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
-                        if (plugin->getGuiName() == "Scatterplot Embedding View") {
-                            //plugin->printChildren();
-                            pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
-                            if (pointDatasetPickerAction) {
-                                pointDatasetPickerAction->setCurrentText("");
+                    std::vector<float> resultContainerSpeciesColors(selectedSpeciesIndices.size());
+                    std::vector<int> selectedGeneIndex;
 
-                                pointDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetPoints());
+                    auto dimensionNames = fullMainPointsDataset->getDimensionNames();
+                    auto it = std::find(dimensionNames.begin(), dimensionNames.end(), gene);
+                    if (it != dimensionNames.end()) {
+                        selectedGeneIndex.push_back(std::distance(dimensionNames.begin(), it));
+                    }
 
-                                colorDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Color"));
-                                if (colorDatasetPickerAction)
-                                {
-                                    colorDatasetPickerAction->setCurrentText("");
-                                    colorDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
-                                    auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
-                                    if (legendViewFactory)
+
+                    fullMainPointsDataset->populateDataForDimensions(resultContainerSpeciesColors, selectedGeneIndex, selectedSpeciesIndices);
+                    auto speciesColorDataId = _settingsAction.getFilteredUMAPDatasetColors().getDatasetId();
+                    auto speciesClusterDataId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
+                    int tempnumPointsColors = static_cast<int>(selectedSpeciesIndices.size());
+
+                    std::vector<QString> columnGeneColors = { gene };
+                    int tempNumDimensionsColors = static_cast<int>(columnGeneColors.size());
+                    if (_settingsAction.getApplyLogTransformation().isChecked())
+                    {
+                        applyLogTransformation(resultContainerSpeciesColors);
+                    }
+                    _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors);
+
+                    //std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
+                    //TODO: populate the selectedFilteredUMAPDatasetColorsMap
+
+
+                    _settingsAction.populateClusterData(speciesClusterDataId, selectedFilteredUMAPDatasetColorsMap);
+
+
+                    auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
+                    mv::gui::DatasetPickerAction* colorDatasetPickerAction;
+                    mv::gui::DatasetPickerAction* pointDatasetPickerAction;
+                    mv::gui::ViewPluginSamplerAction* samplerActionAction;
+
+                    if (scatterplotViewFactory) {
+                        for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
+                            if (plugin->getGuiName() == "Scatterplot Embedding View") {
+                                //plugin->printChildren();
+                                pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
+                                if (pointDatasetPickerAction) {
+                                    pointDatasetPickerAction->setCurrentText("");
+
+                                    pointDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetPoints());
+
+                                    colorDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Color"));
+                                    if (colorDatasetPickerAction)
                                     {
-                                        for (auto legendPlugin : mv::plugins().getPluginsByFactory(legendViewFactory))
+                                        colorDatasetPickerAction->setCurrentText("");
+                                        colorDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                        auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
+                                        if (legendViewFactory)
                                         {
-                                            if (legendPlugin->getGuiName() == "Legend View")
+                                            for (auto legendPlugin : mv::plugins().getPluginsByFactory(legendViewFactory))
                                             {
-                                                //legendPlugin->printChildren();
-                                                auto legendDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster dataset"));
-                                                if (legendDatasetPickerAction)
+                                                if (legendPlugin->getGuiName() == "Legend View")
                                                 {
-                                                    legendDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
-                                                }
-                                                auto chartTitle = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Chart Title"));
-                                                if (chartTitle)
-                                                {
-                                                    chartTitle->setString("Gene expression");
+                                                    //legendPlugin->printChildren();
+                                                    auto legendDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster dataset"));
+                                                    if (legendDatasetPickerAction)
+                                                    {
+                                                        legendDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                                    }
+                                                    auto chartTitle = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Chart Title"));
+                                                    if (chartTitle)
+                                                    {
+                                                        chartTitle->setString("Gene expression");
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                auto focusSelectionAction = dynamic_cast<ToggleAction*>(plugin->findChildByPath("Settings/Plot/Point/Focus selection"));
+                                    auto focusSelectionAction = dynamic_cast<ToggleAction*>(plugin->findChildByPath("Settings/Plot/Point/Focus selection"));
 
-                                if (focusSelectionAction)
-                                {
-                                    focusSelectionAction->setChecked(true);
+                                    if (focusSelectionAction)
+                                    {
+                                        focusSelectionAction->setChecked(true);
 
-                                }
+                                    }
 
-                                auto opacityAction = dynamic_cast<DecimalAction*>(plugin->findChildByPath("Settings/Plot/Point/Point opacity/Point opacity"));
-                                if (opacityAction)
-                                {
-                                    opacityAction->setValue(20.0);
-                                }
-                                
-                                samplerActionAction = plugin->findChildByPath<mv::gui::ViewPluginSamplerAction>("Sampler");
+                                    auto opacityAction = dynamic_cast<DecimalAction*>(plugin->findChildByPath("Settings/Plot/Point/Point opacity/Point opacity"));
+                                    if (opacityAction)
+                                    {
+                                        opacityAction->setValue(20.0);
+                                    }
 
-                                if (samplerActionAction)
-                                {
-                                    samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                        QString clusterDatasetId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
-                                        return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId,true, "GlobalPointIndices");
-                                        });
+                                    samplerActionAction = plugin->findChildByPath<mv::gui::ViewPluginSamplerAction>("Sampler");
+
+                                    if (samplerActionAction)
+                                    {
+                                        samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                            QString clusterDatasetId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
+                                            return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                            });
+                                    }
                                 }
                             }
                         }
                     }
+
+
+
+                    _settingsAction.getFilteredUMAPDatasetPoints()->setSelectionIndices(filtSelectInndx);
+                    mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getFilteredUMAPDatasetPoints());
+
+
                 }
 
-                
-
-                _settingsAction.getFilteredUMAPDatasetPoints()->setSelectionIndices(filtSelectInndx);
-                mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getFilteredUMAPDatasetPoints());
-
 
             }
 
 
-        }
 
 
 
@@ -1683,132 +1818,130 @@ void XSCGeneDetectPlugin::modifyListData()
 
 
 
-
-
-        auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
-        if (referenceTreeDataset.isValid()) {
-            auto referenceTree = mv::data().getDataset<XSCTree>(referenceTreeDataset.getDatasetId());
-            if (referenceTree.isValid()) {
-                QJsonObject speciesDataJson = referenceTree->getTreeData();
-                updateSpeciesData(speciesDataJson, speciesExpressionMap);
-                referenceTree->setTreeData(speciesDataJson);
-                events().notifyDatasetDataChanged(referenceTree);
-            }
-        }
-
-        std::vector<std::seed_seq::result_type> selectedPoints;
-        auto speciesColorClusterDataset = _settingsAction.getTsneDatasetSpeciesColors();
-        auto tsneDataset = _settingsAction.getSelectedPointsTSNEDataset();
-        if (speciesColorClusterDataset.isValid() && tsneDataset.isValid()) {
-            for (const auto& species : speciesColorClusterDataset->getClusters()) {
-                if (finalsettingSpeciesNamesArray.contains(species.getName())) {
-                    const auto& indices = species.getIndices();
-                    selectedPoints.insert(selectedPoints.end(), indices.begin(), indices.end());
+            auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
+            if (referenceTreeDataset.isValid()) {
+                auto referenceTree = mv::data().getDataset<XSCTree>(referenceTreeDataset.getDatasetId());
+                if (referenceTree.isValid()) {
+                    QJsonObject speciesDataJson = referenceTree->getTreeData();
+                    updateSpeciesData(speciesDataJson, speciesExpressionMap);
+                    referenceTree->setTreeData(speciesDataJson);
+                    events().notifyDatasetDataChanged(referenceTree);
                 }
             }
-            //below two lines causing problems TODO: Test
-            //tsneDataset->setSelectionIndices(selectedPoints);
-            //mv::events().notifyDatasetDataSelectionChanged(tsneDataset);
-        }
 
-        if (_settingsAction.getScatterplotReembedColorOption().getCurrentText() == "Expression"&& !_settingsAction.getPerformGeneTableTsneAction().isChecked()) {
-            
-            
-            
-            auto expressionColorPointDataset = _settingsAction.getTsneDatasetExpressionColors();
-            
-            auto selectedPointsMain = _settingsAction.getSelectedPointsDataset();
-
-            if (expressionColorPointDataset.isValid() && selectedPointsMain.isValid()) {
-
-                const int rowSize = expressionColorPointDataset->getNumPoints();
-
-                if (rowSize == selectedPointsMain->getNumPoints())
-                {
-                    std::vector<float> resultContainerColorPoints(rowSize, -1.0);
-
-                    QString datasetIdEmb = expressionColorPointDataset->getId();
-
-                    std::vector<int> indexOfGene;
-                    auto dimsValsTemp = selectedPointsMain->getDimensionNames();
-                    auto it = std::find(dimsValsTemp.begin(), dimsValsTemp.end(), gene);
-                    if (it != dimsValsTemp.end()) {
-                        indexOfGene.push_back(static_cast<int>(it - dimsValsTemp.begin()));
+            std::vector<std::seed_seq::result_type> selectedPoints;
+            auto speciesColorClusterDataset = _settingsAction.getTsneDatasetSpeciesColors();
+            auto tsneDataset = _settingsAction.getSelectedPointsTSNEDataset();
+            if (speciesColorClusterDataset.isValid() && tsneDataset.isValid()) {
+                for (const auto& species : speciesColorClusterDataset->getClusters()) {
+                    if (finalsettingSpeciesNamesArray.contains(species.getName())) {
+                        const auto& indices = species.getIndices();
+                        selectedPoints.insert(selectedPoints.end(), indices.begin(), indices.end());
                     }
+                }
+                //below two lines causing problems TODO: Test
+                //tsneDataset->setSelectionIndices(selectedPoints);
+                //mv::events().notifyDatasetDataSelectionChanged(tsneDataset);
+            }
 
-                    std::vector<int> tempselectIndices(selectedPointsMain->getNumPoints());
-                    std::iota(tempselectIndices.begin(), tempselectIndices.end(), 0);
+            if (_settingsAction.getScatterplotReembedColorOption().getCurrentText() == "Expression" && !_settingsAction.getPerformGeneTableTsneAction().isChecked()) {
 
-                    if (indexOfGene.size() > 0 && tempselectIndices.size() > 0)
+
+
+                auto expressionColorPointDataset = _settingsAction.getTsneDatasetExpressionColors();
+
+                auto selectedPointsMain = _settingsAction.getSelectedPointsDataset();
+
+                if (expressionColorPointDataset.isValid() && selectedPointsMain.isValid()) {
+
+                    const int rowSize = expressionColorPointDataset->getNumPoints();
+
+                    if (rowSize == selectedPointsMain->getNumPoints())
                     {
-                        selectedPointsMain->populateDataForDimensions(resultContainerColorPoints, indexOfGene, tempselectIndices);
+                        std::vector<float> resultContainerColorPoints(rowSize, -1.0);
 
+                        QString datasetIdEmb = expressionColorPointDataset->getId();
 
-
-                        int rowSizeEmbd = rowSize;
-                        int columnSizeEmbd = 1;
-                        std::vector<QString> columnGeneEmbd = { gene };
-                        if (_settingsAction.getApplyLogTransformation().isChecked())
-                        {
-                            applyLogTransformation(resultContainerColorPoints);
+                        std::vector<int> indexOfGene;
+                        auto dimsValsTemp = selectedPointsMain->getDimensionNames();
+                        auto it = std::find(dimsValsTemp.begin(), dimsValsTemp.end(), gene);
+                        if (it != dimsValsTemp.end()) {
+                            indexOfGene.push_back(static_cast<int>(it - dimsValsTemp.begin()));
                         }
-                        //
-                        _settingsAction.populatePointData(datasetIdEmb, resultContainerColorPoints, rowSizeEmbd, columnSizeEmbd, columnGeneEmbd);
+
+                        std::vector<int> tempselectIndices(selectedPointsMain->getNumPoints());
+                        std::iota(tempselectIndices.begin(), tempselectIndices.end(), 0);
+
+                        if (indexOfGene.size() > 0 && tempselectIndices.size() > 0)
+                        {
+                            selectedPointsMain->populateDataForDimensions(resultContainerColorPoints, indexOfGene, tempselectIndices);
+
+
+
+                            int rowSizeEmbd = rowSize;
+                            int columnSizeEmbd = 1;
+                            std::vector<QString> columnGeneEmbd = { gene };
+                            if (_settingsAction.getApplyLogTransformation().isChecked())
+                            {
+                                applyLogTransformation(resultContainerColorPoints);
+                            }
+                            //
+                            _settingsAction.populatePointData(datasetIdEmb, resultContainerColorPoints, rowSizeEmbd, columnSizeEmbd, columnGeneEmbd);
+
+                        }
+                    }
+
+
+
+                }
+            }
+            else
+            {
+                //TODO: Add selected gene point selection to scatterplot
+                unsigned int selectedGeneIndex = -1;
+                if (_settingsAction.getGeneOrder().size() > 0 && _settingsAction.getSelectedPointsTSNEDatasetForGeneTable().isValid())
+                {
+                    auto it = std::find(_settingsAction.getGeneOrder().begin(), _settingsAction.getGeneOrder().end(), gene);
+                    if (it != _settingsAction.getGeneOrder().end()) {
+                        selectedGeneIndex = it - _settingsAction.getGeneOrder().begin();
+                    }
+                    //gene
+                    unsigned int maxIndex = _settingsAction.getSelectedPointsTSNEDatasetForGeneTable()->getNumPoints();
+                    if (selectedGeneIndex < maxIndex)
+                    {
+                        _settingsAction.getSelectedPointsTSNEDatasetForGeneTable()->setSelectionIndices({ selectedGeneIndex });
+                        mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getSelectedPointsTSNEDatasetForGeneTable());
 
                     }
+
                 }
 
 
 
             }
-        }
-        else
-        {
-            //TODO: Add selected gene point selection to scatterplot
-            unsigned int selectedGeneIndex = -1;
-            if (_settingsAction.getGeneOrder().size() > 0 && _settingsAction.getSelectedPointsTSNEDatasetForGeneTable().isValid())
+
+            if (_settingsAction.getSelctedSpeciesVals().getString() == finalSpeciesNameString)
             {
-                auto it = std::find(_settingsAction.getGeneOrder().begin(), _settingsAction.getGeneOrder().end(), gene);
-                if (it != _settingsAction.getGeneOrder().end()) {
-                    selectedGeneIndex = it - _settingsAction.getGeneOrder().begin();
-                }
-                //gene
-                unsigned int maxIndex = _settingsAction.getSelectedPointsTSNEDatasetForGeneTable()->getNumPoints();
-                if (selectedGeneIndex <= maxIndex)
-                {
-                    _settingsAction.getSelectedPointsTSNEDatasetForGeneTable()->setSelectionIndices({ selectedGeneIndex });
-                    mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getSelectedPointsTSNEDatasetForGeneTable());
-
-                }
-
+                _settingsAction.getSelctedSpeciesVals().setString("");
             }
-            
+            _settingsAction.getSelctedSpeciesVals().setString(finalSpeciesNameString);
+
+            });
+
+        emit model->layoutChanged();
 
 
-        }
 
-        if (_settingsAction.getSelctedSpeciesVals().getString() == finalSpeciesNameString)
-        {
-            _settingsAction.getSelctedSpeciesVals().setString("");
-        }
-        _settingsAction.getSelctedSpeciesVals().setString(finalSpeciesNameString);
+        selectedCellStatisticsStatusBarRemove();
+        selectedCellCountStatusBarAdd();
 
-        });
-
-    emit model->layoutChanged();
-
-    
-
-    selectedCellStatisticsStatusBarRemove();
-    selectedCellCountStatusBarAdd();
-
-        }
-        catch (const std::exception& e) {
-            qDebug() << "An exception occurred in modifyListData: " << e.what();
-        }
-        catch (...) {
-            qDebug() << "An unknown exception occurred in modifyListData";
-        }
+    }
+    catch (const std::exception& e) {
+        qDebug() << "An exception occurred in modifyListData: " << e.what();
+    }
+    catch (...) {
+        qDebug() << "An unknown exception occurred in modifyListData";
+    }
 
 
 
@@ -1834,10 +1967,10 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         else if (middleSet.size() == 1)
         {
 
-            
-                headerStringToAdd = *middleSet.begin();
-                singleColumn = false;
-            
+
+            headerStringToAdd = *middleSet.begin();
+            singleColumn = false;
+
 
 
         }
@@ -1848,7 +1981,7 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         }
 
         model->setHorizontalHeaderLabels({ "Species", "Fraction in Neuronal", "Fraction in " + headerStringToAdd , "Count of Selected", "Count of All" });
-  
+
         float minValueTopAbundance = std::numeric_limits<float>::max();
         float maxValueTopAbundance = std::numeric_limits<float>::lowest();
         float minValueMiddleAbundance = std::numeric_limits<float>::max();
@@ -1857,51 +1990,51 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         float maxValueSelectedCellsCount = std::numeric_limits<float>::lowest();
         float minValueTotal = std::numeric_limits<float>::max();
         float maxValueTotal = std::numeric_limits<float>::lowest();
-  
+
 
         for (const auto& [species, details] : _settingsAction.getSelectedSpeciesCellCountMap())
-        { 
-        
-        float topAbundance = (static_cast<float>(details.countAbundanceNumerator) / static_cast<float>(details.abundanceTop)) * 100;
-        float middleAbundance = (static_cast<float>(details.countAbundanceNumerator) / static_cast<float>(details.abundanceMiddle)) * 100;
-        float selectedCellsCount = static_cast<float>(details.selectedCellsCount);
-        float total = static_cast<float>(details.selectedCellsCount) + static_cast<float>(details.nonSelectedCellsCount);
+        {
 
-        if (topAbundance < minValueTopAbundance)
-        {
-            minValueTopAbundance = topAbundance;
-        }
-        if (topAbundance > maxValueTopAbundance)
-        {
-            maxValueTopAbundance = topAbundance;
-        }
+            float topAbundance = (static_cast<float>(details.countAbundanceNumerator) / static_cast<float>(details.abundanceTop)) * 100;
+            float middleAbundance = (static_cast<float>(details.countAbundanceNumerator) / static_cast<float>(details.abundanceMiddle)) * 100;
+            float selectedCellsCount = static_cast<float>(details.selectedCellsCount);
+            float total = static_cast<float>(details.selectedCellsCount) + static_cast<float>(details.nonSelectedCellsCount);
 
-        if (middleAbundance < minValueMiddleAbundance)
-        {
-            minValueMiddleAbundance = middleAbundance;
-        }
-        if (middleAbundance > maxValueMiddleAbundance)
-        {
-            maxValueMiddleAbundance = middleAbundance;
-        }
-        
-        if (selectedCellsCount < minValueSelectedCellsCount)
-        {
-            minValueSelectedCellsCount = selectedCellsCount;
-        }
-        if (selectedCellsCount > maxValueSelectedCellsCount)
-        {
-            maxValueSelectedCellsCount = selectedCellsCount;
-        }
+            if (topAbundance < minValueTopAbundance)
+            {
+                minValueTopAbundance = topAbundance;
+            }
+            if (topAbundance > maxValueTopAbundance)
+            {
+                maxValueTopAbundance = topAbundance;
+            }
 
-        if (total < minValueTotal)
-        {
-            minValueTotal = total;
-        }
-        if (total > maxValueTotal)
-        {
-            maxValueTotal = total;
-        }
+            if (middleAbundance < minValueMiddleAbundance)
+            {
+                minValueMiddleAbundance = middleAbundance;
+            }
+            if (middleAbundance > maxValueMiddleAbundance)
+            {
+                maxValueMiddleAbundance = middleAbundance;
+            }
+
+            if (selectedCellsCount < minValueSelectedCellsCount)
+            {
+                minValueSelectedCellsCount = selectedCellsCount;
+            }
+            if (selectedCellsCount > maxValueSelectedCellsCount)
+            {
+                maxValueSelectedCellsCount = selectedCellsCount;
+            }
+
+            if (total < minValueTotal)
+            {
+                minValueTotal = total;
+            }
+            if (total > maxValueTotal)
+            {
+                maxValueTotal = total;
+            }
 
         }
 
@@ -1934,7 +2067,8 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
             QDir speciesIconsDir(":/speciesicons");
             if (speciesIconsDir.exists()) {
                 //qDebug() << "The path :/speciesicons exists.";
-            } else {
+            }
+            else {
                 qDebug() << "The path :/speciesicons does not exist.";
             }
 
@@ -1951,7 +2085,8 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
                 // Set tooltip to show the display name with the SVG icon
                 QString tooltipHtml = QString("<img src='%1' width='16' height='16'/> %2").arg(iconPath, speciesDisplayName);
                 speciesItem->setData(tooltipHtml, Qt::ToolTipRole);
-            } else {
+            }
+            else {
                 qDebug() << "Path " << iconPath << " not found";
 
                 // Set tooltip to show the display name without the SVG icon
@@ -2078,7 +2213,7 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         _settingsAction.getSelectionDetailsTable()->setSortingEnabled(true);
 
         // Set the model to the table view
-        _settingsAction.getSelectionDetailsTable()->setModel(model);
+        setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), model);
         model->setSortRole(Qt::UserRole);
         // Sort the model by the fourth column (index 3) in descending order
         model->sort(1, Qt::DescendingOrder);
@@ -2254,9 +2389,9 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
 
             }
-            
+
         }
-        
+
 
         // Populate the model with sorted data and statistics
         for (const auto& [species, details] : _settingsAction.getSelectedSpeciesCellCountMap()) {
@@ -2453,7 +2588,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                 item->setData(QVariant(barPixmapSelectedCellsCount), Qt::DecorationRole);
                 rowItems << item;
 
-                
+
 
                 item = new QStandardItem();
                 float meanSelected = it->second.meanSelected;
@@ -2487,7 +2622,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                 painterNonSelectedCellsCount.end();
                 item->setData(QVariant(barPixmapNonSelectedCellsCount), Qt::DecorationRole);
                 rowItems << item;
-                
+
 
                 item = new QStandardItem();
                 float meanNonSelected = it->second.meanNonSelected;
@@ -2521,7 +2656,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                 rowItems << new QStandardItem("N/A");
                 rowItems << new QStandardItem("N/A");
             }
-            
+
             if (selectedSpecies.contains(species)) {
                 for (int i = 0; i < rowItems.size(); ++i) {
                     rowItems[i]->setBackground(QBrush(QColor("#00A2ED")));
@@ -2540,7 +2675,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
             model->appendRow(rowItems);
         }
-        _settingsAction.getSelectionDetailsTable()->setModel(model);
+        setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), model);
         model->setSortRole(Qt::UserRole);
         model->sort(2, _settingsAction.getTypeofTopNGenes().getCurrentText() == "Positive" || _settingsAction.getTypeofTopNGenes().getCurrentText() == "Absolute" ? Qt::AscendingOrder : Qt::DescendingOrder);
 
@@ -2649,12 +2784,12 @@ void XSCGeneDetectPlugin::updatePhylogeneticTree()
 
 void XSCGeneDetectPlugin::selectedCellCountStatusBarRemove()
 {
-    _settingsAction.getSelectionDetailsTable()->setModel(new QStandardItemModel());
+    setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), new QStandardItemModel());
 }
 
 void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove()
 {
-    _settingsAction.getSelectionDetailsTable()->setModel(new QStandardItemModel());
+    setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), new QStandardItemModel());
 }
 void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
     // Check if the "name" key exists in the current node
@@ -2759,7 +2894,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
 
         if (it != speciesExpressionMap.end()) {
             node["mean"] = 0.0;
-            node["differential"] = 0.0; 
+            node["differential"] = 0.0;
             node["rank"] = 0.0;
             node["gene"] = "";
             QString clusterNames = "N/A";
@@ -2778,7 +2913,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
                     }
                     else
                     {
-                        clusterNames= clusterValues.at(0).getName();
+                        clusterNames = clusterValues.at(0).getName();
                     }
 
                 }
@@ -2814,7 +2949,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
             float topAbundance = 0.0;
             if (it->second.abundanceTop != 0)
             {
-                topAbundance =  (static_cast<float>(it->second.countAbundanceNumerator) / static_cast<float>(it->second.abundanceTop)) * 100;
+                topAbundance = (static_cast<float>(it->second.countAbundanceNumerator) / static_cast<float>(it->second.abundanceTop)) * 100;
             }
 
             float middleAbundance = 0.0;
@@ -2824,7 +2959,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
             }
 
             node["abundanceTop"] = std::round(topAbundance * 100.0) / 100.0;
-            node["abundanceMiddle"] =  std::round(middleAbundance * 100.0) / 100.0;
+            node["abundanceMiddle"] = std::round(middleAbundance * 100.0) / 100.0;
         }
         if (it != speciesExpressionMap.end()) {
             node["cellCounts"] = it->second.countSelected;
@@ -2837,7 +2972,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
         QJsonArray children = node["children"].toArray();
         for (int i = 0; i < children.size(); ++i) {
             QJsonObject child = children[i].toObject();
-            updateSpeciesData(child, speciesExpressionMap); // Recursive call
+            updateTreeData(child, speciesExpressionMap); // Recursive call
             children[i] = child; // Update the modified object back into the array
         }
         node["children"] = children; // Update the modified array back into the parent JSON object
@@ -2918,8 +3053,8 @@ void XSCGeneDetectPlugin::fromVariantMap(const QVariantMap& variantMap)
 
     mv::util::variantMapMustContain(variantMap, "CSCGDV:XSC Gene Detect Plugin Settings");
     _settingsAction.fromVariantMap(variantMap["CSCGDV:XSC Gene Detect Plugin Settings"].toMap());
-   // modifyTableData();
-   // _settingsAction.getStartComputationTriggerAction().trigger();
+    // modifyTableData();
+    // _settingsAction.getStartComputationTriggerAction().trigger();
 
 }
 

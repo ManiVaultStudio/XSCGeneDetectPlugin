@@ -40,6 +40,14 @@
 #include <QListView>
 #include <vector>
 #include <set>
+#include <map>
+#include <unordered_map>
+#include <unordered_set>
+#include <random>
+#include <numeric>
+#include <QSet>
+#include <QHBoxLayout>
+#include <QJsonObject>
 #include <QLineEdit>
 #include <QColor>
 #include <QMessageBox>
@@ -108,7 +116,7 @@ protected:
         QLineEdit::focusOutEvent(e);
     }
 
- 
+
 
 
 private slots:
@@ -139,30 +147,30 @@ struct ClusterOrderContainer {
 
 
 struct SpeciesDetailsStats {
-    int rank;
-    int abundanceTop;
-    int abundanceMiddle;
-    int countAbundanceNumerator;
-    float meanSelected;
-    int countSelected;
-    float meanNonSelected;
-    int countNonSelected;
-    
+    int rank = 0;
+    int abundanceTop = 0;
+    int abundanceMiddle = 0;
+    int countAbundanceNumerator = 0;
+    float meanSelected = 0.0f;
+    int countSelected = 0;
+    float meanNonSelected = 0.0f;
+    int countNonSelected = 0;
+
     //float meanAll;
     //int countAll;
 
 };
 
 struct Stats {
-    
-    float meanSelected;
-    int countSelected;
-    float meanNonSelected;
-    int countNonSelected;
+
+    float meanSelected = 0.0f;
+    int countSelected = 0;
+    float meanNonSelected = 0.0f;
+    int countNonSelected = 0;
     QColor color;
-    int abundanceTop;
-    int  abundanceMiddle;
-    int countAbundanceNumerator;
+    int abundanceTop = 0;
+    int  abundanceMiddle = 0;
+    int countAbundanceNumerator = 0;
     //float meanAll;
     //int countAll;
 
@@ -170,27 +178,27 @@ struct Stats {
 
 struct SpeciesColorCountStorageVals {
     QColor color;
-    int selectedCellsCount;
-    int nonSelectedCellsCount;
-    int abundanceTop;
-    int abundanceMiddle;
-    int countAbundanceNumerator;
+    int selectedCellsCount = 0;
+    int nonSelectedCellsCount = 0;
+    int abundanceTop = 0;
+    int abundanceMiddle = 0;
+    int countAbundanceNumerator = 0;
     //int allCellsCount;
 };
 
 struct StatisticsSingle {
-    float meanVal;
-    int countVal;
+    float meanVal = 0.0f;
+    int countVal = 0;
 
 };
 
 struct InitialStatistics {
-    float meanVal;
-    float differentialVal;
-    int abundanceTop;
-    int abundanceMiddle;
-    int countAbundanceNumerator;
-    int rankVal;
+    float meanVal = 0.0f;
+    float differentialVal = 0.0f;
+    int abundanceTop = 0;
+    int abundanceMiddle = 0;
+    int countAbundanceNumerator = 0;
+    int rankVal = 0;
     QString geneName;
 };
 
@@ -231,12 +239,13 @@ protected:
 
 public:
     SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugins);
+    ~SettingsAction() override;
 
 public: // Action getters
 
     VariantAction& getListModelAction() { return _listModel; }
     StringAction& getSelectedGeneAction() { return _selectedGene; }
-    StringAction&  getSelectedRowIndexAction() { return _selectedRowIndex; }
+    StringAction& getSelectedRowIndexAction() { return _selectedRowIndex; }
     DatasetPickerAction& getFilteringEditTreeDatasetAction() { return _filteringEditTreeDataset; }
     OptionSelectionAction& getOptionSelectionAction() { return _optionSelectionAction; }
     TriggerAction& getStartComputationTriggerAction() { return _startComputationTriggerAction; }
@@ -280,9 +289,9 @@ public: // Action getters
     StringAction& getRightClickedCluster() { return _rightClickedCluster; }
     StringAction& getTopSelectedHierarchyStatus() { return _topSelectedHierarchyStatus; }
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
-    StringAction&  getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
+    StringAction& getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
 
-   mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
+    mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
 
     QStringList   getCurrentHierarchyItemsMiddleForTable() { return _currentHierarchyItemsMiddleForTable; }
     //IntegralAction& setPerformGeneTableTsnePerplexity() { return _performGeneTableTsnePerplexity; }
@@ -297,17 +306,17 @@ public: // Action getters
    mv::Dataset<Points>        _tsneDatasetExpressionColors;
     */
 
-   mv::Dataset<Points>& getSelectedPointsTSNEDataset() { return _selectedPointsTSNEDataset; }
-   mv::Dataset<Points>& getSelectedPointsDataset() { return _selectedPointsDataset; }
-   mv::Dataset<Points>& getSelectedPointsEmbeddingDataset() { return _selectedPointsEmbeddingDataset; }
+    mv::Dataset<Points>& getSelectedPointsTSNEDataset() { return _selectedPointsTSNEDataset; }
+    mv::Dataset<Points>& getSelectedPointsDataset() { return _selectedPointsDataset; }
+    mv::Dataset<Points>& getSelectedPointsEmbeddingDataset() { return _selectedPointsEmbeddingDataset; }
 
-   mv::Dataset<Clusters>& getTsneDatasetSpeciesColors() { return _tsneDatasetSpeciesColors; }
-   mv::Dataset<Clusters>& getTsneDatasetClusterColors() { return _tsneDatasetClusterColors; }
-   mv::Dataset<Points>& getTsneDatasetExpressionColors() { return _tsneDatasetExpressionColors; }
+    mv::Dataset<Clusters>& getTsneDatasetSpeciesColors() { return _tsneDatasetSpeciesColors; }
+    mv::Dataset<Clusters>& getTsneDatasetClusterColors() { return _tsneDatasetClusterColors; }
+    mv::Dataset<Points>& getTsneDatasetExpressionColors() { return _tsneDatasetExpressionColors; }
     std::vector<std::seed_seq::result_type>& getSelectedIndicesFromStorage() { return _selectedIndicesFromStorage; }
-   mv::Dataset<Points> & getFilteredUMAPDatasetPoints() { return _filteredUMAPDatasetPoints; }
-   mv::Dataset<Points> & getFilteredUMAPDatasetColors() { return _filteredUMAPDatasetColors; }
-   mv::Dataset<Points> & getFilteredUMAPDatasetClusters() { return _filteredUMAPDatasetClusters; }
+    mv::Dataset<Points>& getFilteredUMAPDatasetPoints() { return _filteredUMAPDatasetPoints; }
+    mv::Dataset<Points>& getFilteredUMAPDatasetColors() { return _filteredUMAPDatasetColors; }
+    mv::Dataset<Points>& getFilteredUMAPDatasetClusters() { return _filteredUMAPDatasetClusters; }
     QStatusBar* getStatusBarActionWidget() const { return _statusBarActionWidget; }
     QMessageBox* getPopupMessageInit() const { return _popupMessageInit; }
     QMessageBox* getPopupMessageTreeCreationCompletion() const { return _popupMessageTreeCreationCompletion; }
@@ -316,21 +325,21 @@ public: // Action getters
     QTableView* getGeneTableView() const { return _geneTableView; }
     CustomLineEdit* getSearchBox() const { return _searchBox; }
     QTableView* getSelectionDetailsTable() const { return _selectionDetailsTable; }
-    std::map<QString, SpeciesColorCountStorageVals> & getSelectedSpeciesCellCountMap() { return _selectedSpeciesCellCountMap; }
+    std::map<QString, SpeciesColorCountStorageVals>& getSelectedSpeciesCellCountMap() { return _selectedSpeciesCellCountMap; }
     QHBoxLayout* getTableSplitter() const { return _splitter; }
     std::vector<QString>& getCustomOrderClustersFromHierarchy() { return _customOrderClustersFromHierarchy; }
     std::unordered_map<QString, std::vector<QString>>& getClusterPositionMap() { return _clusterPositionMap; }
-    std::unordered_map<QString,std::unordered_map<QString, std::unordered_map<QString, QString>>>& getPrecomputedTreesFromTheHierarchy() { return _precomputedTreesFromTheHierarchy; }
+    std::unordered_map<QString, std::unordered_map<QString, std::unordered_map<QString, QString>>>& getPrecomputedTreesFromTheHierarchy() { return _precomputedTreesFromTheHierarchy; }
     bool& getProjectOpened() { return _projectOpened; }
 
     std::map<QString, std::map<QString, Stats>>& getClusterNameToGeneNameToExpressionValue() { return _clusterNameToGeneNameToExpressionValue; }
     std::unordered_map<QString, std::unordered_map<QString, int>>& getClusterSpeciesFrequencyMap() { return _clusterSpeciesFrequencyMap; }
-    
+
     QSet<QString>& getUniqueReturnGeneList() { return _uniqueReturnGeneList; }
     std::vector<QString>& getTotalGeneList() { return _totalGeneList; }
-   mv::Dataset<Points>& getGeneSimilarityPoints() { return _geneSimilarityPoints; }
+    mv::Dataset<Points>& getGeneSimilarityPoints() { return _geneSimilarityPoints; }
     //std::vector<QString>& getGeneSimilarityClusters() { return _geneSimilarityClusters; }
-   mv::Dataset<Clusters>& getGeneSimilarityClusterColoring() { return _geneSimilarityClusterColoring; }
+    mv::Dataset<Clusters>& getGeneSimilarityClusterColoring() { return _geneSimilarityClusterColoring; }
     std::vector<QString>& getGeneOrder() { return _geneOrder; }
     bool& getPauseStatusUpdates() { return _pauseStatusUpdates; }
     bool& setPauseStatusUpdates(bool flag) { return _pauseStatusUpdates = flag; }
@@ -354,7 +363,7 @@ public: // Action getters
     void removeDatasets(int groupId);
     void clearTemporaryDatasetHandles();
     void updateClusterInfoStatusBar();
-    QVariant createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap,const int& n);
+    QVariant createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap, const int& n);
     void findTopNGenesPerCluster();
     QString filterData(QString& target, const QString& filter, const QJsonObject& config);
     QString generateTooltip(const ViewPluginSamplerAction::SampleContext& toolTipContext, const QString& clusterDatasetId, bool showTooltip, QString indicesType);
@@ -367,7 +376,7 @@ public: // Action getters
     void clearTableSelection(QTableView* tableView);
     void updateTraitReverseSearchFeature();
 private:
-    
+
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
     void setModifiedTriggeredData(QVariant geneListTable);
@@ -394,9 +403,9 @@ protected:
     OptionSelectionAction         _optionSelectionAction;
     TriggerAction              _startComputationTriggerAction;
     DatasetPickerAction    _referenceTreeDataset;
-    std::unordered_map<QString, std::unordered_map<QString,std::pair<int,float>>> _clusterGeneMeanExpressionMap;
+    std::unordered_map<QString, std::unordered_map<QString, std::pair<int, float>>> _clusterGeneMeanExpressionMap;
 
-    std::unordered_map<QString,  std::unordered_map<QString, int>> _clusterSpeciesFrequencyMap;
+    std::unordered_map<QString, std::unordered_map<QString, int>> _clusterSpeciesFrequencyMap;
     DatasetPickerAction    _mainPointsDataset;
     DatasetPickerAction    _speciesNamesDataset;
     DatasetPickerAction    _bottomClusterNamesDataset;
@@ -414,46 +423,46 @@ protected:
     StringAction            _selectedSpeciesVals;
     OptionAction                    _typeofTopNGenes;
 
-   mv::Dataset<Points>        _selectedPointsTSNEDataset;
-   mv::Dataset<Points>        _selectedPointsDataset;
-   mv::Dataset<Points>        _selectedPointsEmbeddingDataset;
-   mv::Dataset<Points>        _filteredUMAPDatasetPoints;
-   mv::Dataset<Points>        _filteredUMAPDatasetColors;
-   mv::Dataset<Points>        _filteredUMAPDatasetClusters;
+    mv::Dataset<Points>        _selectedPointsTSNEDataset;
+    mv::Dataset<Points>        _selectedPointsDataset;
+    mv::Dataset<Points>        _selectedPointsEmbeddingDataset;
+    mv::Dataset<Points>        _filteredUMAPDatasetPoints;
+    mv::Dataset<Points>        _filteredUMAPDatasetColors;
+    mv::Dataset<Points>        _filteredUMAPDatasetClusters;
 
-   mv::Dataset<Clusters>        _tsneDatasetSpeciesColors;
-   mv::Dataset<Clusters>        _tsneDatasetClusterColors;  
-   mv::Dataset<Points>        _tsneDatasetExpressionColors;
+    mv::Dataset<Clusters>        _tsneDatasetSpeciesColors;
+    mv::Dataset<Clusters>        _tsneDatasetClusterColors;
+    mv::Dataset<Points>        _tsneDatasetExpressionColors;
 
-   mv::Dataset<Points>             _geneSimilarityPoints;
+    mv::Dataset<Points>             _geneSimilarityPoints;
     //std::vector<QString>        _geneSimilarityClusters;
-   mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
-   std::unordered_map<QString, float> _geneTraitValuesComputed;
+    mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
+    std::unordered_map<QString, float> _geneTraitValuesComputed;
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
     DatasetPickerAction           _scatterplotEmbeddingPointsUMAPOption;
     OptionAction           _scatterplotReembedColorOption;
     StringAction    _statusColorAction;
     std::vector<std::seed_seq::result_type> _selectedIndicesFromStorage;
-    QStatusBar*                     _statusBarActionWidget;
-    QMessageBox* _popupMessageInit;
-    QMessageBox* _popupMessageTreeCreationCompletion;
-    mv::gui::FlowLayout*            _selectedCellClusterInfoStatusBar;
+    QStatusBar* _statusBarActionWidget = nullptr;
+    QMessageBox* _popupMessageInit = nullptr;
+    QMessageBox* _popupMessageTreeCreationCompletion = nullptr;
+    mv::gui::FlowLayout* _selectedCellClusterInfoStatusBar = nullptr;
     //mv::gui::FlowLayout     _clustersLayout;
     QStringList _initColumnNames;
     ToggleAction                  _usePreComputedTSNE;
-    QLabel* _currentCellSelectionClusterInfoLabel;
+    QLabel* _currentCellSelectionClusterInfoLabel = nullptr;
     std::map<QString, SpeciesColorCountStorageVals>       _selectedSpeciesCellCountMap;
     OptionsAction                               _speciesExplorerInMap;
     TriggerAction                               _speciesExplorerInMapTrigger;
-    QTableView* _geneTableView;                /** Table view for the data */
-    QTableView* _selectionDetailsTable;    /** Table view for the selection details */
-    QHBoxLayout* _splitter;
-    CustomLineEdit* _searchBox;
+    QTableView* _geneTableView = nullptr;                /** Table view for the data */
+    QTableView* _selectionDetailsTable = nullptr;    /** Table view for the selection details */
+    QHBoxLayout* _splitter = nullptr;
+    CustomLineEdit* _searchBox = nullptr;
     ToggleAction    _applyLogTransformation;
     ToggleAction    _toggleScatterplotSelection;
     //bool _erroredOutFlag;
-    bool _meanMapComputed;
+    bool _meanMapComputed = false;
     OptionAction                _clusterCountSortingType;
 
     std::vector<QString> _customOrderClustersFromHierarchy;
@@ -466,8 +475,8 @@ protected:
     OptionAction                   _performGeneTableTsneDistance;
     TriggerAction                  _performGeneTableTsneTrigger;
     TriggerAction                 _computeTreesToDisplayFromHierarchy;
-   mv::Dataset<Points>                _selectedPointsTSNEDatasetForGeneTable;
-    bool                           _pauseStatusUpdates=false;
+    mv::Dataset<Points>                _selectedPointsTSNEDatasetForGeneTable;
+    bool                           _pauseStatusUpdates = false;
     QStringList                   _deleteDatasetIds;
     std::vector<QString> _geneOrder;
     StringAction             _clusterOrderHierarchy;
@@ -483,7 +492,7 @@ protected:
     TriggerAction                 _saveSpeciesTable;
     QStringList                   _currentHierarchyItemsMiddleForTable;
     StringAction               _topSelectedHierarchyStatus;
-    bool                      _projectOpened=false;
+    bool                      _projectOpened = false;
     ClickableLabel* _selectedClusterLabel = nullptr;
     QString _selectedClusterName;
 };

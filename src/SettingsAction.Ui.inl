@@ -1,3 +1,12 @@
+SettingsAction::~SettingsAction()
+{
+    // The two message boxes are never added to a layout, so nobody else owns them.
+    delete _popupMessageInit;
+    _popupMessageInit = nullptr;
+    delete _popupMessageTreeCreationCompletion;
+    _popupMessageTreeCreationCompletion = nullptr;
+}
+
 SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     WidgetAction(&XSCGeneDetectPlugin, "XSCGeneDetectPlugin Settings"),
     _XSCGeneDetectPlugin(XSCGeneDetectPlugin),
@@ -82,6 +91,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         "The precomputed tree method has been completed. "
         "Right-click is available in the hierarchy view. "
         "To explore expression values across species for each cluster in the phylogenetic tree, "
+        "right-click a cluster in the hierarchy view."
     );
     _popupMessageTreeCreationCompletion->setInformativeText(
         "Right Click available in the cluster hierarchy view."
@@ -428,9 +438,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
             QApplication::processEvents();
             auto pointsDataset = _mainPointsDataset.getCurrentDataset();
-            pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+            if (pointsDataset.isValid())
+            {
+                pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+            }
             _statusColorAction.setString("C");
-            
+
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
     const auto updateCreateRowMultiSelectTreeTrigger = [this]() -> void {
@@ -625,9 +638,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         if (selectedColorType != "")
         {
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-            mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-            mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-            mv::gui::ViewPluginSamplerAction* samplerActionAction;
+            mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+            mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+            mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                     if (plugin->getGuiName() == "Scatterplot Cell Selection Overview") {
@@ -647,8 +660,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                     if (selectedColorType != "")
                                     {
                                         auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
-                                        DatasetPickerAction* legendDatasetPickerAction;
-                                        StringAction* chartTitle;
+                                        DatasetPickerAction* legendDatasetPickerAction = nullptr;
+                                        StringAction* chartTitle = nullptr;
                                         //ColorAction* selectionColor;
                                         //StringAction* selectionStringDelimiter;
                                         //StringAction* selectionClustersString;
@@ -661,18 +674,18 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                     //legendPlugin->printChildren();
                                                     legendDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster dataset"));
                                                     chartTitle = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Chart Title"));
-                                                
+
                                                     //selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
                                                     //selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
                                                     //selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
                                                 }
                                             }
                                         }
-                                        
-                                         
-                                        
-                                        
-                                        
+
+
+
+
+
                                         if (selectedColorType == "Cluster")
                                         {
                                             if (_bottomClusterNamesDataset.getCurrentDataset().isValid())
@@ -692,12 +705,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     selectionColor->setColor(QColor(53, 126, 199));
                                                 }
-                                                
+
                                                 if (selectionStringDelimiter)
                                                 {
                                                     selectionStringDelimiter->setString(",");
                                                 }
-                                                
+
                                                 if (selectionClustersString)
                                                 {
                                                     selectionClustersString->setString(""); //TODO
@@ -719,22 +732,22 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Species");
                                                 }
-                                               /*
-                                                if (selectionColor)
-                                                {
-                                                    selectionColor->setColor(QColor(53, 126, 199));
-                                                }
-                                               
-                                                if (selectionStringDelimiter)
-                                                {
-                                                    selectionStringDelimiter->setString(",");
-                                                }
-                                                
-                                                if (selectionClustersString)
-                                                {
-                                                    selectionClustersString->setString(""); //TODO
-                                                }
-                                                */
+                                                /*
+                                                 if (selectionColor)
+                                                 {
+                                                     selectionColor->setColor(QColor(53, 126, 199));
+                                                 }
+
+                                                 if (selectionStringDelimiter)
+                                                 {
+                                                     selectionStringDelimiter->setString(",");
+                                                 }
+
+                                                 if (selectionClustersString)
+                                                 {
+                                                     selectionClustersString->setString(""); //TODO
+                                                 }
+                                                 */
                                             }
                                         }
                                         else if (selectedColorType == "Expression")
@@ -1080,13 +1093,13 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     const auto updateToggleScatterplotSelection = [this]() -> void {
 
         auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-        mv::gui::DecimalAction* overlayopacityAction;
-        mv::gui::DecimalAction* overlayscaleAction;
+        mv::gui::DecimalAction* overlayopacityAction = nullptr;
+        mv::gui::DecimalAction* overlayscaleAction = nullptr;
 
         if (scatterplotViewFactory) {
             for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                 if (plugin->getGuiName() == "Scatterplot Embedding View") {
-                    
+
                     overlayopacityAction = dynamic_cast<DecimalAction*>(plugin->findChildByPath("Settings/Selection/Opacity"));
                     if (overlayopacityAction)
                     {
@@ -1175,12 +1188,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
         exportTableViewToCSVForGenes(_geneTableView);
-        
+
 
         };
     connect(&_saveSpeciesTable, &TriggerAction::triggered, this, triggerSaveSpeciesTable);
-    
-    
+
+
     const auto updateComputeTreesToDisplayFromHierarchy = [this]() -> void {
 
         _computeTreesToDisplayFromHierarchy.setDisabled(true);
@@ -1214,7 +1227,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         {
             _statusColorAction.setString("C");
         }
-      
+
         enableActions();
         };
 
@@ -1228,5 +1241,5 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, updateTopGenesSlider);
 
 
-    
+
 }

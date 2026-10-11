@@ -22,7 +22,10 @@
 #include <string>
 #include <chrono>
 #include <cmath> // Include for std::log
-#include <cmath> // Include for std::isnan and std::isinf
+#include <climits>
+#include <random>
+#include <QMutex>
+#include <QMutexLocker>
 #include <limits>
 #include <vector>
 #include <thread>
@@ -216,86 +219,86 @@ int findIndex(const std::vector<std::seed_seq::result_type>& vec, int value) {
 
 namespace {
 
-constexpr int kGeneChunkSize = 256;
+    constexpr int kGeneChunkSize = 256;
 
-std::unordered_set<QString> toStringSet(const QStringList& values) {
-    std::unordered_set<QString> result;
-    result.reserve(values.size());
-    for (const auto& value : values) {
-        result.insert(value);
-    }
-    return result;
-}
-
-template <typename LeftContainer, typename RightContainer>
-std::vector<int> intersectSortedIndicesToInt(const LeftContainer& leftIndices, const RightContainer& rightIndices) {
-    std::vector<int> result;
-    result.reserve(std::min(leftIndices.size(), rightIndices.size()));
-
-    auto leftIt = leftIndices.begin();
-    auto rightIt = rightIndices.begin();
-
-    while (leftIt != leftIndices.end() && rightIt != rightIndices.end()) {
-        const int leftValue = static_cast<int>(*leftIt);
-        const int rightValue = static_cast<int>(*rightIt);
-
-        if (leftValue < rightValue) {
-            ++leftIt;
+    std::unordered_set<QString> toStringSet(const QStringList& values) {
+        std::unordered_set<QString> result;
+        result.reserve(values.size());
+        for (const auto& value : values) {
+            result.insert(value);
         }
-        else if (rightValue < leftValue) {
-            ++rightIt;
-        }
-        else {
-            result.push_back(leftValue);
-            ++leftIt;
-            ++rightIt;
-        }
+        return result;
     }
 
-    return result;
-}
+    template <typename LeftContainer, typename RightContainer>
+    std::vector<int> intersectSortedIndicesToInt(const LeftContainer& leftIndices, const RightContainer& rightIndices) {
+        std::vector<int> result;
+        result.reserve(std::min(leftIndices.size(), rightIndices.size()));
 
-template <typename PointIndexContainer, typename Callback>
-void computeChunkedGeneMeans(const mv::Dataset<Points>& pointDataset, const std::vector<int>& allGeneIndices, const PointIndexContainer& pointIndices, Callback&& callback) {
-    if (!pointDataset.isValid() || allGeneIndices.empty() || pointIndices.empty()) {
-        return;
-    }
+        auto leftIt = leftIndices.begin();
+        auto rightIt = rightIndices.begin();
 
-    // Large selections are faster when we fetch a block of genes once and
-    // aggregate the point-major buffer locally instead of calling into the
-    // dataset backend once per gene.
-    std::vector<int> geneChunkIndices;
-    geneChunkIndices.reserve(std::min<int>(kGeneChunkSize, static_cast<int>(allGeneIndices.size())));
+        while (leftIt != leftIndices.end() && rightIt != rightIndices.end()) {
+            const int leftValue = static_cast<int>(*leftIt);
+            const int rightValue = static_cast<int>(*rightIt);
 
-    std::vector<float> chunkData;
-    std::vector<float> chunkMeans;
-
-    const int pointCount = static_cast<int>(pointIndices.size());
-
-    for (int start = 0; start < static_cast<int>(allGeneIndices.size()); start += kGeneChunkSize) {
-        const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(allGeneIndices.size()) - start);
-
-        geneChunkIndices.assign(allGeneIndices.begin() + start, allGeneIndices.begin() + start + chunkSize);
-        chunkData.assign(static_cast<size_t>(pointCount) * static_cast<size_t>(chunkSize), 0.0f);
-        chunkMeans.assign(chunkSize, 0.0f);
-
-        pointDataset->populateDataForDimensions(chunkData, geneChunkIndices, pointIndices);
-
-        for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
-            const int rowOffset = pointIndex * chunkSize;
-            for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
-                chunkMeans[geneOffset] += chunkData[rowOffset + geneOffset];
+            if (leftValue < rightValue) {
+                ++leftIt;
+            }
+            else if (rightValue < leftValue) {
+                ++rightIt;
+            }
+            else {
+                result.push_back(leftValue);
+                ++leftIt;
+                ++rightIt;
             }
         }
 
-        const float inversePointCount = 1.0f / static_cast<float>(pointCount);
-        for (float& meanValue : chunkMeans) {
-            meanValue *= inversePointCount;
+        return result;
+    }
+
+    template <typename PointIndexContainer, typename Callback>
+    void computeChunkedGeneMeans(const mv::Dataset<Points>& pointDataset, const std::vector<int>& allGeneIndices, const PointIndexContainer& pointIndices, Callback&& callback) {
+        if (!pointDataset.isValid() || allGeneIndices.empty() || pointIndices.empty()) {
+            return;
         }
 
-        callback(start, geneChunkIndices, chunkMeans);
+        // Large selections are faster when we fetch a block of genes once and
+        // aggregate the point-major buffer locally instead of calling into the
+        // dataset backend once per gene.
+        std::vector<int> geneChunkIndices;
+        geneChunkIndices.reserve(std::min<int>(kGeneChunkSize, static_cast<int>(allGeneIndices.size())));
+
+        std::vector<float> chunkData;
+        std::vector<float> chunkMeans;
+
+        const int pointCount = static_cast<int>(pointIndices.size());
+
+        for (int start = 0; start < static_cast<int>(allGeneIndices.size()); start += kGeneChunkSize) {
+            const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(allGeneIndices.size()) - start);
+
+            geneChunkIndices.assign(allGeneIndices.begin() + start, allGeneIndices.begin() + start + chunkSize);
+            chunkData.assign(static_cast<size_t>(pointCount) * static_cast<size_t>(chunkSize), 0.0f);
+            chunkMeans.assign(chunkSize, 0.0f);
+
+            pointDataset->populateDataForDimensions(chunkData, geneChunkIndices, pointIndices);
+
+            for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+                const int rowOffset = pointIndex * chunkSize;
+                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
+                    chunkMeans[geneOffset] += chunkData[rowOffset + geneOffset];
+                }
+            }
+
+            const float inversePointCount = 1.0f / static_cast<float>(pointCount);
+            for (float& meanValue : chunkMeans) {
+                meanValue *= inversePointCount;
+            }
+
+            callback(start, geneChunkIndices, chunkMeans);
+        }
     }
-}
 
 } // namespace
 
