@@ -1221,6 +1221,7 @@ void SettingsAction::updateClusterInfoStatusBar()
                         clusterLabel->setStyleSheet(newSelected);
                         _selectedClusterLabel = clusterLabel;
                         _selectedClusterName = clusterName;
+                        updateTraitReverseSearchFeature();
                     }
                     });
 
@@ -2004,6 +2005,13 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 
 }
 */
+void::SettingsAction::updateTraitReverseSearchFeature()
+{
+
+#pragma message("TODO: write this function")
+
+}
+
 void SettingsAction::findTopNGenesPerCluster() {
 
     int n = _topNGenesFilter.getValue();

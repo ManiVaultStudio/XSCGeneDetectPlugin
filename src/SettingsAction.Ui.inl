@@ -370,6 +370,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
             removeSelectionTableRows(&leafValues);
+            updateTraitReverseSearchFeature();
             enableDisableButtonsAutomatically();
         };
     connect(&_speciesExplorerInMap, &OptionsAction::selectedOptionsChanged, this, updatespeciesExplorerInMap);
@@ -998,7 +999,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_rightClickedCluster, &StringAction::stringChanged, this, updateRightClickedCluster);
     const auto updateReverseSearchTraitSelectionString = [this]() -> void {
 
-
+        updateTraitReverseSearchFeature();
 
         };
 

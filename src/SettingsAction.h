@@ -362,6 +362,7 @@ public: // Action getters
     void exportTableViewToCSVForGenes(QTableView* tableView);
     void exportTableViewToCSVPerGene(QTableView* tableView);
     void clearTableSelection(QTableView* tableView);
+    void updateTraitReverseSearchFeature();
 private:
     
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
