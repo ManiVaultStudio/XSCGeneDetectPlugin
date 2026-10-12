@@ -51,6 +51,8 @@
 #include <QLineEdit>
 #include <QColor>
 #include <QMessageBox>
+#include <QTimer>
+#include <QPointer>
 
 #include <QMouseEvent>
 using namespace mv::gui;
@@ -201,6 +203,9 @@ struct InitialStatistics {
     int rankVal = 0;
     QString geneName;
 };
+
+/** Column of the gene table that holds the trait correlation (see createModelFromData). */
+inline constexpr int kTraitCorrelationColumn = 4;
 
 class SettingsAction : public WidgetAction
 {
@@ -374,8 +379,42 @@ public: // Action getters
     void exportTableViewToCSVForGenes(QTableView* tableView);
     void exportTableViewToCSVPerGene(QTableView* tableView);
     void clearTableSelection(QTableView* tableView);
+
+    // ---- Trait correlation ---------------------------------------------------------------------------
+    /**
+     * Request a refresh of the "Trait Correlation" gene-table column.
+     * The request is debounced: several requests inside one event-loop burst (species selection, trait
+     * change, cluster click, gene click, ...) result in a single computation.
+     */
     void updateTraitReverseSearchFeature();
+
+    // ---- Species explorer selection ------------------------------------------------------------------
+    /** Set the species-explorer selection, but only when it really differs (avoids duplicate change signals). */
+    void setSpeciesExplorerSelection(const QStringList& species);
+
+    /**
+     * Species the explorer should show after a gene row was clicked: the species in which the gene appears.
+     * (Kept as a function so the policy lives in one place.)
+     * @param geneSpecies species in which the clicked gene appears
+     */
+    QStringList resolveExplorerSelectionForGene(const QStringList& geneSpecies);
+
+    /** Must be called whenever the cell selection that feeds the tables changes (invalidates cached means). */
+    void markSelectionChanged() { ++_selectionRevision; }
+
 private:
+    // ---- Trait correlation internals -----------------------------------------------------------------
+    /** Per (cluster, cell selection) cache so that changing only the trait / species never re-reads expression data. */
+    struct TraitCache {
+        QString key;                                                  /** cluster + selection revision + dataset id */
+        bool pointsBuilt = false;                                     /** pointsPerSpecies is valid */
+        std::unordered_map<QString, std::vector<int>> pointsPerSpecies; /** selected cells of the cluster, per species (sorted) */
+        std::unordered_map<QString, std::vector<float>> meansPerSpecies; /** mean expression of every gene, per species */
+    };
+
+    void computeTraitCorrelation();            /** the actual (non-debounced) computation */
+    void publishTraitCorrelationToModel();     /** write _geneTraitValuesComputed into the gene table model */
+
 
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
@@ -495,4 +534,13 @@ protected:
     bool                      _projectOpened = false;
     ClickableLabel* _selectedClusterLabel = nullptr;
     QString _selectedClusterName;
+
+    // ---- Trait correlation state ----------------------------------------------------------------------
+    QTimer* _traitCorrelationTimer = nullptr;   /** debounce timer, see updateTraitReverseSearchFeature() */
+    TraitCache  _traitCache;
+    quint64     _selectionRevision = 0;             /** bumped by markSelectionChanged() */
+
+    // ---- Main dataset selection watcher ---------------------------------------------------------------
+    mv::Dataset<Points>      _watchedMainPointsDataset;  /** kept alive so the connection below stays valid */
+    QMetaObject::Connection  _mainSelectionConnection;
 };

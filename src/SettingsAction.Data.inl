@@ -87,25 +87,29 @@ void SettingsAction::removeDatasets(int groupId)
     }
 }
 QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap, const int& n) {
+    Q_UNUSED(n);
 
     if (map.empty() || _totalGeneList.empty()) {
         return QVariant();
     }
-    //startCodeTimer("createModelFromData");
+
+    // ---- 1. Model skeleton: one row per gene of the dataset ------------------------------------------------
     QStandardItemModel* model = new QStandardItemModel();
+
     _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait Correlation" };
+    const int geneCount = static_cast<int>(_totalGeneList.size());
     model->setColumnCount(_initColumnNames.size());
-    model->setRowCount(static_cast<int>(_totalGeneList.size()));
+    model->setRowCount(geneCount);
     model->setHorizontalHeaderLabels(_initColumnNames);
 
+    // column chooser: by default only ID, species count and trait correlation are visible
     QStringList headers = _initColumnNames;
     _hiddenShowncolumns.setOptions(headers);
-    _hiddenShowncolumns.setSelectedOptions({ headers[0], headers[1], headers[4] });
+    _hiddenShowncolumns.setSelectedOptions({ headers[0], headers[1], headers[kTraitCorrelationColumn] });
 
-    // Pre-index the nested species map once so row construction does not scan
-    // every species for every gene.
+    // ---- 2. Lookup tables: gene -> (species, statistics) and gene -> (species -> rank) ------------------------
     QHash<QString, QVector<QPair<QString, Stats>>> geneToSpeciesStats;
-    geneToSpeciesStats.reserve(static_cast<int>(_totalGeneList.size()));
+    geneToSpeciesStats.reserve(geneCount);
     for (const auto& [speciesName, innerMap] : map) {
         for (const auto& [geneName, stats] : innerMap) {
             geneToSpeciesStats[geneName].append(qMakePair(speciesName, stats));
@@ -122,13 +126,52 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         }
     }
 
-    for (int rowIndex = 0; rowIndex < static_cast<int>(_totalGeneList.size()); ++rowIndex) {
+    // ---- 3. "Statistics" text of every gene (parallel) ------------------------------------------------------
+    // Formatting ~20k genes x species strings is the most expensive part of building the model. The lookup tables
+    // are only read here, and every worker writes distinct elements of statisticsText -> no locking required.
+    // The text format is parsed again by convertToStatisticsMap() in the plugin - keep both in sync.
+    std::vector<QString> statisticsText(static_cast<size_t>(geneCount));
+    auto geneRanges = splitGeneRanges(static_cast<size_t>(geneCount), static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
+    QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
+        for (size_t row = range.begin; row < range.end; ++row) {
+            const QString& gene = _totalGeneList[row];
+
+            const auto statsIt = geneToSpeciesStats.constFind(gene);
+            if (statsIt == geneToSpeciesStats.constEnd()) {
+                continue;
+            }
+            const auto rankIt = geneToSpeciesRank.constFind(gene);
+
+            QString formattedStatistics;
+            formattedStatistics.reserve(statsIt->size() * 96);
+            for (const auto& speciesStats : *statsIt) {
+                const auto& species = speciesStats.first;
+                const auto& stats = speciesStats.second;
+                const int rank = (rankIt != geneToSpeciesRank.constEnd()) ? rankIt->value(species) : 0;
+
+                formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
+                    .arg(species)
+                    .arg(rank)
+                    .arg(stats.abundanceTop)
+                    .arg(stats.abundanceMiddle)
+                    .arg(stats.countAbundanceNumerator)
+                    .arg(stats.meanSelected, 0, 'f', 2)
+                    .arg(stats.countSelected)
+                    .arg(stats.meanNonSelected, 0, 'f', 2)
+                    .arg(stats.countNonSelected);
+            }
+            statisticsText[row] = std::move(formattedStatistics);
+        }
+        });
+
+    // ---- 4. Fill the model (serial: QStandardItemModel is not thread safe) -----------------------------------
+    for (int rowIndex = 0; rowIndex < geneCount; ++rowIndex) {
         const auto& gene = _totalGeneList[rowIndex];
-        const auto statisticsValuesForSpecies = geneToSpeciesStats.value(gene);
-        const auto rankcounter = geneToSpeciesRank.value(gene);
 
-        model->setItem(rowIndex, 0, new QStandardItem(gene)); // ID(string) should sort by string
+        // Column 0: gene id (sorts as text)
+        model->setItem(rowIndex, 0, new QStandardItem(gene));
 
+        // Columns 1 and 2: in how many species / in which species the gene is a top-N gene
         QString speciesGeneAppearancesComb;
         int count = 0;
         if (auto it = geneCounter.find(gene); it != geneCounter.end()) {
@@ -140,50 +183,28 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             }
             speciesGeneAppearancesComb = speciesNames.join(";");
         }
-        auto* countItem = new QStandardItem(); // Gene Appearances (int) should sort by int
+
+        auto* countItem = new QStandardItem(); // sorts as integer
         countItem->setData(count, Qt::DisplayRole);
-        countItem->setData(count, Qt::UserRole); // Use Qt::UserRole or another custom role for sorting by integer
+        countItem->setData(count, Qt::UserRole);
         model->setItem(rowIndex, 1, countItem);
+        model->setItem(rowIndex, 2, new QStandardItem(speciesGeneAppearancesComb));
 
-        model->setItem(rowIndex, 2, new QStandardItem(speciesGeneAppearancesComb)); // Gene Appearance Species Names (string) should sort by string
+        // Column 3: per-species statistics text (see step 3)
+        model->setItem(rowIndex, 3, new QStandardItem(statisticsText[static_cast<size_t>(rowIndex)]));
 
-        QString formattedStatistics;
-        formattedStatistics.reserve(statisticsValuesForSpecies.size() * 96);
-        for (const auto& speciesStats : statisticsValuesForSpecies) {
-            const auto& species = speciesStats.first;
-            const auto& stats = speciesStats.second;
-            formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
-                .arg(species)
-                .arg(rankcounter.value(species))
-                .arg(stats.abundanceTop)
-                .arg(stats.abundanceMiddle)
-                .arg(stats.countAbundanceNumerator)
-                .arg(stats.meanSelected, 0, 'f', 2)
-                .arg(stats.countSelected)
-                .arg(stats.meanNonSelected, 0, 'f', 2)
-                .arg(stats.countNonSelected);
-        }
-        model->setItem(rowIndex, 3, new QStandardItem(formattedStatistics)); // Statistics (string) should sort by string
-
-        // Retrieve pre-calculated Trait Correlation from _geneTraitValuesComputed
-        float correlation = 0.0f;
-        auto itCorr = _geneTraitValuesComputed.find(gene);
+        // Column 4: trait correlation. A numeric DisplayRole keeps sorting numeric; the bar delegate formats the text
+        // and draws the bar. (Values arrive/refresh later through publishTraitCorrelationToModel().)
+        double correlation = 0.0;
+        const auto itCorr = _geneTraitValuesComputed.find(gene);
         if (itCorr != _geneTraitValuesComputed.end()) {
-            correlation = itCorr->second;
+            correlation = static_cast<double>(itCorr->second);
         }
-        else {
-            // Uncomment to debug key mismatches in your Application Output
-            // qDebug() << "Gene not found in _geneTraitValuesComputed:" << gene;
-        }
-
         auto* correlationItem = new QStandardItem();
-        // Numeric DisplayRole so sorting is numeric; the bar delegate formats the text and draws the bar
-        correlationItem->setData(static_cast<double>(correlation), Qt::DisplayRole);
-        correlationItem->setData(static_cast<double>(correlation), Qt::UserRole);
-        model->setItem(rowIndex, 4, correlationItem); // Trait Correlation (float)
+        correlationItem->setData(correlation, Qt::DisplayRole);
+        correlationItem->setData(correlation, Qt::UserRole);
+        model->setItem(rowIndex, kTraitCorrelationColumn, correlationItem);
     }
-
-    //stopCodeTimer("createModelFromData");
 
     return QVariant::fromValue(model);
 }
@@ -750,6 +771,30 @@ void SettingsAction::clearTableSelection(QTableView* tableView) {
     else {
         qDebug() << "TableView or its selection model is null";
     }
+}
+
+// ============================================================================================================
+//  Species explorer selection
+// ============================================================================================================
+
+void SettingsAction::setSpeciesExplorerSelection(const QStringList& species)
+{
+    QStringList current = _speciesExplorerInMap.getSelectedOptions();
+    QStringList wanted = species;
+    current.sort();
+    wanted.sort();
+    if (current == wanted) {
+        return; // nothing to do: avoids a redundant selectedOptionsChanged -> table recolor -> correlation refresh
+    }
+    _speciesExplorerInMap.setSelectedOptions(species);
+}
+
+QStringList SettingsAction::resolveExplorerSelectionForGene(const QStringList& geneSpecies)
+{
+    // Clicking a gene always selects the species in which that gene appears (empty entries come from genes without species).
+    QStringList species = geneSpecies;
+    species.removeAll(QString());
+    return species;
 }
 
 void SettingsAction::removeSelectionTableRows(QStringList* selectedLeaves)

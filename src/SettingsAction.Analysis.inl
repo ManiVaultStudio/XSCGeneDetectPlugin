@@ -189,6 +189,7 @@ void SettingsAction::updateButtonTriggered()
         }
         _selectedIndicesFromStorage.clear();
         _selectedIndicesFromStorage = pointsDataset->getSelectionIndices();
+        markSelectionChanged(); // cached trait-correlation means refer to the previous selection
 
         auto embeddingDatasetRaw = mv::data().getDataset<Points>(embeddingDataset->getId());
         auto pointsDatasetRaw = mv::data().getDataset<Points>(pointsDataset->getId());
@@ -854,73 +855,101 @@ void SettingsAction::updateButtonTriggered()
                         }
                     }
                     else {
-                        for (int startGeneIndex = 0; startGeneIndex < static_cast<int>(pointsDatasetallColumnIndices.size()); startGeneIndex += kGeneChunkSize) {
-                            // Read all selected points for a chunk of genes once,
-                            // then fan the rows back out to species-specific sums.
-                            const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(pointsDatasetallColumnIndices.size()) - startGeneIndex);
-                            std::vector<int> geneChunkIndices(pointsDatasetallColumnIndices.begin() + startGeneIndex, pointsDatasetallColumnIndices.begin() + startGeneIndex + chunkSize);
-                            std::vector<float> selectedChunkData(static_cast<size_t>(selectedIndicesFromStorageSize) * static_cast<size_t>(chunkSize), 0.0f);
+                        const int totalGeneCount = static_cast<int>(pointsDatasetallColumnIndices.size());
+
+                        // ---- Stage 1 (parallel over gene chunks): mean expression of the SELECTED cells, per species ----
+                        // A worker reads one gene chunk for all selected cells once and fans the rows out to the species
+                        // sums. Workers write disjoint gene columns of speciesSelectedMeans -> no locking required.
+                        // The chunk is narrowed for huge selections so that (threads x buffer) stays within the memory budget.
+                        const int jobChunkSize = std::max(8, std::min(kGeneChunkSize, static_cast<int>(8000000 / std::max(1, selectedIndicesFromStorageSize))));
+                        struct GeneChunkJob { int start; int size; };
+                        std::vector<GeneChunkJob> chunkJobs;
+                        for (int jobStart = 0; jobStart < totalGeneCount; jobStart += jobChunkSize) {
+                            chunkJobs.push_back({ jobStart, std::min(jobChunkSize, totalGeneCount - jobStart) });
+                        }
+
+                        std::vector<std::vector<float>> speciesSelectedMeans(speciesCount, std::vector<float>(totalGeneCount, 0.0f));
+
+                        QThreadPool statisticsPool;
+                        statisticsPool.setMaxThreadCount(memorySafeThreadCount(static_cast<size_t>(selectedIndicesFromStorageSize) * jobChunkSize / kGeneChunkSize));
+                        QtConcurrent::blockingMap(&statisticsPool, chunkJobs, [&](GeneChunkJob& job) {
+                            std::vector<int> geneChunkIndices(pointsDatasetallColumnIndices.begin() + job.start, pointsDatasetallColumnIndices.begin() + job.start + job.size);
+                            std::vector<float> selectedChunkData(static_cast<size_t>(selectedIndicesFromStorageSize) * static_cast<size_t>(job.size), 0.0f);
                             pointsDatasetRaw->populateDataForDimensions(selectedChunkData, geneChunkIndices, _selectedIndicesFromStorage);
 
-                            std::vector<std::vector<double>> speciesChunkSums(speciesCount, std::vector<double>(chunkSize, 0.0));
+                            std::vector<std::vector<double>> speciesChunkSums(speciesCount, std::vector<double>(job.size, 0.0));
                             for (int selectedRowIndex = 0; selectedRowIndex < selectedIndicesFromStorageSize; ++selectedRowIndex) {
                                 const int speciesIndex = selectedPointSpeciesIndex[selectedRowIndex];
                                 if (speciesIndex < 0) {
                                     continue;
                                 }
-
-                                const int rowOffset = selectedRowIndex * chunkSize;
+                                const size_t rowOffset = static_cast<size_t>(selectedRowIndex) * static_cast<size_t>(job.size);
                                 auto& currentSpeciesChunkSums = speciesChunkSums[speciesIndex];
-                                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
+                                for (int geneOffset = 0; geneOffset < job.size; ++geneOffset) {
                                     currentSpeciesChunkSums[geneOffset] += selectedChunkData[rowOffset + geneOffset];
                                 }
                             }
 
                             for (int speciesIndex = 0; speciesIndex < speciesCount; ++speciesIndex) {
-                                const auto& meta = speciesComputationMeta[speciesIndex];
-                                const auto speciesMeanMapIt = _clusterGeneMeanExpressionMap.find(meta.name);
-                                if (speciesMeanMapIt == _clusterGeneMeanExpressionMap.end()) {
+                                const int selectedCount = speciesComputationMeta[speciesIndex].selectedCellCount;
+                                if (selectedCount <= 0) {
                                     continue;
                                 }
-
-                                auto& speciesExpressionMap = _clusterNameToGeneNameToExpressionValue[meta.name];
-                                const auto& currentSpeciesChunkSums = speciesChunkSums[speciesIndex];
-                                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
-                                    const int geneIndex = geneChunkIndices[geneOffset];
-                                    const auto& geneName = pointsDatasetallColumnNameList[geneIndex];
-
-                                    float allCellMean = 0.0f;
-                                    if (const auto geneMeanIt = speciesMeanMapIt->second.find(geneName); geneMeanIt != speciesMeanMapIt->second.end()) {
-                                        allCellMean = geneMeanIt->second.second;
-                                    }
-
-                                    const float selectedCellsMean = (meta.selectedCellCount > 0)
-                                        ? static_cast<float>(currentSpeciesChunkSums[geneOffset] / static_cast<double>(meta.selectedCellCount))
-                                        : 0.0f;
-
-                                    float nonSelectedMean = allCellMean;
-                                    if (meta.selectedCellCount > 0 && meta.nonSelectedCellsCount > 0) {
-                                        const float allCellTotal = allCellMean * meta.allCellCount;
-                                        nonSelectedMean = (allCellTotal - (selectedCellsMean * meta.selectedCellCount)) / meta.nonSelectedCellsCount;
-                                    }
-
-                                    Stats valueStats;
-                                    valueStats.abundanceMiddle = meta.abundanceMiddle;
-                                    valueStats.abundanceTop = meta.abundanceTop;
-                                    valueStats.countSelected = meta.selectedCellCount;
-                                    valueStats.countNonSelected = meta.nonSelectedCellsCount;
-                                    valueStats.meanSelected = selectedCellsMean;
-                                    valueStats.meanNonSelected = nonSelectedMean;
-                                    valueStats.color = meta.color;
-                                    valueStats.countAbundanceNumerator = meta.countAbundanceNumerator;
-                                    speciesExpressionMap[geneName] = valueStats;
+                                for (int geneOffset = 0; geneOffset < job.size; ++geneOffset) {
+                                    speciesSelectedMeans[speciesIndex][job.start + geneOffset] =
+                                        static_cast<float>(speciesChunkSums[speciesIndex][geneOffset] / static_cast<double>(selectedCount));
                                 }
                             }
+                            });
+
+                        // ---- Stage 2 (parallel over species): build the per-gene statistics maps ----
+                        // The outer map entries already exist (created above), so every worker only touches its own inner map.
+                        struct SpeciesStatsJob { int speciesIndex; std::map<QString, Stats>* target; };
+                        std::vector<SpeciesStatsJob> speciesJobs;
+                        speciesJobs.reserve(speciesCount);
+                        for (int speciesIndex = 0; speciesIndex < speciesCount; ++speciesIndex) {
+                            const auto& meta = speciesComputationMeta[speciesIndex];
+                            if (_clusterGeneMeanExpressionMap.find(meta.name) == _clusterGeneMeanExpressionMap.end()) {
+                                continue; // no species-wide baseline available -> species is skipped (legacy behavior)
+                            }
+                            speciesJobs.push_back({ speciesIndex, &_clusterNameToGeneNameToExpressionValue[meta.name] });
                         }
+
+                        QtConcurrent::blockingMap(speciesJobs, [&](SpeciesStatsJob& job) {
+                            const auto& meta = speciesComputationMeta[job.speciesIndex];
+                            const auto& baselineMeans = _clusterGeneMeanExpressionMap.at(meta.name);
+                            const auto& selectedMeans = speciesSelectedMeans[job.speciesIndex];
+
+                            for (int geneIndex = 0; geneIndex < totalGeneCount; ++geneIndex) {
+                                const auto& geneName = pointsDatasetallColumnNameList[geneIndex];
+
+                                float allCellMean = 0.0f;
+                                if (const auto geneMeanIt = baselineMeans.find(geneName); geneMeanIt != baselineMeans.end()) {
+                                    allCellMean = geneMeanIt->second.second;
+                                }
+
+                                const float selectedCellsMean = (meta.selectedCellCount > 0) ? selectedMeans[geneIndex] : 0.0f;
+
+                                // mean of the NON-selected cells = (species total - selected total) / non-selected count
+                                float nonSelectedMean = allCellMean;
+                                if (meta.selectedCellCount > 0 && meta.nonSelectedCellsCount > 0) {
+                                    const float allCellTotal = allCellMean * meta.allCellCount;
+                                    nonSelectedMean = (allCellTotal - (selectedCellsMean * meta.selectedCellCount)) / meta.nonSelectedCellsCount;
+                                }
+
+                                Stats valueStats;
+                                valueStats.abundanceMiddle = meta.abundanceMiddle;
+                                valueStats.abundanceTop = meta.abundanceTop;
+                                valueStats.countSelected = meta.selectedCellCount;
+                                valueStats.countNonSelected = meta.nonSelectedCellsCount;
+                                valueStats.meanSelected = selectedCellsMean;
+                                valueStats.meanNonSelected = nonSelectedMean;
+                                valueStats.color = meta.color;
+                                valueStats.countAbundanceNumerator = meta.countAbundanceNumerator;
+                                (*job.target)[geneName] = valueStats;
+                            }
+                            });
                     }
-
-
-
 
                     //stopCodeTimer("Part12.2");
 
@@ -2100,53 +2129,50 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 
 }
 */
-void::SettingsAction::updateTraitReverseSearchFeature()
+// ============================================================================================================
+//  Trait correlation
+//
+//  For every gene: Pearson correlation, across species, between
+//      x = mean expression of the gene in that species (selected cells of the chosen cluster only)
+//      y = the species' value of the chosen trait (from the phylogenetic tree view metadata)
+//
+//  Pipeline: validate -> trait values -> selected cells per species (cached) -> species means (cached, parallel)
+//            -> Pearson per gene (parallel) -> publish to the gene table (one dataChanged signal).
+// ============================================================================================================
+
+void SettingsAction::updateTraitReverseSearchFeature()
 {
-    // Bail out unless every dataset we need is available.
+    // Many events request a refresh within the same event-loop burst (species selection, trait change, cluster click,
+    // gene click, new model, ...). The single-shot timer coalesces them into one computation.
+    if (_traitCorrelationTimer) {
+        _traitCorrelationTimer->start();
+    }
+    else {
+        computeTraitCorrelation();
+    }
+}
+
+void SettingsAction::computeTraitCorrelation()
+{
+    // ---- 1. Validate inputs ---------------------------------------------------------------------------
     if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
         return;
     }
 
     const QString clusterName = _selectedClusterName;
-    if (clusterName.isEmpty()) {
-        return;
-    }
-
-    const QStringList speciesName = _speciesExplorerInMap.getSelectedOptions();
-    if (speciesName.isEmpty()) {
-        return;
-    }
-
     QString traitName = _reverseSearchTraitSelectionString.getString();
-    if (traitName.isEmpty()) {
+    if (clusterName.isEmpty() || traitName.isEmpty()) {
         return;
     }
 
     Dataset<Points> mainPointsDataset = _mainPointsDataset.getCurrentDataset();
-    const std::vector<QString> mainPointDimensionNames = mainPointsDataset->getDimensionNames();
-    const int geneCount = static_cast<int>(mainPointDimensionNames.size());
+    const std::vector<QString> geneNames = mainPointsDataset->getDimensionNames();
+    const size_t geneCount = geneNames.size();
     if (geneCount == 0) {
         return;
     }
 
-    // ---- Points that are selected AND in the chosen cluster ----
-    std::vector<std::seed_seq::result_type> selectedPointsTemp = mainPointsDataset->getSelectionIndices();
-    std::vector<int> selectedPoints(selectedPointsTemp.begin(), selectedPointsTemp.end());
-    std::sort(selectedPoints.begin(), selectedPoints.end());
-
-    std::vector<int> clusterIndices;
-    Dataset<Clusters> clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
-    for (const auto& cluster : clusterDataset->getClusters()) {
-        if (cluster.getName() == clusterName) {
-            const auto& idx = cluster.getIndices();
-            clusterIndices.assign(idx.begin(), idx.end());
-            break;
-        }
-    }
-    std::sort(clusterIndices.begin(), clusterIndices.end());
-    const std::vector<int> selectedInCluster = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
-
-    // ---- Trait values per species (from the phylogenetic tree view metadata) ----
+    // ---- 2. Trait value per species (metadata of the Phylogenetic Tree View) ----------------------------
     QString metaOptions;
     auto phytv = mv::plugins().getPluginFactory("XSCPhyTVu");
     if (phytv)
@@ -2174,101 +2200,217 @@ void::SettingsAction::updateTraitReverseSearchFeature()
     }
     const QJsonObject traitObject = QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject();
 
-    // ---- Per-species point sets ----
-    std::unordered_map<QString, std::vector<int>> speciesToIndices;
-    {
-        const std::set<QString> speciesNameSet(speciesName.begin(), speciesName.end());
-        Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
-        for (const auto& species : speciesDataset->getClusters()) {
-            if (speciesNameSet.find(species.getName()) == speciesNameSet.end())
-                continue;
-            const auto& idx = species.getIndices();
-            std::vector<int> sorted(idx.begin(), idx.end());
-            std::sort(sorted.begin(), sorted.end());
-            speciesToIndices[species.getName()] = std::move(sorted);
+    // ---- 3. Selected cells of the chosen cluster, per species (cached per cluster + selection) -----------
+    const QString cacheKey = clusterName + QLatin1Char('|') + QString::number(_selectionRevision) + QLatin1Char('|') + mainPointsDataset->getId();
+    if (cacheKey != _traitCache.key) {
+        _traitCache = TraitCache();
+        _traitCache.key = cacheKey;
+    }
+
+    if (!_traitCache.pointsBuilt) {
+        // the cell selection the tables were computed from (falls back to the live selection before the first update)
+        std::vector<int> selectedPoints(_selectedIndicesFromStorage.begin(), _selectedIndicesFromStorage.end());
+        if (selectedPoints.empty()) {
+            const auto liveSelection = mainPointsDataset->getSelectionIndices();
+            selectedPoints.assign(liveSelection.begin(), liveSelection.end());
         }
-    }
+        std::sort(selectedPoints.begin(), selectedPoints.end());
 
-    // One data point per species: (trait value, mean expression of every gene in that species)
-    std::vector<double> traitValues;
-    std::vector<std::vector<float>> speciesGeneMeans; // [species][gene]
+        std::vector<int> clusterIndices;
+        Dataset<Clusters> clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
+        for (const auto& cluster : clusterDataset->getClusters()) {
+            if (cluster.getName() == clusterName) {
+                const auto& idx = cluster.getIndices();
+                clusterIndices.assign(idx.begin(), idx.end());
+                break;
+            }
+        }
+        std::sort(clusterIndices.begin(), clusterIndices.end());
+        const std::vector<int> selectedInCluster = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
 
-    std::vector<int> allGeneIndices(geneCount);
-    std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
+        Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
+        const auto speciesClusters = speciesDataset->getClusters();
 
-    for (const auto& [species, indices] : speciesToIndices) {
-        if (!traitObject.contains(species))
-            continue;
-
-        bool ok = false;
-        const double traitValue = traitObject.value(species).toVariant().toString().toDouble(&ok);
-        if (!ok)
-            continue;
-
-        const std::vector<int> pointsForSpecies = intersectSortedIndicesToInt(selectedInCluster, indices);
-        if (pointsForSpecies.empty())
-            continue;
-
-        std::vector<float> means(geneCount, 0.0f);
-        computeChunkedGeneMeans(mainPointsDataset, allGeneIndices, pointsForSpecies,
-            [&means](int start, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
-                for (size_t g = 0; g < chunkGenes.size(); ++g)
-                    means[start + g] = chunkMeans[g];
-            });
-
-        traitValues.push_back(traitValue);
-        speciesGeneMeans.push_back(std::move(means));
-    }
-
-    // ---- Pearson correlation across species, per gene ----
-    _geneTraitValuesComputed.clear();
-
-    const size_t n = traitValues.size();
-    if (n >= 1) {
-        const double traitMean = std::accumulate(traitValues.begin(), traitValues.end(), 0.0) / n;
-        double traitVar = 0.0;
-        for (double t : traitValues)
-            traitVar += (t - traitMean) * (t - traitMean);
-
-        for (int g = 0; g < geneCount; ++g) {
-            double geneMean = 0.0;
-            for (size_t i = 0; i < n; ++i)
-                geneMean += speciesGeneMeans[i][g];
-            geneMean /= n;
-
-            double covariance = 0.0, geneVar = 0.0;
-            for (size_t i = 0; i < n; ++i) {
-                const double dg = speciesGeneMeans[i][g] - geneMean;
-                covariance += dg * (traitValues[i] - traitMean);
-                geneVar += dg * dg;
+        // Split \p cells (sorted) per species, concurrently, and store the non-empty sets in the cache.
+        const auto buildPointsPerSpecies = [&](const std::vector<int>& cells) {
+            struct PointsJob {
+                int speciesIndex = 0;
+                std::vector<int> points;
+            };
+            std::vector<PointsJob> pointsJobs(speciesClusters.size());
+            for (int i = 0; i < static_cast<int>(pointsJobs.size()); ++i) {
+                pointsJobs[i].speciesIndex = i;
             }
 
-            const double denominator = std::sqrt(geneVar * traitVar);
-            float correlation = denominator > 0.0 ? static_cast<float>(covariance / denominator) : 0.0f;
-            correlation = std::max(-1.0f, std::min(1.0f, correlation));
-            _geneTraitValuesComputed[mainPointDimensionNames[g]] = correlation;
+            QtConcurrent::blockingMap(pointsJobs, [&](PointsJob& job) {
+                const auto& idx = speciesClusters[job.speciesIndex].getIndices();
+                std::vector<int> sortedSpeciesIndices(idx.begin(), idx.end());
+                std::sort(sortedSpeciesIndices.begin(), sortedSpeciesIndices.end());
+                job.points = intersectSortedIndicesToInt(cells, sortedSpeciesIndices);
+                });
+
+            _traitCache.pointsPerSpecies.clear();
+            for (auto& job : pointsJobs) {
+                if (!job.points.empty()) {
+                    _traitCache.pointsPerSpecies[speciesClusters[job.speciesIndex].getName()] = std::move(job.points);
+                }
+            }
+            };
+
+        // species that have a trait value AND cells in the current point sets
+        const auto countSpeciesWithTrait = [&]() {
+            size_t count = 0;
+            for (const auto& entry : _traitCache.pointsPerSpecies) {
+                if (traitObject.contains(entry.first)) {
+                    ++count;
+                }
+            }
+            return count;
+            };
+
+        // First choice: the selected cells of the cluster
+        buildPointsPerSpecies(selectedInCluster);
+
+        // A correlation needs several species. If the selection only touches one or two species (e.g. all selected cells
+        // belong to one species), compare the species on ALL their cells of the cluster instead of the selection.
+        if (countSpeciesWithTrait() < kMinSpeciesForTraitCorrelation) {
+            buildPointsPerSpecies(clusterIndices);
         }
-    }
-    else {
-        qDebug() << "Trait correlation needs at least 1 species with trait values and selected cells; found" << n;
+        _traitCache.pointsBuilt = true;
     }
 
-    // ---- Push the values into the already-built gene table ----
+    // ---- 4. Species of the comparison and the selected species -----------------------------------------
+    // usable = has a numeric trait value AND cells in the current point sets (std::map keeps a stable order)
+    std::map<QString, double> traitPerSpecies;
+    for (const auto& entry : _traitCache.pointsPerSpecies) {
+        if (!traitObject.contains(entry.first)) {
+            continue;
+        }
+        bool ok = false;
+        const double traitValue = traitObject.value(entry.first).toVariant().toString().toDouble(&ok);
+        if (ok) {
+            traitPerSpecies[entry.first] = traitValue;
+        }
+    }
+
+    _geneTraitValuesComputed.clear();
+    if (traitPerSpecies.size() < kMinSpeciesForTraitCorrelation) {
+        // the standardisation needs a spread of trait values: at least two species with data
+        qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and cells; found" << traitPerSpecies.size();
+        publishTraitCorrelationToModel();
+        return;
+    }
+
+    std::vector<QString> allSpecies;
+    allSpecies.reserve(traitPerSpecies.size());
+    for (const auto& entry : traitPerSpecies) {
+        allSpecies.push_back(entry.first);
+    }
+
+    // Species picked in the species explorer (1 or more); none picked -> all species (= ordinary Pearson correlation).
+    // The trait of the selection is the average over the selected species, which the score takes care of by averaging
+    // the per-species trait z-scores.
+    std::vector<size_t> selectedIndices;
+    const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
+    for (size_t i = 0; i < allSpecies.size(); ++i) {
+        if (explorerSelection.contains(allSpecies[i])) {
+            selectedIndices.push_back(i);
+        }
+    }
+    if (selectedIndices.empty()) {
+        selectedIndices.resize(allSpecies.size());
+        std::iota(selectedIndices.begin(), selectedIndices.end(), static_cast<size_t>(0));
+    }
+
+    // ---- 5. Mean expression per species (parallel over species, only the ones missing from the cache) ----
+    struct MeansJob {
+        QString species;
+        const std::vector<int>* points = nullptr;
+        std::vector<float> means;
+    };
+    std::vector<MeansJob> meansJobs;
+    size_t largestPointSet = 0;
+    for (const QString& species : allSpecies) {
+        if (_traitCache.meansPerSpecies.count(species) == 0) {
+            const std::vector<int>& speciesPoints = _traitCache.pointsPerSpecies.at(species);
+            largestPointSet = std::max(largestPointSet, speciesPoints.size());
+            meansJobs.push_back({ species, &speciesPoints, {} });
+        }
+    }
+
+    if (!meansJobs.empty()) {
+        std::vector<int> allGeneIndices(geneCount);
+        std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
+
+        QThreadPool meansPool;
+        meansPool.setMaxThreadCount(memorySafeThreadCount(largestPointSet));
+        QtConcurrent::blockingMap(&meansPool, meansJobs, [&](MeansJob& job) {
+            job.means.assign(geneCount, 0.0f);
+            computeChunkedGeneMeans(mainPointsDataset, allGeneIndices, *job.points,
+                [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
+                    for (size_t g = 0; g < chunkGenes.size(); ++g) {
+                        job.means[static_cast<size_t>(start) + g] = chunkMeans[g];
+                    }
+                });
+            });
+
+        for (auto& job : meansJobs) {
+            _traitCache.meansPerSpecies[job.species] = std::move(job.means);
+        }
+    }
+
+    // ---- 6. Score of every gene (parallel over gene ranges) ------------------------------------------------
+    std::vector<const std::vector<float>*> speciesGeneMeans;
+    std::vector<double> traitValues;
+    speciesGeneMeans.reserve(allSpecies.size());
+    traitValues.reserve(allSpecies.size());
+    for (const QString& species : allSpecies) {
+        speciesGeneMeans.push_back(&_traitCache.meansPerSpecies.at(species));
+        traitValues.push_back(traitPerSpecies.at(species));
+    }
+
+    std::vector<float> correlations(geneCount, 0.0f);
+    auto geneRanges = splitGeneRanges(geneCount, static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
+    QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
+        computeSelectionTraitScores(speciesGeneMeans, traitValues, selectedIndices, range, correlations);
+        });
+
+    _geneTraitValuesComputed.reserve(geneCount);
+    for (size_t g = 0; g < geneCount; ++g) {
+        _geneTraitValuesComputed[geneNames[g]] = correlations[g];
+    }
+
+    // ---- 7. Show the result -------------------------------------------------------------------------------
+    publishTraitCorrelationToModel();
+}
+
+void SettingsAction::publishTraitCorrelationToModel()
+{
     QVariant variant = _listModel.getVariant();
     auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
-    if (model && model->columnCount() > 4) {
+    if (!model || model->columnCount() <= kTraitCorrelationColumn || model->rowCount() == 0) {
+        return;
+    }
+
+    {
+        // Writing ~20k cells one by one would emit (and re-sort the proxy for) every single change.
+        // Block the signals, write everything, then announce the whole column once.
+        QSignalBlocker blocker(model);
         for (int row = 0; row < model->rowCount(); ++row) {
             auto* idItem = model->item(row, 0);
-            auto* corrItem = model->item(row, 4);
-            if (!idItem || !corrItem)
+            auto* correlationItem = model->item(row, kTraitCorrelationColumn);
+            if (!idItem || !correlationItem) {
                 continue;
+            }
 
-            auto it = _geneTraitValuesComputed.find(idItem->text());
+            const auto it = _geneTraitValuesComputed.find(idItem->text());
             const double value = it != _geneTraitValuesComputed.end() ? static_cast<double>(it->second) : 0.0;
-            corrItem->setData(value, Qt::DisplayRole);
-            corrItem->setData(value, Qt::UserRole);
+            correlationItem->setData(value, Qt::DisplayRole);
+            correlationItem->setData(value, Qt::UserRole);
         }
     }
+
+    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole });
 }
 
 
@@ -2303,37 +2445,52 @@ void SettingsAction::findTopNGenesPerCluster() {
     std::vector<QString> speciesOrder;
     speciesOrder.reserve(_clusterNameToGeneNameToExpressionValue.size());
 
-    for (const auto& outerPair : _clusterNameToGeneNameToExpressionValue) {
-        auto speciesName = outerPair.first;
-        speciesOrder.push_back(speciesName);
-        struct GeneRankingEntry {
-            QString geneName;
-            float differenceMeanValue;
-            float meanSelected;
-        };
+    // ---- Stage 1 (parallel): order the genes of every species by differential expression ----
+    // Sorting ~20k genes per species dominates this function and species are independent of each other.
+    struct GeneRankingEntry {
+        QString geneName;
+        float differenceMeanValue;
+        float meanSelected;
+    };
+    struct SpeciesRanking {
+        QString speciesName;
+        const std::map<QString, Stats>* geneStats = nullptr;
+        std::vector<GeneRankingEntry> sortedGenes;
+    };
 
-        std::vector<GeneRankingEntry> geneExpressionVec;
-        geneExpressionVec.reserve(outerPair.second.size());
-        for (const auto& innerPair : outerPair.second) {
-            const auto& geneName = innerPair.first;
+    std::vector<SpeciesRanking> speciesRankings;
+    speciesRankings.reserve(_clusterNameToGeneNameToExpressionValue.size());
+    for (const auto& outerPair : _clusterNameToGeneNameToExpressionValue) {
+        speciesRankings.push_back({ outerPair.first, &outerPair.second, {} });
+        speciesOrder.push_back(outerPair.first);
+    }
+
+    QtConcurrent::blockingMap(speciesRankings, [option](SpeciesRanking& ranking) {
+        ranking.sortedGenes.reserve(ranking.geneStats->size());
+        for (const auto& innerPair : *ranking.geneStats) {
             const auto& stats = innerPair.second;
-            geneExpressionVec.push_back({ geneName, stats.meanSelected - stats.meanNonSelected, stats.meanSelected });
+            ranking.sortedGenes.push_back({ innerPair.first, stats.meanSelected - stats.meanNonSelected, stats.meanSelected });
         }
 
         if (option == SelectionOption::AbsoluteTopN) {
-            std::sort(geneExpressionVec.begin(), geneExpressionVec.end(), [](const auto& a, const auto& b) {
+            std::sort(ranking.sortedGenes.begin(), ranking.sortedGenes.end(), [](const auto& a, const auto& b) {
                 return std::abs(a.differenceMeanValue) > std::abs(b.differenceMeanValue);
                 });
         }
         else {
-            std::sort(geneExpressionVec.begin(), geneExpressionVec.end(), [](const auto& a, const auto& b) {
+            std::sort(ranking.sortedGenes.begin(), ranking.sortedGenes.end(), [](const auto& a, const auto& b) {
                 return a.differenceMeanValue > b.differenceMeanValue;
                 });
             if (option == SelectionOption::NegativeTopN) {
-                std::reverse(geneExpressionVec.begin(), geneExpressionVec.end());
+                std::reverse(ranking.sortedGenes.begin(), ranking.sortedGenes.end());
             }
         }
+        });
 
+    // ---- Stage 2 (serial, cheap): collect the top-N genes and the per-gene rank of every species ----
+    for (const auto& ranking : speciesRankings) {
+        const auto& speciesName = ranking.speciesName;
+        const auto& geneExpressionVec = ranking.sortedGenes;
         for (int i = 0; i < static_cast<int>(geneExpressionVec.size()); ++i) {
             const auto& entry = geneExpressionVec[i];
             if (i < n) {

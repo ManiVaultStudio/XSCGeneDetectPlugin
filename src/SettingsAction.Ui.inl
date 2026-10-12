@@ -526,10 +526,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setWhatsThis("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            const auto mainSelectionChanged = [this]() -> void {
+            // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
+            // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
+            // changing the dataset repeatedly never stacks up duplicate listeners.
+            QObject::disconnect(_mainSelectionConnection);
+            _watchedMainPointsDataset = fullDataset;
+            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this]() -> void {
                 _toggleScatterplotSelection.setChecked(true);
-                };
-            connect(&fullDataset, &Dataset<Points>::dataSelectionChanged, this, mainSelectionChanged);
+                });
 
         }
         else
@@ -1214,6 +1218,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_clusterCountSortingType, &OptionAction::currentIndexChanged, this, updateClusterCountSortingType);
+    // Debounced trait-correlation refresh (see updateTraitReverseSearchFeature()): bursts of requests -> one computation
+    _traitCorrelationTimer = new QTimer(this);
+    _traitCorrelationTimer->setSingleShot(true);
+    _traitCorrelationTimer->setInterval(30);
+    connect(_traitCorrelationTimer, &QTimer::timeout, this, [this]() -> void { computeTraitCorrelation(); });
+
     QTimer* debounceTimer = new QTimer(this);
     debounceTimer->setSingleShot(true);
     debounceTimer->setInterval(500); // 500 milliseconds wait time
