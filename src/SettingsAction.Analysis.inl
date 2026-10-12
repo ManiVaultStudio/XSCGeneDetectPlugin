@@ -1164,6 +1164,7 @@ void SettingsAction::updateClusterInfoStatusBar()
             }
             // Clear or rebuild the status bar, and reset the stale pointer first
             _selectedClusterLabel = nullptr;
+            _clusterLabelsByName.clear();
 
             QString selectedClustersString = "";
             bool foundPrevious = false;
@@ -1196,13 +1197,21 @@ void SettingsAction::updateClusterInfoStatusBar()
                 clusterLabel->setProperty("selectedStyle", selectedStyle);
 
                 // Select if name matches previous selection, or if it's completely empty on initial run
+                _clusterLabelsByName.insert(clustersFromSet.name, clusterLabel);
+
+                // Keep the previous selection (one or several cell types); on the very first run select the first one
+                if (_selectedClusterNames.isEmpty() && !_selectedClusterName.isEmpty())
+                {
+                    _selectedClusterNames << _selectedClusterName;
+                }
+
                 bool shouldSelect = false;
-                if (_selectedClusterName.isEmpty() && !foundPrevious && firstLabel == clusterLabel)
+                if (_selectedClusterNames.isEmpty() && !foundPrevious && firstLabel == clusterLabel)
                 {
                     shouldSelect = true;
                     foundPrevious = true;
                 }
-                else if (_selectedClusterName == clustersFromSet.name)
+                else if (_selectedClusterNames.contains(clustersFromSet.name))
                 {
                     shouldSelect = true;
                     foundPrevious = true;
@@ -1213,6 +1222,10 @@ void SettingsAction::updateClusterInfoStatusBar()
                     clusterLabel->setStyleSheet(selectedStyle);
                     _selectedClusterLabel = clusterLabel;
                     _selectedClusterName = clustersFromSet.name;
+                    if (!_selectedClusterNames.contains(clustersFromSet.name))
+                    {
+                        _selectedClusterNames << clustersFromSet.name;
+                    }
                 }
                 else
                 {
@@ -1250,29 +1263,57 @@ void SettingsAction::updateClusterInfoStatusBar()
                     }
                     else if (buttons.testFlag(Qt::LeftButton))
                     {
-                        // Ignore click if clicking the currently selected label
-                        if (_selectedClusterLabel == clusterLabel)
+                        if (QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier))
                         {
-                            return;
+                            // Shift + click: add / remove this cell type (at least one stays selected)
+                            if (_selectedClusterNames.contains(clusterName))
+                            {
+                                if (_selectedClusterNames.size() == 1)
+                                {
+                                    return;
+                                }
+                                _selectedClusterNames.removeAll(clusterName);
+                            }
+                            else
+                            {
+                                _selectedClusterNames << clusterName;
+                            }
+                        }
+                        else
+                        {
+                            // plain click: select only this cell type
+                            if (_selectedClusterNames.size() == 1 && _selectedClusterNames.first() == clusterName)
+                            {
+                                return;
+                            }
+                            _selectedClusterNames = QStringList{ clusterName };
                         }
 
-                        // Deselect previous widget
-                        if (_selectedClusterLabel != nullptr)
-                        {
-                            QString prevNormal = _selectedClusterLabel->property("normalStyle").toString();
-                            _selectedClusterLabel->setStyleSheet(prevNormal);
-                        }
-
-                        // Select new widget
-                        QString newSelected = clusterLabel->property("selectedStyle").toString();
-                        clusterLabel->setStyleSheet(newSelected);
-                        _selectedClusterLabel = clusterLabel;
-                        _selectedClusterName = clusterName;
+                        _selectedClusterName = _selectedClusterNames.last();
+                        _selectedClusterLabel = _clusterLabelsByName.value(_selectedClusterName).data();
+                        applyClusterLabelSelectionStyles();
                         updateTraitReverseSearchFeature();
                     }
                     });
 
                 _selectedCellClusterInfoStatusBar->addWidget(clusterLabel);
+            }
+
+            // Drop selected cell types that are no longer present
+            {
+                QStringList presentNames;
+                for (const QString& name : _selectedClusterNames)
+                {
+                    if (_clusterLabelsByName.contains(name))
+                    {
+                        presentNames << name;
+                    }
+                }
+                _selectedClusterNames = presentNames;
+                if (!presentNames.isEmpty())
+                {
+                    _selectedClusterName = presentNames.last();
+                }
             }
 
             // Fallback: If previous selection was specified but is no longer present in the new set, select the first item instead
@@ -1281,6 +1322,7 @@ void SettingsAction::updateClusterInfoStatusBar()
                 firstLabel->setStyleSheet(firstLabel->property("selectedStyle").toString());
                 _selectedClusterLabel = firstLabel;
                 _selectedClusterName = firstName;
+                _selectedClusterNames = QStringList{ firstName };
             }
 
             auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
@@ -2130,19 +2172,42 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 }
 */
 // ============================================================================================================
-//  Trait correlation
+//  Gene - trait correlation across species
 //
-//  For every gene: Pearson correlation, across species, between
-//      x = mean expression of the gene in that species (selected cells of the chosen cluster only)
-//      y = the species' value of the chosen trait (from the phylogenetic tree view metadata)
+//  Question: which genes have an expression that correlates with a trait across species?
 //
-//  Pipeline: validate -> trait values -> selected cells per species (cached) -> species means (cached, parallel)
-//            -> Pearson per gene (parallel) -> publish to the gene table (one dataChanged signal).
+//   1. species      : the species picked in the species explorer that have a trait value and cells of the selected
+//                     cell types (none / fewer than two usable picked -> every species with a trait value)
+//   2. cell types   : one or several (Shift + click on the labels of the status bar)
+//   3. matrix X     : N species x G genes, mean expression of the gene over the cells of the selected cell types
+//                     (pooling: "Pool cells" or "Equal cell-type weighting")
+//   4. trait t      : one value per species, same order as the rows of X
+//   5. r_j          : Pearson correlation between column j of X and t
+//   6. significance : two-sided p-value of r_j (t distribution, N - 2 degrees of freedom) and the Benjamini-Hochberg
+//                     FDR over all genes. (A phylogenetic correction is not applied.)
+//
+//  Caching: the mean expression of every (species, cell type) pair is computed once and kept. Changing the species,
+//  the trait or the pooling only re-combines cached means; only newly selected cell types / species are read from
+//  the dataset. The cache is dropped when one of the underlying datasets changes.
 // ============================================================================================================
+
+void SettingsAction::applyClusterLabelSelectionStyles()
+{
+    for (auto it = _clusterLabelsByName.constBegin(); it != _clusterLabelsByName.constEnd(); ++it)
+    {
+        ClickableLabel* label = it.value().data();
+        if (!label)
+        {
+            continue;
+        }
+        const bool selected = _selectedClusterNames.contains(it.key());
+        label->setStyleSheet(label->property(selected ? "selectedStyle" : "normalStyle").toString());
+    }
+}
 
 void SettingsAction::updateTraitReverseSearchFeature()
 {
-    // Many events request a refresh within the same event-loop burst (species selection, trait change, cluster click,
+    // Many events request a refresh within the same event-loop burst (species selection, trait change, cell type click,
     // gene click, new model, ...). The single-shot timer coalesces them into one computation.
     if (_traitCorrelationTimer) {
         _traitCorrelationTimer->start();
@@ -2159,9 +2224,12 @@ void SettingsAction::computeTraitCorrelation()
         return;
     }
 
-    const QString clusterName = _selectedClusterName;
     QString traitName = _reverseSearchTraitSelectionString.getString();
-    if (clusterName.isEmpty() || traitName.isEmpty()) {
+    QStringList cellTypes = _selectedClusterNames;
+    if (cellTypes.isEmpty() && !_selectedClusterName.isEmpty()) {
+        cellTypes << _selectedClusterName;
+    }
+    if (traitName.isEmpty() || cellTypes.isEmpty()) {
         return;
     }
 
@@ -2200,89 +2268,59 @@ void SettingsAction::computeTraitCorrelation()
     }
     const QJsonObject traitObject = QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject();
 
-    // ---- 3. Selected cells of the chosen cluster, per species (cached per cluster + selection) -----------
-    const QString cacheKey = clusterName + QLatin1Char('|') + QString::number(_selectionRevision) + QLatin1Char('|') + mainPointsDataset->getId();
+    // ---- 3. Cache: valid as long as the underlying datasets stay the same ----------------------------------
+    Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
+    Dataset<Clusters> cellTypeDataset = _bottomClusterNamesDataset.getCurrentDataset();
+    const QString cacheKey = mainPointsDataset->getId() + QLatin1Char('|') + speciesDataset->getId() + QLatin1Char('|') + cellTypeDataset->getId();
     if (cacheKey != _traitCache.key) {
         _traitCache = TraitCache();
         _traitCache.key = cacheKey;
     }
 
-    if (!_traitCache.pointsBuilt) {
-        // the cell selection the tables were computed from (falls back to the live selection before the first update)
-        std::vector<int> selectedPoints(_selectedIndicesFromStorage.begin(), _selectedIndicesFromStorage.end());
-        if (selectedPoints.empty()) {
-            const auto liveSelection = mainPointsDataset->getSelectionIndices();
-            selectedPoints.assign(liveSelection.begin(), liveSelection.end());
-        }
-        std::sort(selectedPoints.begin(), selectedPoints.end());
+    const auto speciesClusters = speciesDataset->getClusters();
+    const auto cellTypeClusters = cellTypeDataset->getClusters();
 
-        std::vector<int> clusterIndices;
-        Dataset<Clusters> clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
-        for (const auto& cluster : clusterDataset->getClusters()) {
-            if (cluster.getName() == clusterName) {
+    // sorted point indices of every species (once per dataset, sorted concurrently)
+    if (!_traitCache.speciesBuilt) {
+        struct SortJob {
+            int index = 0;
+            std::vector<int> points;
+        };
+        std::vector<SortJob> sortJobs(speciesClusters.size());
+        for (int i = 0; i < static_cast<int>(sortJobs.size()); ++i) {
+            sortJobs[i].index = i;
+        }
+        QtConcurrent::blockingMap(sortJobs, [&](SortJob& job) {
+            const auto& idx = speciesClusters[job.index].getIndices();
+            job.points.assign(idx.begin(), idx.end());
+            std::sort(job.points.begin(), job.points.end());
+            });
+        for (auto& job : sortJobs) {
+            _traitCache.speciesSorted[speciesClusters[job.index].getName()] = std::move(job.points);
+        }
+        _traitCache.speciesBuilt = true;
+    }
+
+    // sorted point indices of the selected cell types (on first use)
+    for (const QString& cellType : cellTypes) {
+        if (_traitCache.cellTypeSorted.count(cellType) > 0) {
+            continue;
+        }
+        std::vector<int> sortedPoints;
+        for (const auto& cluster : cellTypeClusters) {
+            if (cluster.getName() == cellType) {
                 const auto& idx = cluster.getIndices();
-                clusterIndices.assign(idx.begin(), idx.end());
+                sortedPoints.assign(idx.begin(), idx.end());
+                std::sort(sortedPoints.begin(), sortedPoints.end());
                 break;
             }
         }
-        std::sort(clusterIndices.begin(), clusterIndices.end());
-        const std::vector<int> selectedInCluster = intersectSortedIndicesToInt(selectedPoints, clusterIndices);
-
-        Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
-        const auto speciesClusters = speciesDataset->getClusters();
-
-        // Split \p cells (sorted) per species, concurrently, and store the non-empty sets in the cache.
-        const auto buildPointsPerSpecies = [&](const std::vector<int>& cells) {
-            struct PointsJob {
-                int speciesIndex = 0;
-                std::vector<int> points;
-            };
-            std::vector<PointsJob> pointsJobs(speciesClusters.size());
-            for (int i = 0; i < static_cast<int>(pointsJobs.size()); ++i) {
-                pointsJobs[i].speciesIndex = i;
-            }
-
-            QtConcurrent::blockingMap(pointsJobs, [&](PointsJob& job) {
-                const auto& idx = speciesClusters[job.speciesIndex].getIndices();
-                std::vector<int> sortedSpeciesIndices(idx.begin(), idx.end());
-                std::sort(sortedSpeciesIndices.begin(), sortedSpeciesIndices.end());
-                job.points = intersectSortedIndicesToInt(cells, sortedSpeciesIndices);
-                });
-
-            _traitCache.pointsPerSpecies.clear();
-            for (auto& job : pointsJobs) {
-                if (!job.points.empty()) {
-                    _traitCache.pointsPerSpecies[speciesClusters[job.speciesIndex].getName()] = std::move(job.points);
-                }
-            }
-            };
-
-        // species that have a trait value AND cells in the current point sets
-        const auto countSpeciesWithTrait = [&]() {
-            size_t count = 0;
-            for (const auto& entry : _traitCache.pointsPerSpecies) {
-                if (traitObject.contains(entry.first)) {
-                    ++count;
-                }
-            }
-            return count;
-            };
-
-        // First choice: the selected cells of the cluster
-        buildPointsPerSpecies(selectedInCluster);
-
-        // A correlation needs several species. If the selection only touches one or two species (e.g. all selected cells
-        // belong to one species), compare the species on ALL their cells of the cluster instead of the selection.
-        if (countSpeciesWithTrait() < kMinSpeciesForTraitCorrelation) {
-            buildPointsPerSpecies(clusterIndices);
-        }
-        _traitCache.pointsBuilt = true;
+        _traitCache.cellTypeSorted[cellType] = std::move(sortedPoints);
     }
 
-    // ---- 4. Species of the comparison and the selected species -----------------------------------------
-    // usable = has a numeric trait value AND cells in the current point sets (std::map keeps a stable order)
-    std::map<QString, double> traitPerSpecies;
-    for (const auto& entry : _traitCache.pointsPerSpecies) {
+    // ---- 4. Species that have a numeric trait value ----------------------------------------------------------
+    std::map<QString, double> traitPerSpecies; // std::map: stable, sorted order
+    for (const auto& entry : _traitCache.speciesSorted) {
         if (!traitObject.contains(entry.first)) {
             continue;
         }
@@ -2293,94 +2331,163 @@ void SettingsAction::computeTraitCorrelation()
         }
     }
 
-    _geneTraitValuesComputed.clear();
-    if (traitPerSpecies.size() < kMinSpeciesForTraitCorrelation) {
-        // the standardisation needs a spread of trait values: at least two species with data
-        qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and cells; found" << traitPerSpecies.size();
-        publishTraitCorrelationToModel();
-        return;
-    }
+    const auto entryKey = [](const QString& species, const QString& cellType) {
+        return species + QLatin1Char('\x1f') + cellType;
+        };
 
-    std::vector<QString> allSpecies;
-    allSpecies.reserve(traitPerSpecies.size());
-    for (const auto& entry : traitPerSpecies) {
-        allSpecies.push_back(entry.first);
-    }
-
-    // Species picked in the species explorer (1 or more); none picked -> all species (= ordinary Pearson correlation).
-    // The trait of the selection is the average over the selected species, which the score takes care of by averaging
-    // the per-species trait z-scores.
-    std::vector<size_t> selectedIndices;
-    const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
-    for (size_t i = 0; i < allSpecies.size(); ++i) {
-        if (explorerSelection.contains(allSpecies[i])) {
-            selectedIndices.push_back(i);
+    // Make sure the mean expression of every (species, selected cell type) pair is in the cache.
+    // Missing pairs are computed concurrently; the worker count respects the memory budget.
+    const auto ensureEntries = [&](const std::vector<QString>& speciesList) {
+        struct EntryJob {
+            QString key;
+            const std::vector<int>* speciesPoints = nullptr;
+            const std::vector<int>* cellTypePoints = nullptr;
+            TraitCache::Entry entry;
+        };
+        std::vector<EntryJob> jobs;
+        size_t largestPointSet = 0;
+        for (const QString& species : speciesList) {
+            for (const QString& cellType : cellTypes) {
+                const QString key = entryKey(species, cellType);
+                if (_traitCache.entries.count(key) > 0) {
+                    continue;
+                }
+                const std::vector<int>& speciesPoints = _traitCache.speciesSorted.at(species);
+                const std::vector<int>& cellTypePoints = _traitCache.cellTypeSorted.at(cellType);
+                largestPointSet = std::max(largestPointSet, std::min(speciesPoints.size(), cellTypePoints.size()));
+                jobs.push_back({ key, &speciesPoints, &cellTypePoints, {} });
+            }
         }
-    }
-    if (selectedIndices.empty()) {
-        selectedIndices.resize(allSpecies.size());
-        std::iota(selectedIndices.begin(), selectedIndices.end(), static_cast<size_t>(0));
-    }
-
-    // ---- 5. Mean expression per species (parallel over species, only the ones missing from the cache) ----
-    struct MeansJob {
-        QString species;
-        const std::vector<int>* points = nullptr;
-        std::vector<float> means;
-    };
-    std::vector<MeansJob> meansJobs;
-    size_t largestPointSet = 0;
-    for (const QString& species : allSpecies) {
-        if (_traitCache.meansPerSpecies.count(species) == 0) {
-            const std::vector<int>& speciesPoints = _traitCache.pointsPerSpecies.at(species);
-            largestPointSet = std::max(largestPointSet, speciesPoints.size());
-            meansJobs.push_back({ species, &speciesPoints, {} });
+        if (jobs.empty()) {
+            return;
         }
-    }
 
-    if (!meansJobs.empty()) {
         std::vector<int> allGeneIndices(geneCount);
         std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
         QThreadPool meansPool;
         meansPool.setMaxThreadCount(memorySafeThreadCount(largestPointSet));
-        QtConcurrent::blockingMap(&meansPool, meansJobs, [&](MeansJob& job) {
-            job.means.assign(geneCount, 0.0f);
-            computeChunkedGeneMeans(mainPointsDataset, allGeneIndices, *job.points,
+        QtConcurrent::blockingMap(&meansPool, jobs, [&](EntryJob& job) {
+            const std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+            job.entry.cellCount = static_cast<int>(points.size());
+            if (points.empty()) {
+                return; // remembered as "no cells" so it is not looked up again
+            }
+            job.entry.means.assign(geneCount, 0.0f);
+            computeChunkedGeneMeans(mainPointsDataset, allGeneIndices, points,
                 [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
                     for (size_t g = 0; g < chunkGenes.size(); ++g) {
-                        job.means[static_cast<size_t>(start) + g] = chunkMeans[g];
+                        job.entry.means[static_cast<size_t>(start) + g] = chunkMeans[g];
                     }
                 });
             });
 
-        for (auto& job : meansJobs) {
-            _traitCache.meansPerSpecies[job.species] = std::move(job.means);
+        for (auto& job : jobs) {
+            _traitCache.entries[job.key] = std::move(job.entry);
+        }
+        };
+
+    const auto hasCells = [&](const QString& species) {
+        for (const QString& cellType : cellTypes) {
+            const auto it = _traitCache.entries.find(entryKey(species, cellType));
+            if (it != _traitCache.entries.end() && it->second.cellCount > 0) {
+                return true;
+            }
+        }
+        return false;
+        };
+
+    // ---- 5. Species of the comparison -------------------------------------------------------------------------
+    // the picked species with trait value and cells; fewer than two of them (e.g. none or a single species picked) ->
+    // every species with trait value and cells, because a correlation across species needs several species
+    std::vector<QString> population;
+    {
+        std::vector<QString> picked;
+        for (const QString& species : _speciesExplorerInMap.getSelectedOptions()) {
+            if (traitPerSpecies.count(species) > 0) {
+                picked.push_back(species);
+            }
+        }
+        ensureEntries(picked);
+        for (const QString& species : picked) {
+            if (hasCells(species)) {
+                population.push_back(species);
+            }
+        }
+    }
+    if (population.size() < kMinSpeciesForTraitCorrelation) {
+        std::vector<QString> everySpecies;
+        for (const auto& entry : traitPerSpecies) {
+            everySpecies.push_back(entry.first);
+        }
+        ensureEntries(everySpecies);
+        population.clear();
+        for (const QString& species : everySpecies) {
+            if (hasCells(species)) {
+                population.push_back(species);
+            }
         }
     }
 
-    // ---- 6. Score of every gene (parallel over gene ranges) ------------------------------------------------
-    std::vector<const std::vector<float>*> speciesGeneMeans;
+    _geneTraitValuesComputed.clear();
+    _geneTraitPValues.clear();
+    _geneTraitFdrValues.clear();
+    if (population.size() < kMinSpeciesForTraitCorrelation) {
+        qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and cells of the selected cell types; found" << population.size();
+        publishTraitCorrelationToModel();
+        return;
+    }
+
+    // ---- 6. Expression matrix X (N species x G genes), trait vector t, Pearson r, p-value ------------------------
+    const TraitPooling pooling = (_traitPoolingMode.getCurrentText() == "Equal cell-type weighting") ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
+
+    std::vector<std::vector<CellTypeMeans>> partsPerSpecies(population.size());
     std::vector<double> traitValues;
-    speciesGeneMeans.reserve(allSpecies.size());
-    traitValues.reserve(allSpecies.size());
-    for (const QString& species : allSpecies) {
-        speciesGeneMeans.push_back(&_traitCache.meansPerSpecies.at(species));
-        traitValues.push_back(traitPerSpecies.at(species));
+    traitValues.reserve(population.size());
+    for (size_t i = 0; i < population.size(); ++i) {
+        for (const QString& cellType : cellTypes) {
+            const auto& entry = _traitCache.entries.at(entryKey(population[i], cellType));
+            if (entry.cellCount > 0) {
+                partsPerSpecies[i].push_back({ static_cast<size_t>(entry.cellCount), &entry.means });
+            }
+        }
+        traitValues.push_back(traitPerSpecies.at(population[i]));
+    }
+
+    std::vector<std::vector<float>> expressionMatrix(population.size(), std::vector<float>(geneCount, 0.0f)); // [species][gene]
+    std::vector<const std::vector<float>*> expressionRows;
+    for (const auto& row : expressionMatrix) {
+        expressionRows.push_back(&row);
     }
 
     std::vector<float> correlations(geneCount, 0.0f);
+    std::vector<float> pValues(geneCount, 1.0f);
+
+    // Every worker owns a range of genes: it combines the cached per cell type means into the species rows of X,
+    // then correlates its genes with the trait. Disjoint gene ranges -> no locking required.
     auto geneRanges = splitGeneRanges(geneCount, static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
     QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
-        computeSelectionTraitScores(speciesGeneMeans, traitValues, selectedIndices, range, correlations);
+        for (size_t i = 0; i < population.size(); ++i) {
+            combineCellTypeMeans(partsPerSpecies[i], pooling, range, expressionMatrix[i]);
+        }
+        computePearsonCorrelations(expressionRows, traitValues, range, correlations);
+        for (size_t g = range.begin; g < range.end; ++g) {
+            pValues[g] = static_cast<float>(pearsonPValue(correlations[g], population.size()));
+        }
         });
 
+    // ---- 7. Multiple testing correction and result --------------------------------------------------------------
+    const std::vector<float> fdrValues = benjaminiHochberg(pValues);
+
     _geneTraitValuesComputed.reserve(geneCount);
+    _geneTraitPValues.reserve(geneCount);
+    _geneTraitFdrValues.reserve(geneCount);
     for (size_t g = 0; g < geneCount; ++g) {
         _geneTraitValuesComputed[geneNames[g]] = correlations[g];
+        _geneTraitPValues[geneNames[g]] = pValues[g];
+        _geneTraitFdrValues[geneNames[g]] = fdrValues[g];
     }
 
-    // ---- 7. Show the result -------------------------------------------------------------------------------
     publishTraitCorrelationToModel();
 }
 
@@ -2403,14 +2510,18 @@ void SettingsAction::publishTraitCorrelationToModel()
                 continue;
             }
 
-            const auto it = _geneTraitValuesComputed.find(idItem->text());
-            const double value = it != _geneTraitValuesComputed.end() ? static_cast<double>(it->second) : 0.0;
-            correlationItem->setData(value, Qt::DisplayRole);
-            correlationItem->setData(value, Qt::UserRole);
+            const QString gene = idItem->text();
+            const auto rIt = _geneTraitValuesComputed.find(gene);
+            const auto pIt = _geneTraitPValues.find(gene);
+            const auto qIt = _geneTraitFdrValues.find(gene);
+            setTraitCorrelationItemData(correlationItem,
+                rIt != _geneTraitValuesComputed.end() ? static_cast<double>(rIt->second) : 0.0,
+                pIt != _geneTraitPValues.end() ? static_cast<double>(pIt->second) : 1.0,
+                qIt != _geneTraitFdrValues.end() ? static_cast<double>(qIt->second) : 1.0);
         }
     }
 
-    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole });
+    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole });
 }
 
 

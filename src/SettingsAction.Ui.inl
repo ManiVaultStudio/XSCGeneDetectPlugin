@@ -61,7 +61,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker(this, "Map For Hierarchy Items Change Method Stop For Project Load Blocker"),
     _saveSpeciesTable(this, "Save Left Gene Table"),
     _saveGeneTable(this, "Save Right Species Selection Table"),
-    _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String")
+    _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String"),
+    _traitPoolingMode(this, "Trait Pooling")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -300,6 +301,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _scatterplotReembedColorOption.setSerializationName("CSCGDV:Scatterplot Reembedding Color Option");
     _scatterplotEmbeddingPointsUMAPOption.setSerializationName("CSCGDV:Scatterplot Embedding UMAP Points Option");
     _typeofTopNGenes.setSerializationName("CSCGDV:Type of Top N Genes");
+    _traitPoolingMode.setSerializationName("CSCGDV:Trait Pooling");
     _clusterCountSortingType.setSerializationName("CSCGDV:Cluster Count Sorting Type");
     _applyLogTransformation.setSerializationName("CSCGDV:Apply Log Transformation");
     _createRowMultiSelectTree.setDisabled(true);
@@ -307,6 +309,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedRowIndex.setString("");
     _scatterplotReembedColorOption.initialize({ "Species","Cluster","Expression" }, "Species");
     _typeofTopNGenes.initialize({ "Absolute","Negative","Positive" }, "Positive");
+    _traitPoolingMode.initialize({ "Pool cells", "Equal cell-type weighting" }, "Pool cells");
+    _traitPoolingMode.setToolTip("How the expression of several selected cell types is combined per species:\n"
+        "Pool cells: all cells of the selected cell types are pooled (cell types with more cells weigh more).\n"
+        "Equal cell-type weighting: every selected cell type weighs the same, regardless of its cell count.");
     _clusterCountSortingType.initialize({ "Count","Name","Hierarchy View" }, "Count");
     _topNGenesFilter.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
 
@@ -912,6 +918,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_typeofTopNGenes, &OptionAction::currentIndexChanged, this, updateTypeOfTopNGenesFilter);
+    // Changing the pooling only re-combines the cached per cell type means (debounced)
+    connect(&_traitPoolingMode, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
 
 
     const auto updateClusterOrderHierarchy = [this]() -> void {

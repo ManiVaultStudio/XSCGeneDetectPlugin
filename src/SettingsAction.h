@@ -206,6 +206,9 @@ struct InitialStatistics {
 
 /** Column of the gene table that holds the trait correlation (see createModelFromData). */
 inline constexpr int kTraitCorrelationColumn = 4;
+/** Extra item roles of the trait correlation cell (DisplayRole/UserRole hold the correlation coefficient r). */
+inline constexpr int kTraitPValueRole = Qt::UserRole + 1;   /** two-sided p-value of r */
+inline constexpr int kTraitFdrRole = Qt::UserRole + 2;   /** Benjamini-Hochberg FDR (q-value) over all genes */
 
 class SettingsAction : public WidgetAction
 {
@@ -295,6 +298,7 @@ public: // Action getters
     StringAction& getTopSelectedHierarchyStatus() { return _topSelectedHierarchyStatus; }
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
     StringAction& getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
+    OptionAction& getTraitPoolingMode() { return _traitPoolingMode; }   /** how several selected cell types are combined */
 
     mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
 
@@ -406,11 +410,20 @@ private:
     // ---- Trait correlation internals -----------------------------------------------------------------
     /** Per (cluster, cell selection) cache so that changing only the trait / species never re-reads expression data. */
     struct TraitCache {
-        QString key;                                                  /** cluster + selection revision + dataset id */
-        bool pointsBuilt = false;                                     /** pointsPerSpecies is valid */
-        std::unordered_map<QString, std::vector<int>> pointsPerSpecies; /** selected cells of the cluster, per species (sorted) */
-        std::unordered_map<QString, std::vector<float>> meansPerSpecies; /** mean expression of every gene, per species */
+        /** Mean expression of one cell type in one species. */
+        struct Entry {
+            int cellCount = 0;               /** cells of the cell type in the species (0 -> means stays empty) */
+            std::vector<float> means;        /** mean expression of every gene over those cells */
+        };
+
+        QString key;                                                        /** ids of the datasets the cache was built from */
+        bool speciesBuilt = false;                                          /** speciesSorted is valid */
+        std::unordered_map<QString, std::vector<int>> speciesSorted;        /** point indices per species (sorted) */
+        std::unordered_map<QString, std::vector<int>> cellTypeSorted;       /** point indices per cell type (sorted), filled on first use */
+        std::unordered_map<QString, Entry> entries;                         /** "species\x1fcellType" -> mean expression */
     };
+
+    void applyClusterLabelSelectionStyles();   /** (re)style the cell-type labels of the status bar from _selectedClusterNames */
 
     void computeTraitCorrelation();            /** the actual (non-debounced) computation */
     void publishTraitCorrelationToModel();     /** write _geneTraitValuesComputed into the gene table model */
@@ -476,7 +489,9 @@ protected:
     mv::Dataset<Points>             _geneSimilarityPoints;
     //std::vector<QString>        _geneSimilarityClusters;
     mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
-    std::unordered_map<QString, float> _geneTraitValuesComputed;
+    std::unordered_map<QString, float> _geneTraitValuesComputed;   /** gene -> Pearson r */
+    std::unordered_map<QString, float> _geneTraitPValues;          /** gene -> two-sided p-value */
+    std::unordered_map<QString, float> _geneTraitFdrValues;        /** gene -> Benjamini-Hochberg FDR */
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
     DatasetPickerAction           _scatterplotEmbeddingPointsUMAPOption;
@@ -526,6 +541,7 @@ protected:
     StringAction              _rightClickedCluster;
     TriggerAction              _clearRightClickedCluster;
     StringAction              _reverseSearchTraitSelectionString;
+    OptionAction              _traitPoolingMode;      /** "Pool cells" (default) or "Equal cell-type weighting" */
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
@@ -533,7 +549,9 @@ protected:
     StringAction               _topSelectedHierarchyStatus;
     bool                      _projectOpened = false;
     ClickableLabel* _selectedClusterLabel = nullptr;
-    QString _selectedClusterName;
+    QString _selectedClusterName;                                 /** primary (last clicked) cell type */
+    QStringList _selectedClusterNames;                            /** all selected cell types (Shift + click adds/removes) */
+    QHash<QString, QPointer<ClickableLabel>> _clusterLabelsByName; /** status bar label of every cell type */
 
     // ---- Trait correlation state ----------------------------------------------------------------------
     QTimer* _traitCorrelationTimer = nullptr;   /** debounce timer, see updateTraitReverseSearchFeature() */

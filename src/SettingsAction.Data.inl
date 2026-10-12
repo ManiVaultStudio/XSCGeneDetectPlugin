@@ -195,14 +195,14 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
 
         // Column 4: trait correlation. A numeric DisplayRole keeps sorting numeric; the bar delegate formats the text
         // and draws the bar. (Values arrive/refresh later through publishTraitCorrelationToModel().)
-        double correlation = 0.0;
         const auto itCorr = _geneTraitValuesComputed.find(gene);
-        if (itCorr != _geneTraitValuesComputed.end()) {
-            correlation = static_cast<double>(itCorr->second);
-        }
+        const auto itP = _geneTraitPValues.find(gene);
+        const auto itQ = _geneTraitFdrValues.find(gene);
         auto* correlationItem = new QStandardItem();
-        correlationItem->setData(correlation, Qt::DisplayRole);
-        correlationItem->setData(correlation, Qt::UserRole);
+        setTraitCorrelationItemData(correlationItem,
+            itCorr != _geneTraitValuesComputed.end() ? static_cast<double>(itCorr->second) : 0.0,
+            itP != _geneTraitPValues.end() ? static_cast<double>(itP->second) : 1.0,
+            itQ != _geneTraitFdrValues.end() ? static_cast<double>(itQ->second) : 1.0);
         model->setItem(rowIndex, kTraitCorrelationColumn, correlationItem);
     }
 
@@ -250,15 +250,17 @@ namespace {
         return model && model->columnCount() >= 4 && model->headerData(3, Qt::Horizontal).toString() == "Statistics";
     }
 
-    // The correlation column (if present) holds a double in DisplayRole.
+    // "r, p-value, FDR" of the trait correlation column (null string when the model has no such column).
     QString correlationText(const QAbstractItemModel* model, int row)
     {
-        if (!model || model->columnCount() < 5) {
+        if (!model || model->columnCount() <= kTraitCorrelationColumn) {
             return QString();
         }
-        bool ok = false;
-        const double value = model->data(model->index(row, 4), Qt::UserRole).toDouble(&ok);
-        return ok ? QString::number(value, 'f', 3) : model->data(model->index(row, 4)).toString();
+        const QModelIndex index = model->index(row, kTraitCorrelationColumn);
+        return QString("%1, %2, %3")
+            .arg(index.data(Qt::UserRole).toDouble(), 0, 'f', 3)
+            .arg(index.data(kTraitPValueRole).toDouble(), 0, 'g', 4)
+            .arg(index.data(kTraitFdrRole).toDouble(), 0, 'g', 4);
     }
 
 } // namespace
@@ -294,7 +296,7 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
         const bool hasCorrelation = model->columnCount() >= 5;
         stream << "ID,Species Appearance,Gene Appearance Species Names";
         if (hasCorrelation) {
-            stream << ",Trait Correlation";
+            stream << ",Trait Correlation,Trait p-value,Trait FDR";
         }
         stream << "\n";
 
@@ -463,7 +465,7 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
         QString ergicString = "Fraction in " + _topSelectedHierarchyStatus.getString();
         QStringList headers = { "Gene", "Species Appearance", "Species", "Mean Gene Differential Expression", "Gene Appearance Rank", "Fraction in Neuronal", ergicString ,"Count of Selected", "Mean Gene Expression of Selected", "Count of Non Selected","Mean Gene Expression of Non Selected" };
         if (model->columnCount() >= 5) {
-            headers << "Trait Correlation";
+            headers << "Trait Correlation" << "Trait p-value" << "Trait FDR";
         }
         QString headerNames = headers.join(",");
         stream << headerNames;

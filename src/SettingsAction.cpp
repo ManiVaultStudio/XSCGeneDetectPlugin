@@ -318,6 +318,16 @@ namespace {
         return std::max(1, std::min(idealThreads, budgetThreads));
     }
 
+    /** Fill the trait correlation cell of the gene table: r (display + sorting), p-value, FDR and a descriptive tooltip. */
+    inline void setTraitCorrelationItemData(QStandardItem* item, double r, double p, double q) {
+        item->setData(r, Qt::DisplayRole);
+        item->setData(r, Qt::UserRole);
+        item->setData(p, kTraitPValueRole);
+        item->setData(q, kTraitFdrRole);
+        item->setData(QString("Trait correlation r = %1\np-value = %2\nFDR (Benjamini-Hochberg) = %3")
+            .arg(r, 0, 'f', 3).arg(p, 0, 'g', 3).arg(q, 0, 'g', 3), Qt::ToolTipRole);
+    }
+
     // ----------------------------------------------------------------------------------------------------------
     //  Trait correlation kernel (plain C++, no Qt types so it can be unit tested in isolation)
     // ----------------------------------------------------------------------------------------------------------
@@ -398,72 +408,142 @@ namespace {
         }
     }
 
+    /** How the means of several selected cell types are combined into one value per species. */
+    enum class TraitPooling {
+        PoolCells,           /** all cells of the selected cell types pooled: cell types with more cells weigh more */
+        EqualCellTypeWeight  /** every selected cell type (with cells in the species) weighs the same */
+    };
+
+    /** Mean expression of one cell type in one species: number of cells and the mean of every gene (null/empty when no cells). */
+    struct CellTypeMeans {
+        size_t cellCount = 0;
+        const std::vector<float>* means = nullptr;
+    };
+
     /**
-     * Trait/expression agreement score of every gene in \p range for a SET of species.
-     *
-     * Both the gene expression and the trait are standardised against ALL species (population z-scores), because a single
-     * trait value has no spread of its own. The score of a gene is the mean over the selected species of
-     *      z(expression of the gene in the species) * z(trait of the species)
-     * so a gene that is high where the trait is high (and low where it is low) scores close to +1, the opposite close to -1.
-     * With every species selected this is exactly the Pearson correlation; with a single species it shows how strongly that
-     * species follows the overall gene/trait trend. The value is clamped to [-1, 1]; genes or traits without variance score 0.
-     *
-     * @param speciesGeneMeans mean expression of every gene, one entry per species (all species of the comparison)
-     * @param traitValues      trait value per species (same order)
-     * @param selected         indices (into the two vectors above) of the selected species; must not be empty
+     * Combine the per cell type means of ONE species into one mean per gene for the genes in \p range.
+     *  PoolCells           : sum(n_c * mean_c) / sum(n_c)   == mean over the pooled cells (exact, no cell re-reading needed)
+     *  EqualCellTypeWeight : mean of mean_c over the cell types that have cells
+     * Species without any cell get 0.
      */
-    inline void computeSelectionTraitScores(const std::vector<const std::vector<float>*>& speciesGeneMeans,
-        const std::vector<double>& traitValues,
-        const std::vector<size_t>& selected,
-        const GeneRange& range,
-        std::vector<float>& scores) {
-        const size_t speciesCount = traitValues.size();
-        if (speciesCount == 0 || selected.empty() || speciesGeneMeans.size() != speciesCount) {
-            return;
+    inline void combineCellTypeMeans(const std::vector<CellTypeMeans>& parts, TraitPooling mode, const GeneRange& range, std::vector<float>& out) {
+        double totalCells = 0.0;
+        size_t typesWithCells = 0;
+        for (const auto& part : parts) {
+            if (part.cellCount > 0 && part.means) {
+                totalCells += static_cast<double>(part.cellCount);
+                ++typesWithCells;
+            }
         }
-
-        double traitMean = 0.0;
-        for (const double value : traitValues) {
-            traitMean += value;
-        }
-        traitMean /= static_cast<double>(speciesCount);
-
-        double traitVariance = 0.0;
-        for (const double value : traitValues) {
-            traitVariance += (value - traitMean) * (value - traitMean);
-        }
-        traitVariance /= static_cast<double>(speciesCount);
-        const double traitStdDev = std::sqrt(traitVariance);
 
         for (size_t gene = range.begin; gene < range.end; ++gene) {
-            double geneMean = 0.0;
-            for (size_t species = 0; species < speciesCount; ++species) {
-                geneMean += static_cast<double>((*speciesGeneMeans[species])[gene]);
-            }
-            geneMean /= static_cast<double>(speciesCount);
-
-            double geneVariance = 0.0;
-            for (size_t species = 0; species < speciesCount; ++species) {
-                const double delta = static_cast<double>((*speciesGeneMeans[species])[gene]) - geneMean;
-                geneVariance += delta * delta;
-            }
-            geneVariance /= static_cast<double>(speciesCount);
-            const double geneStdDev = std::sqrt(geneVariance);
-
-            if (geneStdDev <= 0.0 || traitStdDev <= 0.0) {
-                scores[gene] = 0.0f;
+            if (typesWithCells == 0) {
+                out[gene] = 0.0f;
                 continue;
             }
-
             double sum = 0.0;
-            for (const size_t species : selected) {
-                const double geneZ = (static_cast<double>((*speciesGeneMeans[species])[gene]) - geneMean) / geneStdDev;
-                const double traitZ = (traitValues[species] - traitMean) / traitStdDev;
-                sum += geneZ * traitZ;
+            for (const auto& part : parts) {
+                if (part.cellCount == 0 || !part.means) {
+                    continue;
+                }
+                const double weight = (mode == TraitPooling::PoolCells) ? static_cast<double>(part.cellCount) : 1.0;
+                sum += weight * static_cast<double>((*part.means)[gene]);
             }
-            const double score = sum / static_cast<double>(selected.size());
-            scores[gene] = static_cast<float>(std::max(-1.0, std::min(1.0, score)));
+            const double divisor = (mode == TraitPooling::PoolCells) ? totalCells : static_cast<double>(typesWithCells);
+            out[gene] = static_cast<float>(sum / divisor);
         }
+    }
+
+    /** Continued fraction of the incomplete beta function (modified Lentz). */
+    inline double incompleteBetaContinuedFraction(double a, double b, double x) {
+        constexpr int kMaxIterations = 400;
+        constexpr double kEpsilon = 3.0e-16;
+        constexpr double kTiny = 1.0e-300;
+
+        const double qab = a + b;
+        const double qap = a + 1.0;
+        const double qam = a - 1.0;
+        double c = 1.0;
+        double d = 1.0 - qab * x / qap;
+        if (std::fabs(d) < kTiny) d = kTiny;
+        d = 1.0 / d;
+        double h = d;
+        for (int m = 1; m <= kMaxIterations; ++m) {
+            const int m2 = 2 * m;
+            double aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+            d = 1.0 + aa * d;
+            if (std::fabs(d) < kTiny) d = kTiny;
+            c = 1.0 + aa / c;
+            if (std::fabs(c) < kTiny) c = kTiny;
+            d = 1.0 / d;
+            h *= d * c;
+            aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+            d = 1.0 + aa * d;
+            if (std::fabs(d) < kTiny) d = kTiny;
+            c = 1.0 + aa / c;
+            if (std::fabs(c) < kTiny) c = kTiny;
+            d = 1.0 / d;
+            const double delta = d * c;
+            h *= delta;
+            if (std::fabs(delta - 1.0) < kEpsilon) {
+                break;
+            }
+        }
+        return h;
+    }
+
+    /** Regularised incomplete beta function I_x(a, b). */
+    inline double regularizedIncompleteBeta(double a, double b, double x) {
+        if (x <= 0.0) return 0.0;
+        if (x >= 1.0) return 1.0;
+        const double front = std::exp(std::lgamma(a + b) - std::lgamma(a) - std::lgamma(b) + a * std::log(x) + b * std::log1p(-x));
+        if (x < (a + 1.0) / (a + b + 2.0)) {
+            return front * incompleteBetaContinuedFraction(a, b, x) / a;
+        }
+        return 1.0 - front * incompleteBetaContinuedFraction(b, a, 1.0 - x) / b;
+    }
+
+    /**
+     * Two-sided p-value of a Pearson correlation \p r computed from \p sampleCount species
+     * (Student t with sampleCount - 2 degrees of freedom). Fewer than 3 species carry no significance information -> 1.
+     */
+    inline double pearsonPValue(double r, size_t sampleCount) {
+        if (sampleCount < 3) {
+            return 1.0;
+        }
+        r = std::max(-1.0, std::min(1.0, r));
+        if (std::fabs(r) >= 1.0) {
+            return 0.0;
+        }
+        const double degreesOfFreedom = static_cast<double>(sampleCount) - 2.0;
+        const double tSquared = r * r * degreesOfFreedom / (1.0 - r * r);
+        const double p = regularizedIncompleteBeta(degreesOfFreedom / 2.0, 0.5, degreesOfFreedom / (degreesOfFreedom + tSquared));
+        return std::max(0.0, std::min(1.0, p));
+    }
+
+    /** Benjamini-Hochberg false discovery rate (q-values) for a vector of p-values. */
+    inline std::vector<float> benjaminiHochberg(const std::vector<float>& pValues) {
+        const size_t count = pValues.size();
+        std::vector<float> qValues(count, 1.0f);
+        if (count == 0) {
+            return qValues;
+        }
+
+        std::vector<size_t> order(count);
+        for (size_t i = 0; i < count; ++i) {
+            order[i] = i;
+        }
+        std::sort(order.begin(), order.end(), [&pValues](size_t a, size_t b) { return pValues[a] < pValues[b]; });
+
+        // walk from the largest p-value down, keeping the running minimum of p * m / rank
+        double runningMinimum = 1.0;
+        for (size_t rank = count; rank >= 1; --rank) {
+            const size_t index = order[rank - 1];
+            const double adjusted = static_cast<double>(pValues[index]) * static_cast<double>(count) / static_cast<double>(rank);
+            runningMinimum = std::min(runningMinimum, adjusted);
+            qValues[index] = static_cast<float>(std::min(1.0, runningMinimum));
+        }
+        return qValues;
     }
 
 } // namespace

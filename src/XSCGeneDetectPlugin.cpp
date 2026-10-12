@@ -761,7 +761,11 @@ void XSCGeneDetectPlugin::init()
     //on hovering a cell, show the full text available in a tooltip
     connect(_settingsAction.getGeneTableView(), &QTableView::entered, [this](const QModelIndex& index) {
         if (index.isValid()) {
-            QString text = index.data().toString();
+            // an explicit tooltip of the cell wins over its display text
+            QString text = index.data(Qt::ToolTipRole).toString();
+            if (text.isEmpty()) {
+                text = index.data().toString();
+            }
             if (!text.isEmpty()) {
                 _settingsAction.getGeneTableView()->setToolTip(text);
             }
@@ -797,7 +801,11 @@ void XSCGeneDetectPlugin::init()
     //on hovering a cell, show the full text available in a tooltip
     connect(_settingsAction.getSelectionDetailsTable(), &QTableView::entered, [this](const QModelIndex& index) {
         if (index.isValid()) {
-            QString text = index.data().toString();
+            // an explicit tooltip of the cell wins over its display text
+            QString text = index.data(Qt::ToolTipRole).toString();
+            if (text.isEmpty()) {
+                text = index.data().toString();
+            }
             if (!text.isEmpty()) {
                 _settingsAction.getSelectionDetailsTable()->setToolTip(text);
             }
@@ -900,6 +908,7 @@ void XSCGeneDetectPlugin::init()
     mainOptionsGroup1->addAction(&_settingsAction.getStartComputationTriggerAction());
     mainOptionsGroup1->addAction(&_settingsAction.getTopNGenesFilter());
     mainOptionsGroup1->addAction(&_settingsAction.getTypeofTopNGenes());
+    mainOptionsGroup1->addAction(&_settingsAction.getTraitPoolingMode());
 
 
 
@@ -1329,13 +1338,23 @@ private:
 };
 
 /**
- * Draws the Trait Correlation (range -1..1) the same way as the other bar columns of the tables:
- * a grey bar, growing right for positive and left for negative values from a black axis line in the middle,
- * with the number printed on the right.
+ * Draws the Trait Correlation (range -1..1) like the other bar columns of the tables:
+ * a grey bar of FIXED width (kBarWidth) at the left of the cell, growing right for positive and left for negative
+ * values from a black axis line in the middle.
+ * The number is printed behind the bar only if the column is wide enough; in a narrow column it is hidden
+ * (it stays available in the cell tooltip together with the p-value and FDR).
  */
 class TraitCorrelationBarDelegate : public QStyledItemDelegate
 {
 public:
+    static constexpr int kBarWidth = 60;   // same width as the bars of the other columns
+    static constexpr int kBarHeight = 20;  // same height as the bars of the other columns
+    static constexpr int kMargin = 4;
+    static constexpr int kTextWidth = 40;
+
+    /** Column width at which the bar fits exactly (default width of the column). */
+    static constexpr int defaultColumnWidth() { return kBarWidth + 2 * kMargin + 2; }
+
     using QStyledItemDelegate::QStyledItemDelegate;
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
@@ -1356,19 +1375,16 @@ public:
         if (!ok || std::isnan(value))
             return;
 
-        // 3. layout: [ bar area | value text ]
-        constexpr int kTextWidth = 44;
-        constexpr int kBarHeight = 20; // same bar height as the other columns
-        const QRect barArea = option.rect.adjusted(4, 0, -kTextWidth - 6, 0);
-        const QRect textArea = option.rect.adjusted(option.rect.width() - kTextWidth - 4, 0, -4, 0);
-
-        const int middle = barArea.center().x();
+        // 3. fixed-size bar area at the left edge of the cell
         const int barHeight = std::min(kBarHeight, option.rect.height() - 4);
         const int barTop = option.rect.top() + (option.rect.height() - barHeight) / 2;
+        const int barLeft = option.rect.left() + kMargin;
+        const int middle = barLeft + kBarWidth / 2;
         const double clamped = std::max(-1.0, std::min(1.0, value));
-        const int length = static_cast<int>(std::abs(clamped) * (barArea.width() / 2));
+        const int length = static_cast<int>(std::abs(clamped) * (kBarWidth / 2));
 
         painter->save();
+        painter->setClipRect(option.rect); // never paint outside a narrow column
 
         // grey bar, like every other bar column
         painter->setPen(Qt::NoPen);
@@ -1382,17 +1398,21 @@ public:
         painter->setPen(Qt::black);
         painter->drawLine(middle, barTop - 2, middle, barTop + barHeight + 2);
 
-        // value text
-        painter->setPen((option.state & QStyle::State_Selected) ? option.palette.color(QPalette::HighlightedText) : option.palette.color(QPalette::Text));
-        painter->drawText(textArea, Qt::AlignRight | Qt::AlignVCenter, QString::number(value, 'f', 2));
+        // value text: only when the column is wide enough to show it completely next to the bar
+        if (option.rect.width() >= kBarWidth + kTextWidth + 2 * kMargin) {
+            const QRect textArea(barLeft + kBarWidth + kMargin, option.rect.top(), kTextWidth, option.rect.height());
+            painter->setPen((option.state & QStyle::State_Selected) ? option.palette.color(QPalette::HighlightedText) : option.palette.color(QPalette::Text));
+            painter->drawText(textArea, Qt::AlignLeft | Qt::AlignVCenter, QString::number(value, 'f', 2));
+        }
 
         painter->restore();
     }
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
+        // fixed: the bar defines the size, the column width is chosen by the user
         QSize size = QStyledItemDelegate::sizeHint(option, index);
-        size.setWidth(std::max(size.width(), 150));
+        size.setWidth(defaultColumnWidth());
         return size;
     }
 };
@@ -1521,7 +1541,7 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     geneTableView->setColumnWidth(1, 80);
     geneTableView->setColumnWidth(2, 220);
     geneTableView->setColumnWidth(3, 420);
-    geneTableView->setColumnWidth(kTraitCorrelationColumn, 160);
+    geneTableView->setColumnWidth(kTraitCorrelationColumn, TraitCorrelationBarDelegate::defaultColumnWidth()); // bar fits, number hidden until widened
 
     // (findChild<>() cannot be used here: the delegate has no Q_OBJECT macro, so it is looked up through the view)
     if (!dynamic_cast<TraitCorrelationBarDelegate*>(geneTableView->itemDelegateForColumn(kTraitCorrelationColumn))) {
