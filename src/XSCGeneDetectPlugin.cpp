@@ -1465,7 +1465,8 @@ public:
 
         painter->save();
         painter->setPen(Qt::NoPen);
-        painter->setBrush(clamped >= 0 ? QColor("#00A2ED") : QColor("#ff5d12"));
+        //painter->setBrush(clamped >= 0 ? QColor("#00A2ED") : QColor("#ff5d12"));
+        painter->setBrush(Qt::gray);
         if (clamped >= 0)
             painter->drawRect(middle, barArea.top(), length, barArea.height());
         else
