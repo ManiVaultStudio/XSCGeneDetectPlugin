@@ -2230,6 +2230,11 @@ void SettingsAction::computeTraitCorrelation()
         cellTypes << _selectedClusterName;
     }
     if (traitName.isEmpty() || cellTypes.isEmpty()) {
+        // nothing to correlate with: do not leave the values of a previous trait in the table
+        _geneTraitValuesComputed.clear();
+        _geneTraitPValues.clear();
+        _geneTraitFdrValues.clear();
+        publishTraitCorrelationToModel();
         return;
     }
 
@@ -2361,6 +2366,10 @@ void SettingsAction::computeTraitCorrelation()
         if (jobs.empty()) {
             return;
         }
+
+        // reading expression data can take a moment the first time: show it
+        QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+        struct WaitCursorGuard { ~WaitCursorGuard() { QGuiApplication::restoreOverrideCursor(); } } waitCursorGuard;
 
         std::vector<int> allGeneIndices(geneCount);
         std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);

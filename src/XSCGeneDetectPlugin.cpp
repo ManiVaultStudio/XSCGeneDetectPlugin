@@ -395,9 +395,9 @@ void XSCGeneDetectPlugin::init()
                 {
 
                     auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-                    mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-                    mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-                    mv::gui::ViewPluginSamplerAction* samplerActionAction;
+                    mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+                    mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+                    mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
 
 
                     if (scatterplotViewFactory) {
@@ -634,9 +634,9 @@ void XSCGeneDetectPlugin::init()
 
 
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-            mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-            mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-            mv::gui::ViewPluginSamplerAction* samplerActionAction;
+            mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+            mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+            mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
 
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
@@ -1074,7 +1074,12 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             }
 
 
-            fullMainPointsDataset->populateDataForDimensions(resultContainerSpeciesColors, selectedGeneIndex, selectedSpeciesIndices);
+            if (!selectedGeneIndex.empty()) {
+                fullMainPointsDataset->populateDataForDimensions(resultContainerSpeciesColors, selectedGeneIndex, selectedSpeciesIndices);
+            }
+            else {
+                qDebug() << "Gene" << gene << "was not found in the main dataset";
+            }
             auto speciesColorDataId = _settingsAction.getFilteredUMAPDatasetColors().getDatasetId();
             auto speciesClusterDataId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
             int tempnumPointsColors = static_cast<int>(selectedSpeciesIndices.size());
@@ -1095,9 +1100,9 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
 
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-            mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-            mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-            mv::gui::ViewPluginSamplerAction* samplerActionAction;
+            mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+            mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+            mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
 
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
@@ -1574,41 +1579,41 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
     //_settingsAction.enableDisableButtonsAutomatically();
 
 
-    std::map<QString, SpeciesDetailsStats> speciesExpressionMap;
+    // ---- 1. Read the species names and the statistics of the clicked gene from its row ----
     QStringList finalsettingSpeciesNamesArray;
     QString finalSpeciesNameString;
+    QString statisticsText;
     const auto* model = current.model();
-    const int columnCount = model->columnCount();
-    const auto initColumnNamesSize = _settingsAction.getInitColumnNames().size();
-    for (int i = 0; i < columnCount; ++i) {
+    for (int i = 0; i < model->columnCount(); ++i) {
         const QString columnName = model->headerData(i, Qt::Horizontal).toString();
         const auto data = current.siblingAtColumn(i).data();
 
         if (columnName == "Gene Appearance Species Names") {
-            finalsettingSpeciesNamesArray = data.toString().split(";");
+            // skip empty parts: a gene without top-N species must give an EMPTY list, not a list holding ""
+            finalsettingSpeciesNamesArray = data.toString().split(";", Qt::SkipEmptyParts);
             finalSpeciesNameString = finalsettingSpeciesNamesArray.join(" @%$,$%@ ");
         }
         else if (columnName == "Statistics") {
-
-            if (!finalsettingSpeciesNamesArray.isEmpty()) {
-                std::map<QString, SpeciesDetailsStats> statisticsValues = convertToStatisticsMap(data.toString());
-                speciesExpressionMap = statisticsValues;
-                selectedCellCountStatusBarRemove();
-                selectedCellStatisticsStatusBarAdd(statisticsValues, finalsettingSpeciesNamesArray);
-            }
-            else {
-
-                qDebug() << "Warning: Gene Appearance Species Names must be processed before Statistics.";
-            }
+            statisticsText = data.toString();
         }
     }
 
-
+    // ---- 2. Per-species statistics table (also for genes that are no top-N gene of any species: the statistics
+    //         text holds the numbers of every species) ----
+    std::map<QString, SpeciesDetailsStats> speciesExpressionMap;
+    if (!statisticsText.isEmpty()) {
+        speciesExpressionMap = convertToStatisticsMap(statisticsText);
+        selectedCellCountStatusBarRemove();
+        selectedCellStatisticsStatusBarAdd(speciesExpressionMap, finalsettingSpeciesNamesArray);
+    }
+    else {
+        qDebug() << "Warning: the row of gene" << gene << "has no statistics.";
+    }
 
     // Embedding scatterplot: expression of the clicked gene in the species it appears in
-    if (!showGeneInSpeciesEmbedding(gene, finalsettingSpeciesNamesArray)) {
-        return;
-    }
+    // (returns false when the embedding datasets are not set up yet; the tree, the expression colors and the selection
+    //  below do not depend on it and are still updated)
+    showGeneInSpeciesEmbedding(gene, finalsettingSpeciesNamesArray);
 
     auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
     if (referenceTreeDataset.isValid()) {
@@ -1619,21 +1624,6 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
             referenceTree->setTreeData(speciesDataJson);
             events().notifyDatasetDataChanged(referenceTree);
         }
-    }
-
-    std::vector<std::seed_seq::result_type> selectedPoints;
-    auto speciesColorClusterDataset = _settingsAction.getTsneDatasetSpeciesColors();
-    auto tsneDataset = _settingsAction.getSelectedPointsTSNEDataset();
-    if (speciesColorClusterDataset.isValid() && tsneDataset.isValid()) {
-        for (const auto& species : speciesColorClusterDataset->getClusters()) {
-            if (finalsettingSpeciesNamesArray.contains(species.getName())) {
-                const auto& indices = species.getIndices();
-                selectedPoints.insert(selectedPoints.end(), indices.begin(), indices.end());
-            }
-        }
-        //below two lines causing problems TODO: Test
-        //tsneDataset->setSelectionIndices(selectedPoints);
-        //mv::events().notifyDatasetDataSelectionChanged(tsneDataset);
     }
 
     if (_settingsAction.getScatterplotReembedColorOption().getCurrentText() == "Expression" && !_settingsAction.getPerformGeneTableTsneAction().isChecked()) {

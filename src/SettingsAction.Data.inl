@@ -96,7 +96,7 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     // ---- 1. Model skeleton: one row per gene of the dataset ------------------------------------------------
     QStandardItemModel* model = new QStandardItemModel();
 
-    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait Correlation" };
+    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait\nCorrelation" }; // two lines so the header fits the narrow bar column
     const int geneCount = static_cast<int>(_totalGeneList.size());
     model->setColumnCount(_initColumnNames.size());
     model->setRowCount(geneCount);
