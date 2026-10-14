@@ -2178,18 +2178,48 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
 //
 //   1. species      : the species picked in the species explorer that have a trait value and cells of the selected
 //                     cell types (none / fewer than two usable picked -> every species with a trait value)
-//   2. cell types   : one or several (Shift + click on the labels of the status bar)
+//   2. cell types   : one or several (Shift + click on the labels of the status bar). Species with fewer than "min cells"
+//                     cells of them are left out (the mean of a handful of cells is noise).
 //   3. matrix X     : N species x G genes, mean expression of the gene over the cells of the selected cell types
 //                     (pooling: "Pool cells" or "Equal cell-type weighting")
 //   4. trait t      : one value per species, same order as the rows of X
-//   5. r_j          : Pearson correlation between column j of X and t
-//   6. significance : two-sided p-value of r_j (t distribution, N - 2 degrees of freedom) and the Benjamini-Hochberg
-//                     FDR over all genes. (A phylogenetic correction is not applied.)
+//   5. r_j          : correlation between column j of X and t. Method: Pearson, Spearman (ranks) or Pearson on
+//                     phylogenetically independent contrasts (corrects for the shared ancestry of the species)
+//   6. statistics   : two-sided p-value (t distribution, N - 2 degrees of freedom), Benjamini-Hochberg FDR over all
+//                     genes, 95% confidence interval (Fisher z) and the leave-one-species-out range of r_j, which shows
+//                     whether a single species drives the result.
 //
 //  Caching: the mean expression of every (species, cell type) pair is computed once and kept. Changing the species,
 //  the trait or the pooling only re-combines cached means; only newly selected cell types / species are read from
 //  the dataset. The cache is dropped when one of the underlying datasets changes.
 // ============================================================================================================
+
+/**
+ * Convert the species tree (QJsonObject with "children", "name" and "branchLength") into the plain node list used by the
+ * contrast kernel. Leaves whose name is not in \p speciesIndex stay in the tree but belong to no species.
+ * @return index of the converted node in \p nodes
+ */
+static int appendPicNodes(const QJsonObject& node, const std::map<QString, int>& speciesIndex, std::vector<PicNode>& nodes)
+{
+    const int index = static_cast<int>(nodes.size());
+    nodes.emplace_back();
+    nodes[index].branchLength = node.value("branchLength").toDouble(0.0);
+
+    const QJsonArray children = node.value("children").toArray();
+    if (children.isEmpty()) {
+        const auto it = speciesIndex.find(node.value("name").toString());
+        if (it != speciesIndex.end()) {
+            nodes[index].leafIndex = it->second;
+        }
+        return index;
+    }
+
+    for (const QJsonValue& child : children) {
+        const int childIndex = appendPicNodes(child.toObject(), speciesIndex, nodes);
+        nodes[index].children.push_back(childIndex); // (nodes may have been reallocated: always index, never keep a reference)
+    }
+    return index;
+}
 
 void SettingsAction::applyClusterLabelSelectionStyles()
 {
@@ -2234,6 +2264,11 @@ void SettingsAction::computeTraitCorrelation()
         _geneTraitValuesComputed.clear();
         _geneTraitPValues.clear();
         _geneTraitFdrValues.clear();
+        _geneTraitExtras.clear();
+        _traitSampleSize = 0;
+        _traitMethodNote.clear();
+        _traitContributionShown = false;
+        _traitValueLabel.clear();
         publishTraitCorrelationToModel();
         return;
     }
@@ -2336,6 +2371,9 @@ void SettingsAction::computeTraitCorrelation()
         }
     }
 
+    // species with fewer cells than this (summed over the selected cell types) do not take part
+    const int minCells = std::max(1, _traitMinCells.getValue());
+
     const auto entryKey = [](const QString& species, const QString& cellType) {
         return species + QLatin1Char('\x1f') + cellType;
         };
@@ -2396,58 +2434,127 @@ void SettingsAction::computeTraitCorrelation()
         }
         };
 
-    const auto hasCells = [&](const QString& species) {
+    const auto cellsOf = [&](const QString& species) {
+        int cells = 0;
         for (const QString& cellType : cellTypes) {
             const auto it = _traitCache.entries.find(entryKey(species, cellType));
-            if (it != _traitCache.entries.end() && it->second.cellCount > 0) {
-                return true;
+            if (it != _traitCache.entries.end()) {
+                cells += it->second.cellCount;
             }
         }
-        return false;
+        return cells;
         };
 
-    // ---- 5. Species of the comparison -------------------------------------------------------------------------
-    // the picked species with trait value and cells; fewer than two of them (e.g. none or a single species picked) ->
-    // every species with trait value and cells, because a correlation across species needs several species
-    std::vector<QString> population;
-    {
-        std::vector<QString> picked;
-        for (const QString& species : _speciesExplorerInMap.getSelectedOptions()) {
-            if (traitPerSpecies.count(species) > 0) {
-                picked.push_back(species);
-            }
-        }
-        ensureEntries(picked);
-        for (const QString& species : picked) {
-            if (hasCells(species)) {
-                population.push_back(species);
-            }
-        }
+    // ---- 5. Usable species ---------------------------------------------------------------------------------------
+    // The cell data of EVERY species with a trait value is read once and cached, so that picking other species afterwards
+    // is instant (no dataset access, only a re-combination of cached means).
+    std::vector<QString> everySpecies;
+    for (const auto& entry : traitPerSpecies) {
+        everySpecies.push_back(entry.first);
     }
-    if (population.size() < kMinSpeciesForTraitCorrelation) {
-        std::vector<QString> everySpecies;
-        for (const auto& entry : traitPerSpecies) {
-            everySpecies.push_back(entry.first);
-        }
-        ensureEntries(everySpecies);
-        population.clear();
-        for (const QString& species : everySpecies) {
-            if (hasCells(species)) {
-                population.push_back(species);
-            }
+    ensureEntries(everySpecies);
+
+    std::vector<QString> usable; // trait value AND enough cells of the selected cell type(s)
+    for (const QString& species : everySpecies) {
+        if (cellsOf(species) >= minCells) {
+            usable.push_back(species);
         }
     }
 
     _geneTraitValuesComputed.clear();
     _geneTraitPValues.clear();
     _geneTraitFdrValues.clear();
-    if (population.size() < kMinSpeciesForTraitCorrelation) {
-        qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and cells of the selected cell types; found" << population.size();
+    _geneTraitExtras.clear();
+    _traitSampleSize = 0;
+    _traitMethodNote.clear();
+    _traitContributionShown = false;
+    _traitValueLabel.clear();
+    if (usable.size() < kMinSpeciesForTraitCorrelation) {
+        qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and at least" << minCells << "cells of the selected cell types; found" << usable.size();
+        _traitMethodNote = QString("No trait correlation: only %1 species have a trait value and at least %2 cells of the selected cell type(s)").arg(usable.size()).arg(minCells);
         publishTraitCorrelationToModel();
         return;
     }
 
-    // ---- 6. Expression matrix X (N species x G genes), trait vector t, Pearson r, p-value ------------------------
+    // ---- 6. Method and species selection ---------------------------------------------------------------------------
+    TraitMethod method = TraitMethod::Pearson;
+    const QString methodText = _traitCorrelationMethod.getCurrentText();
+    if (methodText.startsWith("Spearman")) {
+        method = TraitMethod::Spearman;
+    }
+    else if (methodText.startsWith("Phylogenetic")) {
+        method = TraitMethod::Phylogenetic;
+    }
+    const TraitScope scope = (_traitSpeciesScope.getCurrentText() == "Across selected species only") ? TraitScope::AcrossSelected : TraitScope::SelectedContribution;
+
+    // the species picked in the species explorer, as indices into `usable`
+    const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
+    std::vector<size_t> picked;
+    QStringList pickedNames;
+    for (size_t i = 0; i < usable.size(); ++i) {
+        if (explorerSelection.contains(usable[i])) {
+            picked.push_back(i);
+            pickedNames << usable[i];
+        }
+    }
+    const int ignoredPicks = static_cast<int>(explorerSelection.size()) - static_cast<int>(picked.size()); // picked but without trait value / enough cells
+
+    SpeciesSelectionPlan plan = planSpeciesSelection(usable.size(), picked, scope, method);
+
+    const auto namesOf = [&usable](const std::vector<size_t>& indices) {
+        std::vector<QString> names;
+        names.reserve(indices.size());
+        for (const size_t index : indices) {
+            names.push_back(usable[index]);
+        }
+        return names;
+        };
+    std::vector<QString> population = namesOf(plan.population);
+
+    // ---- 7. Species tree for phylogenetic contrasts (falls back to Pearson when it is not usable) -------------------
+    std::vector<PicNode> treeNodes;
+    int treeRoot = 0;
+    size_t speciesInTree = 0;
+    bool treeFallback = false;
+
+    if (method == TraitMethod::Phylogenetic) {
+        // the species tree is the reference tree of the phylogenetic tree view
+        const auto treePicker = _referenceTreeDataset.getCurrentDataset();
+        if (treePicker.isValid()) {
+            auto referenceTree = mv::data().getDataset<XSCTree>(treePicker.getDatasetId());
+            if (referenceTree.isValid()) {
+                std::map<QString, int> speciesIndex;
+                for (size_t i = 0; i < population.size(); ++i) {
+                    speciesIndex[population[i]] = static_cast<int>(i);
+                }
+                treeRoot = appendPicNodes(referenceTree->getTreeData(), speciesIndex, treeNodes);
+
+                double totalBranchLength = 0.0;
+                for (const auto& node : treeNodes) {
+                    totalBranchLength += node.branchLength;
+                    if (node.leafIndex >= 0) {
+                        ++speciesInTree;
+                    }
+                }
+                if (totalBranchLength <= 0.0) {
+                    for (auto& node : treeNodes) {
+                        node.branchLength = 1.0; // the tree has no branch lengths: use its topology only
+                    }
+                }
+            }
+        }
+
+        if (speciesInTree < 3) {
+            // no usable tree: say so instead of silently pretending a phylogenetic correction was applied
+            method = TraitMethod::Pearson;
+            treeFallback = true;
+            treeNodes.clear();
+            plan = planSpeciesSelection(usable.size(), picked, scope, method);
+            population = namesOf(plan.population);
+        }
+    }
+
+    // ---- 8. Expression matrix X (N species x G genes) and trait vector t ----------------------------------------
     const TraitPooling pooling = (_traitPoolingMode.getCurrentText() == "Equal cell-type weighting") ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
 
     std::vector<std::vector<CellTypeMeans>> partsPerSpecies(population.size());
@@ -2469,33 +2576,95 @@ void SettingsAction::computeTraitCorrelation()
         expressionRows.push_back(&row);
     }
 
-    std::vector<float> correlations(geneCount, 0.0f);
-    std::vector<float> pValues(geneCount, 1.0f);
+    // `plan.selected` already refers to rows of the matrix: for the contribution scope the population is everybody (same indices)
+    const TraitStatisticsContext statisticsContext = prepareTraitStatisticsContext(method, traitValues, treeNodes, treeRoot, plan.selected);
+    std::vector<GeneTraitStatistics> statistics(geneCount);
 
-    // Every worker owns a range of genes: it combines the cached per cell type means into the species rows of X,
-    // then correlates its genes with the trait. Disjoint gene ranges -> no locking required.
+    // ---- 9. Statistics of every gene (parallel over gene ranges) ----------------------------------------------------
+    // Every worker owns a range of genes: it combines the cached per cell type means into the species rows of X and
+    // computes correlation, p-value, confidence interval, leave-one-out range and contribution. Disjoint ranges -> no locking.
     auto geneRanges = splitGeneRanges(geneCount, static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
     QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
         for (size_t i = 0; i < population.size(); ++i) {
             combineCellTypeMeans(partsPerSpecies[i], pooling, range, expressionMatrix[i]);
         }
-        computePearsonCorrelations(expressionRows, traitValues, range, correlations);
-        for (size_t g = range.begin; g < range.end; ++g) {
-            pValues[g] = static_cast<float>(pearsonPValue(correlations[g], population.size()));
-        }
+        computeTraitStatistics(expressionRows, statisticsContext, range, statistics);
         });
 
-    // ---- 7. Multiple testing correction and result --------------------------------------------------------------
+    // ---- 10. Multiple testing correction and result -------------------------------------------------------------------
+    // p-value, FDR, confidence interval and leave-one-out always describe the correlation across the compared species.
+    std::vector<float> pValues(geneCount);
+    for (size_t g = 0; g < geneCount; ++g) {
+        pValues[g] = statistics[g].pValue;
+    }
     const std::vector<float> fdrValues = benjaminiHochberg(pValues);
 
     _geneTraitValuesComputed.reserve(geneCount);
     _geneTraitPValues.reserve(geneCount);
     _geneTraitFdrValues.reserve(geneCount);
+    _geneTraitExtras.reserve(geneCount);
     for (size_t g = 0; g < geneCount; ++g) {
-        _geneTraitValuesComputed[geneNames[g]] = correlations[g];
-        _geneTraitPValues[geneNames[g]] = pValues[g];
+        GeneTraitExtras extras;
+        extras.ciLow = statistics[g].ciLow;
+        extras.ciHigh = statistics[g].ciHigh;
+        extras.looMin = statistics[g].leaveOneOutMin;
+        extras.looMax = statistics[g].leaveOneOutMax;
+        if (plan.contribution) {
+            extras.overall = statistics[g].correlation; // the cell shows the contribution, keep the correlation next to it
+        }
+        _geneTraitValuesComputed[geneNames[g]] = plan.contribution ? statistics[g].selectionScore : statistics[g].correlation;
+        _geneTraitPValues[geneNames[g]] = statistics[g].pValue;
         _geneTraitFdrValues[geneNames[g]] = fdrValues[g];
+        _geneTraitExtras[geneNames[g]] = extras;
     }
+
+    // ---- 11. Description for the tooltips ------------------------------------------------------------------------------
+    const int sampleSize = (method == TraitMethod::Phylogenetic) ? static_cast<int>(speciesInTree) : static_cast<int>(population.size());
+    QString methodName;
+    if (method == TraitMethod::Phylogenetic) {
+        methodName = QString("Phylogenetic contrasts (%1 of %2 species found in the species tree)").arg(speciesInTree).arg(population.size());
+    }
+    else if (method == TraitMethod::Spearman) {
+        methodName = QString("Spearman rank correlation across %1 species").arg(sampleSize);
+    }
+    else {
+        methodName = QString("Pearson correlation across %1 species").arg(sampleSize);
+    }
+    if (treeFallback) {
+        methodName += "\nNo usable species tree: phylogenetic correction NOT applied";
+    }
+
+    QString selectionText;
+    if (plan.contribution) {
+        if (picked.empty()) {
+            selectionText = "No species selected: the value is the overall correlation";
+        }
+        else {
+            QStringList shown = pickedNames.mid(0, 4);
+            const QString more = pickedNames.size() > 4 ? QString(" and %1 more").arg(pickedNames.size() - 4) : QString();
+            selectionText = QString("Value = contribution of the %1 selected species (%2%3) to the overall correlation\n"
+                "(mean of z(gene) x z(trait) over them; equals the correlation when all species are selected, can exceed 1)")
+                .arg(pickedNames.size()).arg(shown.join(", ")).arg(more);
+        }
+    }
+    else if (plan.selectionTooSmall) {
+        selectionText = QString("Fewer than %1 species selected: all %2 species are used").arg(kMinSpeciesAcrossSelection).arg(population.size());
+    }
+    else if (!picked.empty()) {
+        selectionText = QString("Correlation across the %1 selected species").arg(population.size());
+    }
+    else {
+        selectionText = "No species selected: all species are used";
+    }
+    if (ignoredPicks > 0) {
+        selectionText += QString("\n%1 selected species ignored (no trait value or fewer than %2 cells)").arg(ignoredPicks).arg(minCells);
+    }
+
+    _traitSampleSize = sampleSize;
+    _traitMethodNote = methodName + "\n" + selectionText;
+    _traitContributionShown = plan.contribution;
+    const QString methodShortName = (method == TraitMethod::Phylogenetic) ? "phylogenetic contrasts" : (method == TraitMethod::Spearman ? "Spearman" : "Pearson");
+    _traitValueLabel = QString(plan.contribution ? "Trait contribution of selected species (%1)" : "Trait correlation (%1)").arg(methodShortName);
 
     publishTraitCorrelationToModel();
 }
@@ -2523,14 +2692,17 @@ void SettingsAction::publishTraitCorrelationToModel()
             const auto rIt = _geneTraitValuesComputed.find(gene);
             const auto pIt = _geneTraitPValues.find(gene);
             const auto qIt = _geneTraitFdrValues.find(gene);
+            const auto eIt = _geneTraitExtras.find(gene);
             setTraitCorrelationItemData(correlationItem,
                 rIt != _geneTraitValuesComputed.end() ? static_cast<double>(rIt->second) : 0.0,
                 pIt != _geneTraitPValues.end() ? static_cast<double>(pIt->second) : 1.0,
-                qIt != _geneTraitFdrValues.end() ? static_cast<double>(qIt->second) : 1.0);
+                qIt != _geneTraitFdrValues.end() ? static_cast<double>(qIt->second) : 1.0,
+                eIt != _geneTraitExtras.end() ? eIt->second : GeneTraitExtras(),
+                _traitSampleSize, _traitMethodNote);
         }
     }
 
-    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole });
+    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole, kTraitStatsRole });
 }
 
 

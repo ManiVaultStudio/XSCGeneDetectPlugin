@@ -59,10 +59,15 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _clearRightClickedCluster(this, "Clear Right Clicked Cluster"),
     _toggleScatterplotSelection(this, "Show Scatterplot Selection"),
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker(this, "Map For Hierarchy Items Change Method Stop For Project Load Blocker"),
-    _saveSpeciesTable(this, "Save Left Gene Table"),
-    _saveGeneTable(this, "Save Right Species Selection Table"),
+    _saveSpeciesTable(this, "Save Gene Table"),
+    _saveGeneTable(this, "Save Species Statistics Table"),
+    _saveIncludeParameters(this, "Add analysis parameters to the CSV"),
     _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String"),
-    _traitPoolingMode(this, "Trait Pooling")
+    _traitPoolingMode(this, "Trait Pooling"),
+    _traitCorrelationMethod(this, "Trait Correlation Method"),
+    _traitSpeciesScope(this, "Trait Species Scope"),
+    _traitMinCells(this, "Min cells per species and cell type"),
+    _traitSignificantOnly(this, "Significant trait genes only (FDR < 0.05)")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -302,6 +307,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _scatterplotEmbeddingPointsUMAPOption.setSerializationName("CSCGDV:Scatterplot Embedding UMAP Points Option");
     _typeofTopNGenes.setSerializationName("CSCGDV:Type of Top N Genes");
     _traitPoolingMode.setSerializationName("CSCGDV:Trait Pooling");
+    _traitCorrelationMethod.setSerializationName("CSCGDV:Trait Correlation Method");
+    _traitSpeciesScope.setSerializationName("CSCGDV:Trait Species Scope");
+    _traitMinCells.setSerializationName("CSCGDV:Trait Min Cells");
+    _traitSignificantOnly.setSerializationName("CSCGDV:Trait Significant Only");
     _clusterCountSortingType.setSerializationName("CSCGDV:Cluster Count Sorting Type");
     _applyLogTransformation.setSerializationName("CSCGDV:Apply Log Transformation");
     _createRowMultiSelectTree.setDisabled(true);
@@ -310,6 +319,30 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _scatterplotReembedColorOption.initialize({ "Species","Cluster","Expression" }, "Species");
     _typeofTopNGenes.initialize({ "Absolute","Negative","Positive" }, "Positive");
     _traitPoolingMode.initialize({ "Pool cells", "Equal cell-type weighting" }, "Pool cells");
+
+    _traitCorrelationMethod.initialize({ "Pearson", "Spearman (rank)", "Phylogenetic contrasts" }, "Pearson");
+    _traitCorrelationMethod.setToolTip("Correlation of the mean expression with the trait across species:\n"
+        "Pearson: linear correlation.\n"
+        "Spearman (rank): rank based, robust to outlier species and skewed expression.\n"
+        "Phylogenetic contrasts: Pearson on independent contrasts of the species tree; corrects for the shared ancestry of\n"
+        "related species, which otherwise inflates correlations (uses the reference tree).");
+
+    _traitSpeciesScope.initialize({ "Contribution of selected species", "Across selected species only" }, "Contribution of selected species");
+    _traitSpeciesScope.setToolTip("What the species picked in the species explorer mean for the Trait Correlation column:\n"
+        "Contribution of selected species: the trend (correlation with the trait) is always taken across ALL species. The value is how strongly\n"
+        "  the picked species follow it: the mean over them of z(gene expression) x z(trait). Works for one species up to all of them; with all species picked\n"
+        "  it is exactly the correlation. Not defined for phylogenetic contrasts (those behave like the second option).\n"
+        "Across selected species only: the correlation is computed across the picked species themselves (at least 3; otherwise all species are used).");
+
+    _traitMinCells.setMinimum(1);
+    _traitMinCells.setMaximum(1000);
+    _traitMinCells.setValue(10);
+    _traitMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _traitMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out of the trait correlation:\n"
+        "the mean expression of a handful of cells is too noisy to correlate.");
+
+    _traitSignificantOnly.setChecked(false);
+    _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
     _traitPoolingMode.setToolTip("How the expression of several selected cell types is combined per species:\n"
         "Pool cells: all cells of the selected cell types are pooled (cell types with more cells weigh more).\n"
         "Equal cell-type weighting: every selected cell type weighs the same, regardless of its cell count.");
@@ -332,6 +365,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     QIcon saveGeneTableIcon = mv::util::StyledIcon("save");
     _saveGeneTable.setIcon(saveGeneTableIcon);
     _saveGeneTable.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+
+    _saveIncludeParameters.setChecked(true);
+    _saveIncludeParameters.setSerializationName("CSCGDV:Save Include Parameters");
+    _saveIncludeParameters.setToolTip("Write the analysis parameters (cell types, species, trait, method, ...) as lines starting with '#' on top of the CSV.\n"
+        "Read it with a comment character (pandas: comment='#', R: comment.char='#') or switch this off for a plain table.");
 
     QIcon saveSpeciesTableIcon = mv::util::StyledIcon("save");
     _saveSpeciesTable.setIcon(saveSpeciesTableIcon);
@@ -920,6 +958,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_typeofTopNGenes, &OptionAction::currentIndexChanged, this, updateTypeOfTopNGenesFilter);
     // Changing the pooling only re-combines the cached per cell type means (debounced)
     connect(&_traitPoolingMode, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitCorrelationMethod, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitSpeciesScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitMinCells, &IntegralAction::valueChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
 
 
     const auto updateClusterOrderHierarchy = [this]() -> void {

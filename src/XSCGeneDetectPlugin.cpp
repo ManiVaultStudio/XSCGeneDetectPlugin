@@ -908,7 +908,7 @@ void XSCGeneDetectPlugin::init()
     mainOptionsGroup1->addAction(&_settingsAction.getStartComputationTriggerAction());
     mainOptionsGroup1->addAction(&_settingsAction.getTopNGenesFilter());
     mainOptionsGroup1->addAction(&_settingsAction.getTypeofTopNGenes());
-    mainOptionsGroup1->addAction(&_settingsAction.getTraitPoolingMode());
+    // (the trait correlation settings live in their own group below)
 
 
 
@@ -954,10 +954,26 @@ void XSCGeneDetectPlugin::init()
 
     mainOptionsLayout->addLayout(linkerandtsneLayout);
 
+    // All settings of the gene/trait correlation in one group (same style as "Options" and "Save table as CSV")
+    auto traitCorrelationGroup = new VerticalGroupAction(this, "Trait correlation");
+    traitCorrelationGroup->setIcon(mv::util::StyledIcon("chart-line"));
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitCorrelationMethod());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitSpeciesScope());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitPoolingMode());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitMinCells());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitSignificantOnly());
+
+    auto traitLayout = new QVBoxLayout();
+    auto traitWidget = traitCorrelationGroup->createCollapsedWidget(&getWidget());
+    traitWidget->setMaximumHeight(22);
+    traitLayout->addWidget(traitWidget);
+    mainOptionsLayout->addLayout(traitLayout);
+
     auto downloadOptionsGroup = new VerticalGroupAction(this, "Save table as CSV");
     downloadOptionsGroup->setIcon(mv::util::StyledIcon("download"));
     downloadOptionsGroup->addAction(&_settingsAction.getSaveGeneTable());
     downloadOptionsGroup->addAction(&_settingsAction.getSaveSpeciesTable());
+    downloadOptionsGroup->addAction(&_settingsAction.getSaveIncludeParameters());
 
     auto downloadLayout = new QVBoxLayout();
     auto downloadWidget = downloadOptionsGroup->createCollapsedWidget(&getWidget());
@@ -1290,7 +1306,18 @@ public:
     explicit GeneFilterProxyModel(QObject* parent = nullptr) : QSortFilterProxyModel(parent)
     {
         setFilterCaseSensitivity(Qt::CaseInsensitive);
-        setFilterKeyColumn(0);
+        // The trait column is the one whose values change after the model was built. Declaring it as the filter column makes
+        // the proxy re-evaluate the rows when those values are refreshed (needed for "significant genes only").
+        setFilterKeyColumn(kTraitCorrelationColumn);
+    }
+
+    /** List only genes with a significant trait correlation (FDR < kSignificanceLevel) in normal mode. */
+    void setSignificantOnly(bool significantOnly)
+    {
+        if (_significantOnly == significantOnly)
+            return;
+        _significantOnly = significantOnly;
+        invalidateFilter();
     }
 
     /** Genes that are listed in normal mode. */
@@ -1333,19 +1360,29 @@ protected:
             return false;
 
         // column 1 = number of species in which the gene is a top-N gene
-        return source->index(sourceRow, 1, sourceParent).data().toInt() >= 1;
+        if (source->index(sourceRow, 1, sourceParent).data().toInt() < 1)
+            return false;
+
+        if (_significantOnly) {
+            const QVariant fdr = source->index(sourceRow, kTraitCorrelationColumn, sourceParent).data(kTraitFdrRole);
+            return fdr.isValid() && fdr.toDouble() < kSignificanceLevel;
+        }
+        return true;
     }
 
 private:
+    static constexpr double kSignificanceLevel = 0.05;
+
     QSet<QString>      _allowedGenes;
     QRegularExpression _searchPattern;
     bool               _searchMode = false;
+    bool               _significantOnly = false;
 };
 
 /**
  * Draws the Trait Correlation (range -1..1) like the other bar columns of the tables:
  * a grey bar of FIXED width (kBarWidth) at the left of the cell, growing right for positive and left for negative
- * values from a black axis line in the middle.
+ * values from a black axis line in the middle. Bars of significant genes (FDR < 0.05) have a thin black outline.
  * The number is printed behind the bar only if the column is wide enough; in a narrow column it is hidden
  * (it stays available in the cell tooltip together with the p-value and FDR).
  */
@@ -1391,8 +1428,10 @@ public:
         painter->save();
         painter->setClipRect(option.rect); // never paint outside a narrow column
 
-        // grey bar, like every other bar column
-        painter->setPen(Qt::NoPen);
+        // grey bar, like every other bar column; a thin black outline marks a significant correlation (FDR < 0.05)
+        const QVariant fdr = index.data(kTraitFdrRole);
+        const bool significant = fdr.isValid() && fdr.toDouble() < 0.05;
+        painter->setPen(significant ? QPen(Qt::black, 1) : QPen(Qt::NoPen));
         painter->setBrush(Qt::gray);
         if (clamped >= 0)
             painter->drawRect(middle, barTop, length, barHeight);
@@ -1473,6 +1512,12 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     auto* proxyModel = new GeneFilterProxyModel(this);
     proxyModel->setSourceModel(model);
     proxyModel->setAllowedGenes(_settingsAction.getUniqueReturnGeneList());
+    proxyModel->setSignificantOnly(_settingsAction.getTraitSignificantOnly().isChecked());
+
+    // (the proxy is the receiver context, so the connection disappears together with it)
+    connect(&_settingsAction.getTraitSignificantOnly(), &ToggleAction::toggled, proxyModel, [proxyModel](bool significantOnly) {
+        proxyModel->setSignificantOnly(significantOnly);
+        });
 
     // ---- 2. Swap the models and release the previous ones (they used to leak on every recomputation) ---------
     QAbstractItemModel* previousViewModel = geneTableView->model();

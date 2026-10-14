@@ -44,6 +44,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <random>
+#include <limits>
 #include <numeric>
 #include <QSet>
 #include <QHBoxLayout>
@@ -209,6 +210,16 @@ inline constexpr int kTraitCorrelationColumn = 4;
 /** Extra item roles of the trait correlation cell (DisplayRole/UserRole hold the correlation coefficient r). */
 inline constexpr int kTraitPValueRole = Qt::UserRole + 1;   /** two-sided p-value of r */
 inline constexpr int kTraitFdrRole = Qt::UserRole + 2;   /** Benjamini-Hochberg FDR (q-value) over all genes */
+inline constexpr int kTraitStatsRole = Qt::UserRole + 3;   /** QVariantList: N species, CI low, CI high, leave-one-out min, leave-one-out max */
+
+/** Additional statistics of the trait correlation of one gene (NaN = not available). */
+struct GeneTraitExtras {
+    float ciLow = std::numeric_limits<float>::quiet_NaN();   /** lower end of the 95% confidence interval */
+    float ciHigh = std::numeric_limits<float>::quiet_NaN();  /** upper end of the 95% confidence interval */
+    float looMin = std::numeric_limits<float>::quiet_NaN();  /** smallest correlation when one species is left out */
+    float looMax = std::numeric_limits<float>::quiet_NaN();  /** largest correlation when one species is left out */
+    float overall = std::numeric_limits<float>::quiet_NaN(); /** correlation across all compared species (set when the cell shows the contribution of the selected species) */
+};
 
 class SettingsAction : public WidgetAction
 {
@@ -291,6 +302,7 @@ public: // Action getters
     TriggerAction& getPerformGeneTableTsneTrigger() { return _performGeneTableTsneTrigger; }
     TriggerAction& getSaveGeneTable() { return _saveGeneTable; }
     TriggerAction& getSaveSpeciesTable() { return _saveSpeciesTable; }
+    ToggleAction& getSaveIncludeParameters() { return _saveIncludeParameters; } /** write the analysis parameters as '#' comment lines on top of the CSV */
     TriggerAction& getComputeTreesToDisplayFromHierarchy() { return _computeTreesToDisplayFromHierarchy; }
     StringAction& getClusterOrderHierarchy() { return _clusterOrderHierarchy; }
     ToggleAction& getMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker() { return _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker; }
@@ -299,6 +311,10 @@ public: // Action getters
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
     StringAction& getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
     OptionAction& getTraitPoolingMode() { return _traitPoolingMode; }   /** how several selected cell types are combined */
+    OptionAction& getTraitCorrelationMethod() { return _traitCorrelationMethod; } /** Pearson / Spearman / phylogenetic contrasts */
+    OptionAction& getTraitSpeciesScope() { return _traitSpeciesScope; }          /** what the species selection means for the value */
+    IntegralAction& getTraitMinCells() { return _traitMinCells; }         /** species with fewer cells of the cell type are ignored */
+    ToggleAction& getTraitSignificantOnly() { return _traitSignificantOnly; } /** list only genes with FDR < 0.05 */
 
     mv::Dataset<Points>& getSelectedPointsTSNEDatasetForGeneTable() { return _selectedPointsTSNEDatasetForGeneTable; }
 
@@ -382,6 +398,16 @@ public: // Action getters
     void computeHierarchyAppearanceVector();
     void exportTableViewToCSVForGenes(QTableView* tableView);
     void exportTableViewToCSVPerGene(QTableView* tableView);
+
+    // ---- CSV export helpers (see SettingsAction_Data.inl) ----
+    /** True when trait columns of \p model hold a computed result (otherwise they would only contain placeholder zeros). */
+    bool traitColumnsAvailable(const QAbstractItemModel* model) const;
+    /** Column names of the exported trait statistics; they describe what the values mean for the current method/scope. */
+    QStringList traitExportHeaders() const;
+    /** Values matching traitExportHeaders() for one row of the gene table. */
+    QStringList traitExportValues(const QAbstractItemModel* model, int row) const;
+    /** '#' comment lines that describe the analysis behind an exported table (cell types, species, trait, method, ...). */
+    QStringList buildExportParameterLines(const QString& tableTitle, int rowCount, bool withTraitColumns, int significantRows);
     void clearTableSelection(QTableView* tableView);
 
     // ---- Trait correlation ---------------------------------------------------------------------------
@@ -492,6 +518,11 @@ protected:
     std::unordered_map<QString, float> _geneTraitValuesComputed;   /** gene -> Pearson r */
     std::unordered_map<QString, float> _geneTraitPValues;          /** gene -> two-sided p-value */
     std::unordered_map<QString, float> _geneTraitFdrValues;        /** gene -> Benjamini-Hochberg FDR */
+    std::unordered_map<QString, GeneTraitExtras> _geneTraitExtras; /** gene -> confidence interval, leave-one-out range */
+    int     _traitSampleSize = 0;                                  /** species that entered the last computation */
+    bool    _traitContributionShown = false;                       /** the trait column shows the contribution of selected species (not the correlation) */
+    QString _traitValueLabel;                                      /** what the trait column holds, e.g. "Trait correlation (Pearson)" */
+    QString _traitMethodNote;                                      /** description of the method used (for the tooltips) */
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
     DatasetPickerAction           _scatterplotEmbeddingPointsUMAPOption;
@@ -542,9 +573,14 @@ protected:
     TriggerAction              _clearRightClickedCluster;
     StringAction              _reverseSearchTraitSelectionString;
     OptionAction              _traitPoolingMode;      /** "Pool cells" (default) or "Equal cell-type weighting" */
+    OptionAction              _traitCorrelationMethod;/** "Pearson" (default), "Spearman (rank)" or "Phylogenetic contrasts" */
+    OptionAction              _traitSpeciesScope;     /** "Contribution of selected species" (default) or "Across selected species only" */
+    IntegralAction            _traitMinCells;         /** minimum cells of a cell type in a species for the species to take part */
+    ToggleAction              _traitSignificantOnly;  /** gene table: only genes with a significant trait correlation */
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
+    ToggleAction                  _saveIncludeParameters; /** CSV export: add the analysis parameters on top */
     QStringList                   _currentHierarchyItemsMiddleForTable;
     StringAction               _topSelectedHierarchyStatus;
     bool                      _projectOpened = false;

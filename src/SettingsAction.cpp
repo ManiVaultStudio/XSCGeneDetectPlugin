@@ -2,6 +2,11 @@
 #include "XSCGeneDetectPlugin.h"
 #include<string>  
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QMap>
+#include <QDateTime>
+#include <QRegularExpression>
+#include <QTextStream>
 #include <QPageLayout>
 #include <QWebEngineView>
 #include <XSCTreeData/XSCTreeData.h>
@@ -318,14 +323,36 @@ namespace {
         return std::max(1, std::min(idealThreads, budgetThreads));
     }
 
-    /** Fill the trait correlation cell of the gene table: r (display + sorting), p-value, FDR and a descriptive tooltip. */
-    inline void setTraitCorrelationItemData(QStandardItem* item, double r, double p, double q) {
-        item->setData(r, Qt::DisplayRole);
-        item->setData(r, Qt::UserRole);
+    /**
+     * Fill the trait correlation cell of the gene table: correlation (display + sorting), p-value, FDR, the other statistics
+     * and a tooltip that explains how far the number can be trusted.
+     */
+    inline void setTraitCorrelationItemData(QStandardItem* item, double value, double p, double q, const GeneTraitExtras& extras, int sampleSize, const QString& methodNote) {
+        item->setData(value, Qt::DisplayRole);
+        item->setData(value, Qt::UserRole);
         item->setData(p, kTraitPValueRole);
         item->setData(q, kTraitFdrRole);
-        item->setData(QString("Trait correlation r = %1\np-value = %2\nFDR (Benjamini-Hochberg) = %3")
-            .arg(r, 0, 'f', 3).arg(p, 0, 'g', 3).arg(q, 0, 'g', 3), Qt::ToolTipRole);
+        item->setData(QVariantList{ sampleSize, extras.ciLow, extras.ciHigh, extras.looMin, extras.looMax, extras.overall }, kTraitStatsRole);
+
+        QString tooltip = methodNote.isEmpty() ? QString("Trait correlation") : methodNote;
+        tooltip += QString("\nValue shown = %1").arg(value, 0, 'f', 3);
+        if (std::isfinite(extras.overall)) {
+            tooltip += QString("\nOverall correlation of all species = %1").arg(extras.overall, 0, 'f', 3);
+        }
+        if (std::isfinite(extras.ciLow) && std::isfinite(extras.ciHigh)) {
+            tooltip += QString("\n95% confidence interval of the correlation: [%1, %2]").arg(extras.ciLow, 0, 'f', 2).arg(extras.ciHigh, 0, 'f', 2);
+        }
+        tooltip += QString("\np-value = %1\nFDR (Benjamini-Hochberg) = %2").arg(p, 0, 'g', 3).arg(q, 0, 'g', 3);
+        if (std::isfinite(extras.looMin) && std::isfinite(extras.looMax)) {
+            tooltip += QString("\nLeaving one species out: [%1, %2]").arg(extras.looMin, 0, 'f', 2).arg(extras.looMax, 0, 'f', 2);
+            if (extras.looMin < 0.0f && extras.looMax > 0.0f) {
+                tooltip += "\nWarning: the sign changes when a single species is left out";
+            }
+        }
+        if (sampleSize > 0 && sampleSize < 5) {
+            tooltip += QString("\nWarning: only %1 species - interpret with care").arg(sampleSize);
+        }
+        item->setData(tooltip, Qt::ToolTipRole);
     }
 
     // ----------------------------------------------------------------------------------------------------------
@@ -544,6 +571,445 @@ namespace {
             qValues[index] = static_cast<float>(std::min(1.0, runningMinimum));
         }
         return qValues;
+    }
+
+    // ----------------------------------------------------------------------------------------------------------
+    //  Correlation methods, confidence interval, phylogenetic independent contrasts, leave-one-species-out
+    // ----------------------------------------------------------------------------------------------------------
+
+    /** Correlation method used for the gene/trait statistics. */
+    enum class TraitMethod {
+        Pearson,       /** linear correlation of the mean expression with the trait */
+        Spearman,      /** rank correlation: robust to outliers and to skewed expression distributions */
+        Phylogenetic   /** Pearson on phylogenetically independent contrasts: corrects for the shared ancestry of the species */
+    };
+
+    /** Average ranks (ties share the mean rank), 1-based. */
+    inline std::vector<double> averageRanks(const std::vector<double>& values) {
+        const size_t count = values.size();
+        std::vector<size_t> order(count);
+        for (size_t i = 0; i < count; ++i) {
+            order[i] = i;
+        }
+        std::sort(order.begin(), order.end(), [&values](size_t a, size_t b) { return values[a] < values[b]; });
+
+        std::vector<double> ranks(count, 0.0);
+        size_t start = 0;
+        while (start < count) {
+            size_t end = start;
+            while (end + 1 < count && values[order[end + 1]] == values[order[start]]) {
+                ++end;
+            }
+            const double averageRank = (static_cast<double>(start) + static_cast<double>(end)) / 2.0 + 1.0;
+            for (size_t k = start; k <= end; ++k) {
+                ranks[order[k]] = averageRank;
+            }
+            start = end + 1;
+        }
+        return ranks;
+    }
+
+    /** Plain Pearson correlation of two equally long vectors (0 when one of them has no variance). */
+    inline double pearsonOfVectors(const std::vector<double>& a, const std::vector<double>& b) {
+        const size_t count = a.size();
+        if (count < 2 || b.size() != count) {
+            return 0.0;
+        }
+        double meanA = 0.0, meanB = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            meanA += a[i];
+            meanB += b[i];
+        }
+        meanA /= static_cast<double>(count);
+        meanB /= static_cast<double>(count);
+        double covariance = 0.0, varianceA = 0.0, varianceB = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            covariance += (a[i] - meanA) * (b[i] - meanB);
+            varianceA += (a[i] - meanA) * (a[i] - meanA);
+            varianceB += (b[i] - meanB) * (b[i] - meanB);
+        }
+        const double denominator = std::sqrt(varianceA * varianceB);
+        return denominator > 0.0 ? std::max(-1.0, std::min(1.0, covariance / denominator)) : 0.0;
+    }
+
+    /** Correlation of two vectors through the origin (contrasts have no intercept): sum(ab) / sqrt(sum(a^2) sum(b^2)). */
+    inline double correlationThroughOrigin(const std::vector<double>& a, const std::vector<double>& b) {
+        double sumAB = 0.0, sumAA = 0.0, sumBB = 0.0;
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i) {
+            sumAB += a[i] * b[i];
+            sumAA += a[i] * a[i];
+            sumBB += b[i] * b[i];
+        }
+        const double denominator = std::sqrt(sumAA * sumBB);
+        return denominator > 0.0 ? std::max(-1.0, std::min(1.0, sumAB / denominator)) : 0.0;
+    }
+
+    /** 95% confidence interval of a correlation (Fisher z transformation). NaN for fewer than 4 observations. */
+    inline void fisherConfidenceInterval(double r, size_t sampleCount, double& low, double& high) {
+        constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+        if (sampleCount < 4) {
+            low = kNaN;
+            high = kNaN;
+            return;
+        }
+        const double clamped = std::max(-0.999999, std::min(0.999999, r));
+        const double z = std::atanh(clamped);
+        const double standardError = 1.0 / std::sqrt(static_cast<double>(sampleCount) - 3.0);
+        constexpr double kZ975 = 1.959963984540054;
+        low = std::tanh(z - kZ975 * standardError);
+        high = std::tanh(z + kZ975 * standardError);
+    }
+
+    // ---- phylogenetic independent contrasts (Felsenstein 1985) ----
+
+    /** Branches shorter than this are treated as this long: zero-length branches would divide by zero. */
+    constexpr double kPicMinBranchLength = 1.0e-9;
+
+    /** Node of the species tree. Leaves carry the index of their species (-1: leaf that is not part of the comparison). */
+    struct PicNode {
+        int leafIndex = -1;
+        std::vector<int> children;
+        double branchLength = 0.0;
+    };
+
+    /** One contrast: combines two (partial) subtrees. All factors are precomputed so that applying it is cheap. */
+    struct PicOp {
+        int left = 0;            /** slot of the left subtree value */
+        int right = 0;           /** slot of the right subtree value */
+        int out = 0;             /** slot that receives the weighted ancestral value */
+        double scale = 1.0;      /** 1 / sqrt(vLeft + vRight): standardises the contrast */
+        double leftWeight = 0.5; /** vRight / (vLeft + vRight) */
+        double rightWeight = 0.5;/** vLeft / (vLeft + vRight) */
+    };
+
+    /** The contrasts of a tree restricted to a set of species. Depends only on the tree and the species, not on the data. */
+    struct PicPlan {
+        std::vector<PicOp> ops;          /** contrasts in post-order */
+        std::vector<int> leafSlots;      /** per species: value slot, -1 when the species is not in the plan */
+        int slotCount = 0;
+        size_t speciesInPlan = 0;
+    };
+
+    /** Builds a plan for the species flagged in \p keepSpecies (one flag per species). The tree is pruned to those species. */
+    inline PicPlan buildPicPlan(const std::vector<PicNode>& nodes, int root, const std::vector<char>& keepSpecies) {
+        PicPlan plan;
+        plan.leafSlots.assign(keepSpecies.size(), -1);
+
+        struct Result { int slot = -1; double length = 0.0; };
+
+        struct Builder {
+            const std::vector<PicNode>& nodes;
+            const std::vector<char>& keep;
+            PicPlan& plan;
+
+            Result build(int index) {
+                const PicNode& node = nodes[index];
+                if (node.children.empty()) {
+                    if (node.leafIndex >= 0 && static_cast<size_t>(node.leafIndex) < keep.size() && keep[node.leafIndex]) {
+                        plan.leafSlots[node.leafIndex] = plan.slotCount;
+                        ++plan.speciesInPlan;
+                        return { plan.slotCount++, node.branchLength };
+                    }
+                    return {};
+                }
+
+                Result accumulated;
+                for (const int child : node.children) {
+                    const Result part = build(child);
+                    if (part.slot < 0) {
+                        continue; // nothing of this subtree is kept
+                    }
+                    if (accumulated.slot < 0) {
+                        accumulated = part;
+                        continue;
+                    }
+                    // a node with more than two kept children is resolved one pair after the other
+                    const double vLeft = std::max(accumulated.length, kPicMinBranchLength);
+                    const double vRight = std::max(part.length, kPicMinBranchLength);
+                    PicOp op;
+                    op.left = accumulated.slot;
+                    op.right = part.slot;
+                    op.out = plan.slotCount++;
+                    op.scale = 1.0 / std::sqrt(vLeft + vRight);
+                    op.leftWeight = vRight / (vLeft + vRight);
+                    op.rightWeight = vLeft / (vLeft + vRight);
+                    plan.ops.push_back(op);
+                    accumulated.slot = op.out;
+                    accumulated.length = vLeft * vRight / (vLeft + vRight); // extension of the ancestral branch
+                }
+                if (accumulated.slot >= 0) {
+                    accumulated.length += node.branchLength; // a single kept child simply inherits the branch
+                }
+                return accumulated;
+            }
+        };
+
+        Builder builder{ nodes, keepSpecies, plan };
+        builder.build(root);
+        return plan;
+    }
+
+    /** Standardised contrasts of \p speciesValues (one value per species) for a plan. \p scratch is resized as needed. */
+    inline void computePicContrasts(const PicPlan& plan, const std::vector<double>& speciesValues, std::vector<double>& scratch, std::vector<double>& contrasts) {
+        scratch.assign(static_cast<size_t>(plan.slotCount), 0.0);
+        for (size_t species = 0; species < plan.leafSlots.size() && species < speciesValues.size(); ++species) {
+            if (plan.leafSlots[species] >= 0) {
+                scratch[static_cast<size_t>(plan.leafSlots[species])] = speciesValues[species];
+            }
+        }
+        contrasts.resize(plan.ops.size());
+        for (size_t k = 0; k < plan.ops.size(); ++k) {
+            const PicOp& op = plan.ops[k];
+            const double left = scratch[static_cast<size_t>(op.left)];
+            const double right = scratch[static_cast<size_t>(op.right)];
+            contrasts[k] = (left - right) * op.scale;
+            scratch[static_cast<size_t>(op.out)] = left * op.leftWeight + right * op.rightWeight;
+        }
+    }
+
+    // ---- which species are compared and which are "selected" ----
+
+    /** What the displayed value refers to. */
+    enum class TraitScope {
+        SelectedContribution,  /** the trend is defined by all species; the value is the contribution of the selected species to it */
+        AcrossSelected         /** the correlation is computed across the selected species only */
+    };
+
+    /** A correlation across fewer species than this is meaningless (two points always give +-1). */
+    constexpr size_t kMinSpeciesAcrossSelection = 3;
+
+    struct SpeciesSelectionPlan {
+        std::vector<size_t> population;   /** species (indices into the usable species) that enter the correlation */
+        std::vector<size_t> selected;     /** species (indices into the usable species) whose contribution is reported; empty = none */
+        bool contribution = false;        /** the displayed value is the contribution score, not the correlation */
+        bool selectionTooSmall = false;   /** "across selected species" was requested with fewer than 3 species: all species are used */
+    };
+
+    /**
+     * Decide how a species selection is handled.
+     *  contribution scope : population = all usable species, selected = the picked ones (none picked -> everybody: the value is
+     *                       then exactly the overall correlation). Works for one species up to all of them.
+     *  across selected    : population = the picked species when at least 3 are picked, otherwise all species.
+     *  phylogenetic method: contributions are not defined for contrasts, so it always behaves like "across selected".
+     * @param usableCount number of species with a trait value and enough cells
+     * @param picked      indices (into the usable species) of the species picked in the species explorer
+     */
+    inline SpeciesSelectionPlan planSpeciesSelection(size_t usableCount, const std::vector<size_t>& picked, TraitScope scope, TraitMethod method) {
+        SpeciesSelectionPlan plan;
+        std::vector<size_t> everybody(usableCount);
+        for (size_t i = 0; i < usableCount; ++i) {
+            everybody[i] = i;
+        }
+
+        if (scope == TraitScope::SelectedContribution && method != TraitMethod::Phylogenetic) {
+            plan.population = everybody;
+            plan.selected = picked.empty() ? everybody : picked;
+            plan.contribution = true;
+            return plan;
+        }
+
+        if (picked.size() >= kMinSpeciesAcrossSelection) {
+            plan.population = picked;
+        }
+        else {
+            plan.population = everybody;
+            plan.selectionTooSmall = !picked.empty();
+        }
+        return plan;
+    }
+
+    // ---- statistics of all genes ----
+
+    /** Everything that does not depend on the gene; prepared once per computation. Index 0 = all species, 1 + k = without species k. */
+    struct TraitStatisticsContext {
+        TraitMethod method = TraitMethod::Pearson;
+        size_t speciesCount = 0;
+        std::vector<std::vector<double>> subsetTrait;      /** Pearson/Spearman: trait (ranked for Spearman) of the species that remain */
+        std::vector<PicPlan> plans;                        /** Phylogenetic: contrast plans */
+        std::vector<std::vector<double>> traitContrasts;   /** Phylogenetic: contrasts of the trait per plan */
+        std::vector<size_t> selected;                      /** species whose contribution is reported (empty: no contribution score) */
+        double traitMean = 0.0;                            /** mean / standard deviation of the (ranked) trait over all species */
+        double traitStdDev = 0.0;
+    };
+
+    /** Statistics of one gene. NaN marks values that cannot be computed (e.g. a confidence interval for < 4 species). */
+    struct GeneTraitStatistics {
+        float correlation = 0.0f;                 /** correlation across the species of the comparison */
+        float selectionScore = std::numeric_limits<float>::quiet_NaN(); /** contribution of the selected species (see below) */
+        float pValue = 1.0f;
+        float ciLow = std::numeric_limits<float>::quiet_NaN();
+        float ciHigh = std::numeric_limits<float>::quiet_NaN();
+        float leaveOneOutMin = std::numeric_limits<float>::quiet_NaN();
+        float leaveOneOutMax = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    /**
+     * Prepare the gene independent part of the statistics.
+     * @param traitValues one trait value per species
+     * @param picNodes    species tree (only used for TraitMethod::Phylogenetic; may be empty otherwise)
+     * @param picRoot     index of the root in \p picNodes
+     */
+    inline TraitStatisticsContext prepareTraitStatisticsContext(TraitMethod method, const std::vector<double>& traitValues, const std::vector<PicNode>& picNodes, int picRoot, const std::vector<size_t>& selected = {}) {
+        TraitStatisticsContext context;
+        context.method = method;
+        context.speciesCount = traitValues.size();
+        context.selected = selected;
+        const size_t speciesCount = traitValues.size();
+
+        if (method == TraitMethod::Phylogenetic) {
+            std::vector<double> scratch;
+            for (size_t omit = 0; omit <= speciesCount; ++omit) {          // omit == 0 : keep everybody
+                std::vector<char> keep(speciesCount, 1);
+                if (omit > 0) {
+                    keep[omit - 1] = 0;
+                }
+                context.plans.push_back(buildPicPlan(picNodes, picRoot, keep));
+                std::vector<double> contrasts;
+                computePicContrasts(context.plans.back(), traitValues, scratch, contrasts);
+                context.traitContrasts.push_back(std::move(contrasts));
+            }
+        }
+        else {
+            for (size_t omit = 0; omit <= speciesCount; ++omit) {
+                std::vector<double> subset;
+                subset.reserve(speciesCount);
+                for (size_t i = 0; i < speciesCount; ++i) {
+                    if (omit == 0 || i != omit - 1) {
+                        subset.push_back(traitValues[i]);
+                    }
+                }
+                context.subsetTrait.push_back(method == TraitMethod::Spearman ? averageRanks(subset) : std::move(subset));
+            }
+
+            // mean and standard deviation of the trait over ALL species: the reference for the contribution score
+            const std::vector<double>& fullTrait = context.subsetTrait[0];
+            for (const double value : fullTrait) {
+                context.traitMean += value;
+            }
+            context.traitMean /= static_cast<double>(speciesCount);
+            double variance = 0.0;
+            for (const double value : fullTrait) {
+                variance += (value - context.traitMean) * (value - context.traitMean);
+            }
+            context.traitStdDev = std::sqrt(variance / static_cast<double>(speciesCount));
+        }
+        return context;
+    }
+
+    /**
+     * Correlation, p-value, 95% confidence interval and leave-one-species-out range of every gene in \p range.
+     * The leave-one-out range shows how much a single species drives the result: if it is wide or changes sign, the
+     * correlation rests on one species and should not be trusted.
+     */
+    inline void computeTraitStatistics(const std::vector<const std::vector<float>*>& speciesGeneMeans,
+        const TraitStatisticsContext& context,
+        const GeneRange& range,
+        std::vector<GeneTraitStatistics>& out) {
+        const size_t speciesCount = context.speciesCount;
+        if (speciesCount == 0 || speciesGeneMeans.size() != speciesCount) {
+            return;
+        }
+
+        std::vector<double> geneValues(speciesCount), subset, scratch, contrasts;
+        subset.reserve(speciesCount);
+
+        // a gene without any variation across the species has no correlation. (Without this check the contrasts of such a
+        // gene are pure rounding noise and would give an arbitrary correlation.)
+        bool constantGene = false;
+
+        // correlation of the current gene when species `omit - 1` is left out (omit == 0: nobody)
+        const auto correlationFor = [&](size_t omit) -> double {
+            if (constantGene) {
+                return 0.0;
+            }
+            if (context.method == TraitMethod::Phylogenetic) {
+                const PicPlan& plan = context.plans[omit];
+                if (plan.ops.size() < 2) {
+                    return 0.0;
+                }
+                computePicContrasts(plan, geneValues, scratch, contrasts);
+                return correlationThroughOrigin(contrasts, context.traitContrasts[omit]);
+            }
+            subset.clear();
+            for (size_t i = 0; i < speciesCount; ++i) {
+                if (omit == 0 || i != omit - 1) {
+                    subset.push_back(geneValues[i]);
+                }
+            }
+            if (context.method == TraitMethod::Spearman) {
+                subset = averageRanks(subset);
+            }
+            return pearsonOfVectors(subset, context.subsetTrait[omit]);
+            };
+
+        // number of species that really enter the statistics (the tree may lack some species)
+        const size_t effectiveCount = (context.method == TraitMethod::Phylogenetic) ? context.plans[0].speciesInPlan : speciesCount;
+
+        for (size_t gene = range.begin; gene < range.end; ++gene) {
+            for (size_t species = 0; species < speciesCount; ++species) {
+                geneValues[species] = static_cast<double>((*speciesGeneMeans[species])[gene]);
+            }
+
+            const auto [lowest, highest] = std::minmax_element(geneValues.begin(), geneValues.end());
+            constantGene = (*highest - *lowest) <= 1.0e-9 * (1.0 + std::fabs(*highest));
+
+            GeneTraitStatistics& result = out[gene];
+            const double r = correlationFor(0);
+            result.correlation = static_cast<float>(r);
+            result.pValue = static_cast<float>(pearsonPValue(r, effectiveCount));
+
+            // Contribution of the selected species to the overall correlation: the mean over the selected species of
+            //     z(expression of the gene) * z(trait)
+            // with both z-scores taken against ALL species. It is defined for any number of selected species (also one) and equals
+            // the correlation itself when every species is selected. It is not bounded by 1: a selection of the most extreme species
+            // can exceed it. (Not available for phylogenetic contrasts.)
+            if (!context.selected.empty() && context.method != TraitMethod::Phylogenetic) {
+                double score = 0.0;
+                if (!constantGene && context.traitStdDev > 0.0) {
+                    const std::vector<double> ranked = (context.method == TraitMethod::Spearman) ? averageRanks(geneValues) : geneValues;
+                    double geneMean = 0.0;
+                    for (const double value : ranked) {
+                        geneMean += value;
+                    }
+                    geneMean /= static_cast<double>(speciesCount);
+                    double geneVariance = 0.0;
+                    for (const double value : ranked) {
+                        geneVariance += (value - geneMean) * (value - geneMean);
+                    }
+                    const double geneStdDev = std::sqrt(geneVariance / static_cast<double>(speciesCount));
+                    if (geneStdDev > 0.0) {
+                        const std::vector<double>& fullTrait = context.subsetTrait[0];
+                        for (const size_t species : context.selected) {
+                            score += ((ranked[species] - geneMean) / geneStdDev) * ((fullTrait[species] - context.traitMean) / context.traitStdDev);
+                        }
+                        score /= static_cast<double>(context.selected.size());
+                    }
+                }
+                result.selectionScore = static_cast<float>(score); // not clamped: picking the most extreme species can exceed 1
+            }
+
+            double low = 0.0, high = 0.0;
+            fisherConfidenceInterval(r, effectiveCount, low, high);
+            result.ciLow = static_cast<float>(low);
+            result.ciHigh = static_cast<float>(high);
+
+            if (effectiveCount >= 4) {
+                double minimum = std::numeric_limits<double>::max();
+                double maximum = std::numeric_limits<double>::lowest();
+                for (size_t omit = 1; omit <= speciesCount; ++omit) {
+                    if (context.method == TraitMethod::Phylogenetic && context.plans[omit].speciesInPlan == effectiveCount) {
+                        continue; // the left-out species is not in the tree: nothing changes
+                    }
+                    const double looR = correlationFor(omit);
+                    minimum = std::min(minimum, looR);
+                    maximum = std::max(maximum, looR);
+                }
+                if (minimum <= maximum) {
+                    result.leaveOneOutMin = static_cast<float>(minimum);
+                    result.leaveOneOutMax = static_cast<float>(maximum);
+                }
+            }
+        }
     }
 
 } // namespace

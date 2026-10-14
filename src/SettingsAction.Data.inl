@@ -155,9 +155,9 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
                     .arg(stats.abundanceTop)
                     .arg(stats.abundanceMiddle)
                     .arg(stats.countAbundanceNumerator)
-                    .arg(stats.meanSelected, 0, 'f', 2)
+                    .arg(stats.meanSelected, 0, 'f', 4)
                     .arg(stats.countSelected)
-                    .arg(stats.meanNonSelected, 0, 'f', 2)
+                    .arg(stats.meanNonSelected, 0, 'f', 4)
                     .arg(stats.countNonSelected);
             }
             statisticsText[row] = std::move(formattedStatistics);
@@ -198,11 +198,14 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         const auto itCorr = _geneTraitValuesComputed.find(gene);
         const auto itP = _geneTraitPValues.find(gene);
         const auto itQ = _geneTraitFdrValues.find(gene);
+        const auto itE = _geneTraitExtras.find(gene);
         auto* correlationItem = new QStandardItem();
         setTraitCorrelationItemData(correlationItem,
             itCorr != _geneTraitValuesComputed.end() ? static_cast<double>(itCorr->second) : 0.0,
             itP != _geneTraitPValues.end() ? static_cast<double>(itP->second) : 1.0,
-            itQ != _geneTraitFdrValues.end() ? static_cast<double>(itQ->second) : 1.0);
+            itQ != _geneTraitFdrValues.end() ? static_cast<double>(itQ->second) : 1.0,
+            itE != _geneTraitExtras.end() ? itE->second : GeneTraitExtras(),
+            _traitSampleSize, _traitMethodNote);
         model->setItem(rowIndex, kTraitCorrelationColumn, correlationItem);
     }
 
@@ -230,6 +233,16 @@ QStringList SettingsAction::getSystemModeColor() {
 }
 
 
+// ============================================================================================================
+//  CSV export
+//
+//  Two tables can be saved:
+//   - "Save Gene Table"               : one row per gene of the gene table (rows and order as shown, i.e. filtered and sorted)
+//   - "Save Species Statistics Table" : one row per gene and species (the statistics shown in the right-hand table)
+//  Both can start with the analysis parameters as '#' comment lines, and both contain the trait statistics only when a
+//  trait correlation was actually computed (otherwise the columns would hold placeholder zeros that look like results).
+// ============================================================================================================
+
 namespace {
 
     // A field is quoted when it contains a separator, a quote or a line break.
@@ -243,41 +256,257 @@ namespace {
         return value;
     }
 
-    // The gene table is recognised by its header, not by its column count: it grew a fifth
-    // "Trait Correlation" column, so a hard coded "== 4" check no longer matches.
+    QString csvLine(const QStringList& fields)
+    {
+        QStringList escaped;
+        escaped.reserve(fields.size());
+        for (const QString& field : fields) {
+            escaped << csvEscape(field);
+        }
+        return escaped.join(",");
+    }
+
+    // The gene table is recognised by its header, not by its column count.
     bool isGeneTableModel(const QAbstractItemModel* model)
     {
         return model && model->columnCount() >= 4 && model->headerData(3, Qt::Horizontal).toString() == "Statistics";
     }
 
-    // "r, p-value, FDR" of the trait correlation column (null string when the model has no such column).
-    QString correlationText(const QAbstractItemModel* model, int row)
+    // Text that is safe inside a file name.
+    QString fileNamePart(const QString& text)
     {
-        if (!model || model->columnCount() <= kTraitCorrelationColumn) {
-            return QString();
+        QString part = text;
+        part.replace(QRegularExpression("[^A-Za-z0-9_.-]+"), "_");
+        return part.left(60);
+    }
+
+    // Ask where to save; ".csv" is added when no extension was typed. Empty string: cancelled.
+    QString askForCsvPath(const QString& suggestedName)
+    {
+        QString filePath = QFileDialog::getSaveFileName(nullptr, "Save CSV", suggestedName, "CSV Files (*.csv);;All Files (*)");
+        if (!filePath.isEmpty() && QFileInfo(filePath).suffix().isEmpty()) {
+            filePath += ".csv";
         }
-        const QModelIndex index = model->index(row, kTraitCorrelationColumn);
-        return QString("%1, %2, %3")
-            .arg(index.data(Qt::UserRole).toDouble(), 0, 'f', 3)
-            .arg(index.data(kTraitPValueRole).toDouble(), 0, 'g', 4)
-            .arg(index.data(kTraitFdrRole).toDouble(), 0, 'g', 4);
+        return filePath;
+    }
+
+    // Same rule as the on-screen table: several middle clusters -> redundant column "Neuronal", one -> its name, none -> "Abundance".
+    QString middleFractionName(const QStringList& middleSet, bool& redundant)
+    {
+        if (middleSet.size() > 1) {
+            redundant = true;
+            return "Neuronal";
+        }
+        if (middleSet.size() == 1) {
+            redundant = false;
+            return middleSet.first();
+        }
+        redundant = true;
+        return "Abundance";
+    }
+
+    double percentOfCounts(double numerator, double denominator)
+    {
+        return denominator != 0.0 ? numerator / denominator * 100.0 : 0.0;
+    }
+
+    // Table of an unknown layout (e.g. an empty model): written as it is.
+    void writeGenericTable(const QAbstractItemModel* model, QTextStream& stream)
+    {
+        QStringList header;
+        for (int col = 0; col < model->columnCount(); ++col) {
+            QString name = model->headerData(col, Qt::Horizontal).toString();
+            name.replace("\n", " ");
+            header << name;
+        }
+        stream << csvLine(header) << "\n";
+        for (int row = 0; row < model->rowCount(); ++row) {
+            QStringList fields;
+            for (int col = 0; col < model->columnCount(); ++col) {
+                fields << model->data(model->index(row, col)).toString();
+            }
+            stream << csvLine(fields) << "\n";
+        }
+    }
+
+    /**
+     * Parse the "Statistics" text of a gene (one "Species: ..., Rank: ..., ..." line per species) into CSV rows,
+     * one per species. Fractions are numerator / denominator in percent, like in the on-screen table.
+     */
+    QStringList speciesStatisticsRows(const QString& gene, const QStringList& topNSpecies, const QStringList& statisticsLines,
+        const QStringList& explorerSelection, bool withMiddleFraction, const QStringList& traitValues)
+    {
+        QStringList rows;
+        for (const QString& line : statisticsLines) {
+            if (line.trimmed().isEmpty()) {
+                continue;
+            }
+
+            QMap<QString, QString> values;
+            for (const QString& pair : line.split(", ")) {
+                const QStringList keyValue = pair.split(": ");
+                if (keyValue.size() == 2) {
+                    QString value = keyValue[1].trimmed();
+                    if (value.endsWith(';')) {
+                        value.chop(1); // every statistics line ends with ';'
+                    }
+                    values.insert(keyValue[0].trimmed(), value);
+                }
+            }
+
+            const QString species = values.value("Species");
+            const double meanSelected = values.value("MeanSelected").toDouble();
+            const double meanNotSelected = values.value("MeanNotSelected").toDouble();
+            const double numerator = values.value("CountAbundanceNumerator").toDouble();
+
+            QStringList fields;
+            fields << gene
+                << (topNSpecies.contains(species) ? "True" : "False")
+                << species
+                << (explorerSelection.contains(species) ? "True" : "False")
+                << QString::number(meanSelected - meanNotSelected, 'f', 4)
+                << values.value("Rank")
+                << QString::number(percentOfCounts(numerator, values.value("AbundanceTop").toDouble()), 'f', 2);
+            if (withMiddleFraction) {
+                fields << QString::number(percentOfCounts(numerator, values.value("AbundanceMiddle").toDouble()), 'f', 2);
+            }
+            fields << values.value("CountSelected")
+                << QString::number(meanSelected, 'f', 4)
+                << values.value("CountNotSelected")
+                << QString::number(meanNotSelected, 'f', 4);
+            fields << traitValues;
+            rows << csvLine(fields);
+        }
+        return rows;
     }
 
 } // namespace
 
+bool SettingsAction::traitColumnsAvailable(const QAbstractItemModel* model) const
+{
+    return model && model->columnCount() > kTraitCorrelationColumn && _traitSampleSize > 0;
+}
+
+QStringList SettingsAction::traitExportHeaders() const
+{
+    // p-value, FDR and confidence interval always describe the correlation across the compared species
+    const QString suffix = _traitContributionShown ? " (overall correlation)" : "";
+
+    QStringList headers;
+    headers << (_traitValueLabel.isEmpty() ? QString("Trait correlation") : _traitValueLabel);
+    if (_traitContributionShown) {
+        headers << "Trait overall correlation (all species)";
+    }
+    headers << "Trait p-value" + suffix
+        << "Trait FDR (Benjamini-Hochberg)" + suffix
+        << "Trait significant (FDR < 0.05)" + suffix
+        << "Trait N species"
+        << "Trait CI low" + suffix
+        << "Trait CI high" + suffix
+        << "Trait leave-one-out min" + suffix
+        << "Trait leave-one-out max" + suffix;
+    return headers;
+}
+
+QStringList SettingsAction::traitExportValues(const QAbstractItemModel* model, int row) const
+{
+    const QModelIndex index = model->index(row, kTraitCorrelationColumn);
+    const QVariantList stats = index.data(kTraitStatsRole).toList();
+
+    // stats: N species, CI low, CI high, leave-one-out min, max, overall correlation (unavailable values are left empty)
+    const auto optionalNumber = [&stats](int position, int precision) {
+        if (position >= stats.size()) {
+            return QString();
+        }
+        const double value = stats.at(position).toDouble();
+        return std::isfinite(value) ? QString::number(value, 'f', precision) : QString();
+        };
+
+    const double fdr = index.data(kTraitFdrRole).toDouble();
+
+    QStringList values;
+    values << QString::number(index.data(Qt::UserRole).toDouble(), 'f', 4);
+    if (_traitContributionShown) {
+        values << optionalNumber(5, 4);
+    }
+    values << QString::number(index.data(kTraitPValueRole).toDouble(), 'g', 4)
+        << QString::number(fdr, 'g', 4)
+        << (fdr < 0.05 ? "True" : "False")
+        << optionalNumber(0, 0)
+        << optionalNumber(1, 4)
+        << optionalNumber(2, 4)
+        << optionalNumber(3, 4)
+        << optionalNumber(4, 4);
+    return values;
+}
+
+QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle, int rowCount, bool withTraitColumns, int significantRows)
+{
+    QStringList lines;
+    lines << "XSC Gene Detect - " + tableTitle;
+    lines << "Created: " + QDateTime::currentDateTime().toString(Qt::ISODate);
+
+    const auto mainDataset = _mainPointsDataset.getCurrentDataset();
+    if (mainDataset.isValid()) {
+        lines << "Dataset: " + mainDataset->getGuiName();
+    }
+    lines << QString("Selected cells: %1").arg(_selectedIndicesFromStorage.size());
+
+    QStringList cellTypes = _selectedClusterNames;
+    if (cellTypes.isEmpty() && !_selectedClusterName.isEmpty()) {
+        cellTypes << _selectedClusterName;
+    }
+    lines << "Cell types: " + (cellTypes.isEmpty() ? QString("none") : cellTypes.join(", "));
+    lines << QString("Top N genes per species: %1 (%2)").arg(_topNGenesFilter.getValue()).arg(_typeofTopNGenes.getCurrentText());
+    lines << QString("Log transformation: %1").arg(_applyLogTransformation.isChecked() ? "yes" : "no");
+
+    const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
+    lines << "Species selected in the species explorer: " + (explorerSelection.isEmpty() ? QString("none") : explorerSelection.join(", "));
+
+    const QString searchText = _searchBox ? _searchBox->text() : QString();
+    if (!searchText.isEmpty()) {
+        lines << "Gene search: " + searchText;
+    }
+
+    if (withTraitColumns) {
+        lines << "Trait: " + _reverseSearchTraitSelectionString.getString();
+        // the note is multi-line: method, number of species, what the value means
+        lines << "Trait statistics: " + _traitMethodNote.split("\n", Qt::SkipEmptyParts).join(" | ");
+        lines << QString("Cell type pooling: %1; minimum cells per species: %2").arg(_traitPoolingMode.getCurrentText()).arg(_traitMinCells.getValue());
+        lines << "Trait column: " + (_traitValueLabel.isEmpty() ? QString("Trait correlation") : _traitValueLabel);
+        if (_traitSignificantOnly.isChecked()) {
+            lines << "Only genes with a significant trait correlation (FDR < 0.05) are listed";
+        }
+    }
+
+    lines << QString("Rows: %1").arg(rowCount);
+    if (withTraitColumns) {
+        lines << QString("Rows with FDR < 0.05: %1").arg(significantRows);
+    }
+
+    for (QString& line : lines) {
+        line = "# " + line;
+    }
+    return lines;
+}
+
 void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
-    if (!tableView) {
-        qWarning() << "TableView is null.";
+    if (!tableView || !tableView->model()) {
+        qWarning() << "No table to export.";
         return;
     }
-
     QAbstractItemModel* model = tableView->model();
-    if (!model) {
-        qWarning() << "TableView model is null.";
-        return;
+
+    // suggested name: the content of the table
+    QString suggestedName = "gene_table";
+    if (!_reverseSearchTraitSelectionString.getString().isEmpty() && _traitSampleSize > 0) {
+        suggestedName += "_" + fileNamePart(_reverseSearchTraitSelectionString.getString());
+    }
+    if (!_selectedClusterName.isEmpty()) {
+        suggestedName += "_" + fileNamePart(_selectedClusterName);
     }
 
-    QString filePath = QFileDialog::getSaveFileName(nullptr, "Save CSV", "", "CSV Files (*.csv);;All Files (*)");
+    const QString filePath = askForCsvPath(suggestedName + ".csv");
     if (filePath.isEmpty()) {
         qWarning() << "No file selected for saving.";
         return;
@@ -288,151 +517,74 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
         qWarning() << "Could not open file for writing: " << filePath;
         return;
     }
-
     QTextStream stream(&file);
 
-    if (isGeneTableModel(model))
-    {
-        const bool hasCorrelation = model->columnCount() >= 5;
-        stream << "ID,Species Appearance,Gene Appearance Species Names";
-        if (hasCorrelation) {
-            stream << ",Trait Correlation,Trait p-value,Trait FDR";
-        }
-        stream << "\n";
-
-        for (int row = 0; row < model->rowCount(); ++row) {
-            stream << csvEscape(model->data(model->index(row, 0)).toString()) << ","
-                << csvEscape(model->data(model->index(row, 1)).toString()) << ","
-                << csvEscape(model->data(model->index(row, 2)).toString());
-            if (hasCorrelation) {
-                stream << "," << correlationText(model, row);
-            }
-            stream << "\n";
-        }
+    if (!isGeneTableModel(model)) {
+        writeGenericTable(model, stream);
+        return;
     }
-    else
-    {
-        // Write header
-        for (int col = 0; col < model->columnCount(); ++col) {
-            if (col > 0) {
-                stream << ",";
-            }
-            stream << model->headerData(col, Qt::Horizontal).toString();
-        }
-        stream << "\n";
 
-        // Write data
-        for (int row = 0; row < model->rowCount(); ++row) {
-            for (int col = 0; col < model->columnCount(); ++col) {
-                if (col > 0) {
-                    stream << ",";
-                }
-                stream << model->data(model->index(row, col)).toString();
+    const bool withTrait = traitColumnsAvailable(model);
+
+    // the rows exactly as shown: filtered (top-N genes, search, significant only) and sorted like the view
+    QStringList rows;
+    int significantRows = 0;
+    for (int row = 0; row < model->rowCount(); ++row) {
+        QStringList fields;
+        fields << model->data(model->index(row, 0)).toString()
+            << model->data(model->index(row, 1)).toString()
+            << model->data(model->index(row, 2)).toString();
+        if (withTrait) {
+            const QStringList traitValues = traitExportValues(model, row);
+            fields << traitValues;
+            if (model->index(row, kTraitCorrelationColumn).data(kTraitFdrRole).toDouble() < 0.05) {
+                ++significantRows;
             }
-            stream << "\n";
+        }
+        rows << csvLine(fields);
+    }
+
+    if (_saveIncludeParameters.isChecked()) {
+        for (const QString& line : buildExportParameterLines("gene table", static_cast<int>(rows.size()), withTrait, significantRows)) {
+            stream << line << "\n";
         }
     }
 
-
-    file.close();
+    QStringList header = { "Gene", "Species Appearance", "Gene Appearance Species Names" };
+    if (withTrait) {
+        header << traitExportHeaders();
+    }
+    stream << csvLine(header) << "\n";
+    for (const QString& row : rows) {
+        stream << row << "\n";
+    }
 }
-
-QString computeMapFromStatistics(QString geneName, QStringList geneAppearanceSpeciesNamesList, QStringList statisticsList, const QString& traitCorrelation = QString())
-{
-    QString finalString = "";
-
-    for (int i = 0; i < statisticsList.size(); i++)
-    {
-        QString tempString = statisticsList[i];
-        QStringList pairs = tempString.split(", ");
-
-        QString speciesName = "";
-        QString rank = "";
-        QString abundanceTop = "";
-        QString abundanceMiddle = "";
-        QString countAbundanceNumerator = "";
-        QString meanSelected = "";
-        QString countSelected = "";
-        QString meanNotSelected = "";
-        QString countNotSelected = "";
-
-        for (const QString& pair : pairs) {
-            QStringList keyValue = pair.split(": ");
-            if (keyValue.size() == 2) {
-                QString key = keyValue[0].trimmed();
-                QString value = keyValue[1].trimmed();
-
-                if (key == "Species") {
-                    speciesName = value;
-                }
-                else if (key == "Rank") {
-                    rank = value;
-                }
-                else if (key == "AbundanceTop") {
-                    abundanceTop = value;
-                }
-                else if (key == "AbundanceMiddle") {
-                    abundanceMiddle = value;
-                }
-                else if (key == "CountAbundanceNumerator") {
-                    countAbundanceNumerator = value;
-                }
-                else if (key == "MeanSelected") {
-                    meanSelected = value;
-                }
-                else if (key == "CountSelected") {
-                    countSelected = value;
-                }
-                else if (key == "MeanNotSelected") {
-                    meanNotSelected = value;
-                }
-                else if (key == "CountNotSelected") {
-                    countNotSelected = value;
-                }
-            }
-        }
-
-        finalString += csvEscape(geneName);
-        if (geneAppearanceSpeciesNamesList.contains(speciesName)) {
-            finalString += ", True";
-        }
-        else {
-            finalString += ", False";
-        }
-        finalString += ", " + csvEscape(speciesName);
-        finalString += ", " + QString::number(meanSelected.toFloat() - meanNotSelected.toFloat());
-        finalString += ", " + rank;
-        finalString += ", " + abundanceTop;
-        finalString += ", " + abundanceMiddle;
-        finalString += ", " + countSelected;
-        finalString += ", " + meanSelected;
-        finalString += ", " + countNotSelected;
-        finalString += ", " + meanNotSelected;
-        if (!traitCorrelation.isNull()) {
-            finalString += ", " + traitCorrelation;
-        }
-        if (i < statisticsList.size() - 1) {
-            finalString += "\n";
-        }
-    }
-
-    return finalString;
-}
-
 
 void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
-    if (!tableView) {
-        qWarning() << "TableView is null.";
+    if (!tableView || !tableView->model()) {
+        qWarning() << "No table to export.";
         return;
     }
-
     QAbstractItemModel* model = tableView->model();
-    if (!model) {
-        qWarning() << "TableView model is null.";
-        return;
+
+    // The selected gene (if it is listed) -> only its species; otherwise every listed gene
+    const QString selectedGene = _selectedGene.getString();
+    int geneRowIndex = -1;
+    if (!selectedGene.isEmpty()) {
+        for (int row = 0; row < model->rowCount(); ++row) {
+            if (model->data(model->index(row, 0)).toString() == selectedGene) {
+                geneRowIndex = row;
+                break;
+            }
+        }
     }
 
-    QString filePath = QFileDialog::getSaveFileName(nullptr, "Save CSV", "", "CSV Files (*.csv);;All Files (*)");
+    QString suggestedName = geneRowIndex != -1 ? "species_statistics_" + fileNamePart(selectedGene) : "species_statistics_all_genes";
+    if (!_selectedClusterName.isEmpty()) {
+        suggestedName += "_" + fileNamePart(_selectedClusterName);
+    }
+
+    const QString filePath = askForCsvPath(suggestedName + ".csv");
     if (filePath.isEmpty()) {
         qWarning() << "No file selected for saving.";
         return;
@@ -443,99 +595,53 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
         qWarning() << "Could not open file for writing: " << filePath;
         return;
     }
-
     QTextStream stream(&file);
 
-    // Find the row index of the selected gene for column 0
-    int geneRowIndex = -1;
-    for (int row = 0; row < model->rowCount(); ++row) {
-        if (model->data(model->index(row, 0)).toString() == _selectedGene.getString()) {
-            geneRowIndex = row;
-            break;
+    if (!isGeneTableModel(model)) {
+        writeGenericTable(model, stream);
+        return;
+    }
+
+    const bool withTrait = traitColumnsAvailable(model);
+    bool middleRedundant = false;
+    const QString middleName = middleFractionName(_currentHierarchyItemsMiddleForTable, middleRedundant);
+    const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
+
+    QStringList rows;
+    int significantRows = 0;
+    const int firstRow = geneRowIndex != -1 ? geneRowIndex : 0;
+    const int lastRow = geneRowIndex != -1 ? geneRowIndex : model->rowCount() - 1;
+    for (int row = firstRow; row <= lastRow; ++row) {
+        const QString gene = model->data(model->index(row, 0)).toString();
+        const QStringList topNSpecies = model->data(model->index(row, 2)).toString().split(";", Qt::SkipEmptyParts);
+        const QStringList statisticsLines = model->data(model->index(row, 3)).toString().split("\n", Qt::SkipEmptyParts);
+        const QStringList traitValues = withTrait ? traitExportValues(model, row) : QStringList();
+        if (withTrait && model->index(row, kTraitCorrelationColumn).data(kTraitFdrRole).toDouble() < 0.05) {
+            ++significantRows;
+        }
+        rows << speciesStatisticsRows(gene, topNSpecies, statisticsLines, explorerSelection, !middleRedundant, traitValues);
+    }
+
+    if (_saveIncludeParameters.isChecked()) {
+        const QString title = geneRowIndex != -1 ? "species statistics of gene " + selectedGene : "species statistics of all listed genes";
+        for (const QString& line : buildExportParameterLines(title, static_cast<int>(rows.size()), withTrait, significantRows)) {
+            stream << line << "\n";
         }
     }
 
-
-    qDebug() << "Gene row index: " << geneRowIndex;
-
-    // If the gene row index is found, write the matching row
-
-    if (isGeneTableModel(model)) {
-        //ID,Species Appearance,Gene Appearance Species Names,Statistics
-        QString ergicString = "Fraction in " + _topSelectedHierarchyStatus.getString();
-        QStringList headers = { "Gene", "Species Appearance", "Species", "Mean Gene Differential Expression", "Gene Appearance Rank", "Fraction in Neuronal", ergicString ,"Count of Selected", "Mean Gene Expression of Selected", "Count of Non Selected","Mean Gene Expression of Non Selected" };
-        if (model->columnCount() >= 5) {
-            headers << "Trait Correlation" << "Trait p-value" << "Trait FDR";
-        }
-        QString headerNames = headers.join(",");
-        stream << headerNames;
-        stream << "\n";
-
-        if (geneRowIndex != -1)
-        {
-            QString geneName = model->data(model->index(geneRowIndex, 0)).toString();
-            QString speciesAppearance = model->data(model->index(geneRowIndex, 1)).toString();
-            QString geneAppearanceSpeciesNames = model->data(model->index(geneRowIndex, 2)).toString();
-            QStringList geneAppearanceSpeciesNamesList = geneAppearanceSpeciesNames.split(";");
-            QString statistics = model->data(model->index(geneRowIndex, 3)).toString();
-            QStringList statisticsList = statistics.split("\n");
-            if (!statisticsList.isEmpty() && statisticsList.last().isEmpty()) {
-                statisticsList.removeLast();
-            }
-            QString finalString = computeMapFromStatistics(geneName, geneAppearanceSpeciesNamesList, statisticsList, correlationText(model, geneRowIndex));
-            stream << finalString;
-
-        }
-        else
-        {
-            for (int row = 0; row < model->rowCount(); ++row) {
-                QString geneName = model->data(model->index(row, 0)).toString();
-                QString speciesAppearance = model->data(model->index(row, 1)).toString();
-                QString geneAppearanceSpeciesNames = model->data(model->index(row, 2)).toString();
-                QStringList geneAppearanceSpeciesNamesList = geneAppearanceSpeciesNames.split(";");
-                QString statistics = model->data(model->index(row, 3)).toString();
-                QStringList statisticsList = statistics.split("\n");
-                if (!statisticsList.isEmpty() && statisticsList.last().isEmpty()) {
-                    statisticsList.removeLast();
-                }
-                QString finalString = computeMapFromStatistics(geneName, geneAppearanceSpeciesNamesList, statisticsList, correlationText(model, row));
-                stream << finalString;
-                if (row < model->rowCount() - 1) {
-                    stream << "\n";
-                }
-            }
-        }
-
-
+    QStringList header = { "Gene", "Top-N gene in species", "Species", "Species selected in explorer", "Mean Gene Differential Expression",
+                           "Gene Appearance Rank", "Fraction in Neuronal (%)" };
+    if (!middleRedundant) {
+        header << "Fraction in " + middleName + " (%)";
     }
-    else
-    {
-        // Write header
-        for (int col = 0; col < model->columnCount(); ++col) {
-            if (col > 0) {
-                stream << ",";
-            }
-            QString headerVal = model->headerData(col, Qt::Horizontal).toString();
-            // Remove all occurrences of "\n" from the headerVal
-            headerVal.replace("\n", "");
-            stream << headerVal;
-        }
-        stream << "\n";
-
-
-
-        for (int row = 0; row < model->rowCount(); ++row) {
-            for (int col = 0; col < model->columnCount(); ++col) {
-                if (col > 0) {
-                    stream << ",";
-                }
-                stream << model->data(model->index(row, col)).toString();
-            }
-            stream << "\n";
-        }
+    header << "Count of Selected" << "Mean Gene Expression of Selected" << "Count of Non Selected" << "Mean Gene Expression of Non Selected";
+    if (withTrait) {
+        header << traitExportHeaders();
     }
-
-    file.close();
+    stream << csvLine(header) << "\n";
+    for (const QString& row : rows) {
+        stream << row << "\n";
+    }
 }
 
 void SettingsAction::populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames)
