@@ -458,7 +458,6 @@ QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle,
     }
     lines << "Cell types: " + (cellTypes.isEmpty() ? QString("none") : cellTypes.join(", "));
     lines << QString("Top N genes per species: %1 (%2)").arg(_topNGenesFilter.getValue()).arg(_typeofTopNGenes.getCurrentText());
-    lines << QString("Log transformation: %1").arg(_applyLogTransformation.isChecked() ? "yes" : "no");
 
     const QStringList explorerSelection = _speciesExplorerInMap.getSelectedOptions();
     lines << "Species selected in the species explorer: " + (explorerSelection.isEmpty() ? QString("none") : explorerSelection.join(", "));
@@ -480,7 +479,7 @@ QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle,
     }
 
     lines << QString("Rows: %1").arg(rowCount);
-    if (withTraitColumns) {
+    if (withTraitColumns && significantRows >= 0) {
         lines << QString("Rows with FDR < 0.05: %1").arg(significantRows);
     }
 
@@ -557,6 +556,70 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
     stream << csvLine(header) << "\n";
     for (const QString& row : rows) {
         stream << row << "\n";
+    }
+}
+
+void SettingsAction::exportTraitMatrixToCSV(QTableView* tableView) {
+    if (!tableView || !tableView->model()) {
+        qWarning() << "No table to export.";
+        return;
+    }
+    if (_traitMatrix.empty()) {
+        QMessageBox::information(nullptr, "Trait matrix", "There is no trait correlation yet.\nChoose a trait and cell type(s) first.");
+        return;
+    }
+
+    // genes: the ones listed in the gene table (filtered and sorted like the view) that are part of the matrix
+    QStringList genes;
+    std::vector<size_t> columns;
+    QAbstractItemModel* model = tableView->model();
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QString gene = model->data(model->index(row, 0)).toString();
+        const auto it = _traitMatrix.geneIndex.find(gene);
+        if (it != _traitMatrix.geneIndex.end()) {
+            genes << gene;
+            columns.push_back(it->second);
+        }
+    }
+
+    QString suggestedName = "trait_matrix_" + fileNamePart(_traitMatrix.traitName);
+    if (!_selectedClusterName.isEmpty()) {
+        suggestedName += "_" + fileNamePart(_selectedClusterName);
+    }
+    const QString filePath = askForCsvPath(suggestedName + ".csv");
+    if (filePath.isEmpty()) {
+        qWarning() << "No file selected for saving.";
+        return;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning() << "Could not open file for writing: " << filePath;
+        return;
+    }
+    QTextStream stream(&file);
+
+    if (_saveIncludeParameters.isChecked()) {
+        QStringList lines = buildExportParameterLines("trait matrix (one row per species, one column per gene: mean expression)", static_cast<int>(_traitMatrix.species.size()), true, -1);
+        lines << QString("# Genes: %1 (the genes listed in the gene table)").arg(genes.size());
+        for (const QString& line : lines) {
+            stream << line << "\n";
+        }
+    }
+
+    QStringList header = { "Species", "Trait value (" + _traitMatrix.traitName + ")", "Selected in species explorer" };
+    header << genes;
+    stream << csvLine(header) << "\n";
+
+    for (size_t species = 0; species < _traitMatrix.species.size(); ++species) {
+        QStringList fields;
+        fields << _traitMatrix.species[species]
+            << QString::number(_traitMatrix.trait[species], 'g', 8)
+            << (_traitMatrix.selected[species] ? "True" : "False");
+        for (const size_t column : columns) {
+            fields << QString::number(static_cast<double>(_traitMatrix.expression[species][column]), 'g', 6);
+        }
+        stream << csvLine(fields) << "\n";
     }
 }
 

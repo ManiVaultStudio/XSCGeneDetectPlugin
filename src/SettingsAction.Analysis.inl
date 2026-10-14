@@ -2269,6 +2269,7 @@ void SettingsAction::computeTraitCorrelation()
         _traitMethodNote.clear();
         _traitContributionShown = false;
         _traitValueLabel.clear();
+        _traitMatrix = TraitMatrix();
         publishTraitCorrelationToModel();
         return;
     }
@@ -2371,8 +2372,10 @@ void SettingsAction::computeTraitCorrelation()
         }
     }
 
-    // species with fewer cells than this (summed over the selected cell types) do not take part
+    // Minimum number of cells. Pool cells: summed over the selected cell types. Equal cell-type weighting: every cell type
+    // needs it (a cell type with one cell would otherwise weigh as much as one with thousands of cells).
     const int minCells = std::max(1, _traitMinCells.getValue());
+    const bool equalWeighting = (_traitPoolingMode.getCurrentText() == "Equal cell-type weighting");
 
     const auto entryKey = [](const QString& species, const QString& cellType) {
         return species + QLatin1Char('\x1f') + cellType;
@@ -2434,15 +2437,17 @@ void SettingsAction::computeTraitCorrelation()
         }
         };
 
-    const auto cellsOf = [&](const QString& species) {
-        int cells = 0;
+    const auto isUsableSpecies = [&](const QString& species) {
+        int totalCells = 0;
+        bool anyCellTypeBigEnough = false;
         for (const QString& cellType : cellTypes) {
             const auto it = _traitCache.entries.find(entryKey(species, cellType));
             if (it != _traitCache.entries.end()) {
-                cells += it->second.cellCount;
+                totalCells += it->second.cellCount;
+                anyCellTypeBigEnough = anyCellTypeBigEnough || it->second.cellCount >= minCells;
             }
         }
-        return cells;
+        return equalWeighting ? anyCellTypeBigEnough : totalCells >= minCells;
         };
 
     // ---- 5. Usable species ---------------------------------------------------------------------------------------
@@ -2456,7 +2461,7 @@ void SettingsAction::computeTraitCorrelation()
 
     std::vector<QString> usable; // trait value AND enough cells of the selected cell type(s)
     for (const QString& species : everySpecies) {
-        if (cellsOf(species) >= minCells) {
+        if (isUsableSpecies(species)) {
             usable.push_back(species);
         }
     }
@@ -2469,6 +2474,7 @@ void SettingsAction::computeTraitCorrelation()
     _traitMethodNote.clear();
     _traitContributionShown = false;
     _traitValueLabel.clear();
+    _traitMatrix = TraitMatrix();
     if (usable.size() < kMinSpeciesForTraitCorrelation) {
         qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and at least" << minCells << "cells of the selected cell types; found" << usable.size();
         _traitMethodNote = QString("No trait correlation: only %1 species have a trait value and at least %2 cells of the selected cell type(s)").arg(usable.size()).arg(minCells);
@@ -2555,7 +2561,7 @@ void SettingsAction::computeTraitCorrelation()
     }
 
     // ---- 8. Expression matrix X (N species x G genes) and trait vector t ----------------------------------------
-    const TraitPooling pooling = (_traitPoolingMode.getCurrentText() == "Equal cell-type weighting") ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
+    const TraitPooling pooling = equalWeighting ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
 
     std::vector<std::vector<CellTypeMeans>> partsPerSpecies(population.size());
     std::vector<double> traitValues;
@@ -2563,7 +2569,7 @@ void SettingsAction::computeTraitCorrelation()
     for (size_t i = 0; i < population.size(); ++i) {
         for (const QString& cellType : cellTypes) {
             const auto& entry = _traitCache.entries.at(entryKey(population[i], cellType));
-            if (entry.cellCount > 0) {
+            if (entry.cellCount > 0 && (!equalWeighting || entry.cellCount >= minCells)) {
                 partsPerSpecies[i].push_back({ static_cast<size_t>(entry.cellCount), &entry.means });
             }
         }
@@ -2663,6 +2669,22 @@ void SettingsAction::computeTraitCorrelation()
     _traitSampleSize = sampleSize;
     _traitMethodNote = methodName + "\n" + selectionText;
     _traitContributionShown = plan.contribution;
+
+    // keep the matrix: it feeds the "expression vs trait" plot and the matrix export (the workers are finished, so it can be moved)
+    _traitMatrix = TraitMatrix();
+    _traitMatrix.species = population;
+    _traitMatrix.trait = traitValues;
+    _traitMatrix.expression = std::move(expressionMatrix);
+    _traitMatrix.selected.assign(population.size(), 0);
+    for (size_t i = 0; i < population.size(); ++i) {
+        _traitMatrix.selected[i] = explorerSelection.contains(population[i]) ? 1 : 0;
+    }
+    _traitMatrix.geneIndex.reserve(geneCount);
+    for (size_t g = 0; g < geneCount; ++g) {
+        _traitMatrix.geneIndex[geneNames[g]] = g;
+    }
+    _traitMatrix.traitName = traitName;
+
     const QString methodShortName = (method == TraitMethod::Phylogenetic) ? "phylogenetic contrasts" : (method == TraitMethod::Spearman ? "Spearman" : "Pearson");
     _traitValueLabel = QString(plan.contribution ? "Trait contribution of selected species (%1)" : "Trait correlation (%1)").arg(methodShortName);
 

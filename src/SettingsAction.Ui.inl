@@ -62,6 +62,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _saveSpeciesTable(this, "Save Gene Table"),
     _saveGeneTable(this, "Save Species Statistics Table"),
     _saveIncludeParameters(this, "Add analysis parameters to the CSV"),
+    _saveTraitMatrix(this, "Save Trait Matrix"),
+    _showTraitPlot(this, "Plot Selected Gene vs Trait"),
     _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String"),
     _traitPoolingMode(this, "Trait Pooling"),
     _traitCorrelationMethod(this, "Trait Correlation Method"),
@@ -339,7 +341,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitMinCells.setValue(10);
     _traitMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
     _traitMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out of the trait correlation:\n"
-        "the mean expression of a handful of cells is too noisy to correlate.");
+        "the mean expression of a handful of cells is too noisy to correlate.\n"
+        "Pool cells: the cells of all selected cell types of a species are counted together.\n"
+        "Equal cell-type weighting: every cell type needs this many cells, otherwise it is ignored for that species\n"
+        "(a cell type with a single cell would otherwise get the same weight as one with thousands).");
 
     _traitSignificantOnly.setChecked(false);
     _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
@@ -370,6 +375,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _saveIncludeParameters.setSerializationName("CSCGDV:Save Include Parameters");
     _saveIncludeParameters.setToolTip("Write the analysis parameters (cell types, species, trait, method, ...) as lines starting with '#' on top of the CSV.\n"
         "Read it with a comment character (pandas: comment='#', R: comment.char='#') or switch this off for a plain table.");
+
+    _saveTraitMatrix.setIcon(mv::util::StyledIcon("save"));
+    _saveTraitMatrix.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _saveTraitMatrix.setToolTip("Save the species x genes expression matrix of the listed genes together with the trait values,\n"
+        "e.g. to repeat or extend the correlation analysis in R or Python.");
+    _showTraitPlot.setIcon(mv::util::StyledIcon("chart-line"));
+    _showTraitPlot.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _showTraitPlot.setToolTip("Open a plot of the mean expression of the selected gene against the trait: one point per species.");
 
     QIcon saveSpeciesTableIcon = mv::util::StyledIcon("save");
     _saveSpeciesTable.setIcon(saveSpeciesTableIcon);
@@ -1245,6 +1258,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_saveSpeciesTable, &TriggerAction::triggered, this, triggerSaveSpeciesTable);
+    connect(&_saveTraitMatrix, &TriggerAction::triggered, this, [this]() -> void { exportTraitMatrixToCSV(_geneTableView); });
 
 
     const auto updateComputeTreesToDisplayFromHierarchy = [this]() -> void {

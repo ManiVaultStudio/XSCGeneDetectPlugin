@@ -212,6 +212,17 @@ inline constexpr int kTraitPValueRole = Qt::UserRole + 1;   /** two-sided p-valu
 inline constexpr int kTraitFdrRole = Qt::UserRole + 2;   /** Benjamini-Hochberg FDR (q-value) over all genes */
 inline constexpr int kTraitStatsRole = Qt::UserRole + 3;   /** QVariantList: N species, CI low, CI high, leave-one-out min, leave-one-out max */
 
+/** The data behind the last trait correlation: one row per species of the comparison (kept for the plot and the matrix export). */
+struct TraitMatrix {
+    std::vector<QString> species;                       /** species of the comparison */
+    std::vector<double> trait;                          /** trait value per species */
+    std::vector<std::vector<float>> expression;         /** [species][gene]: mean expression of the selected cell type(s) */
+    std::vector<char> selected;                         /** species that are selected in the species explorer */
+    std::unordered_map<QString, size_t> geneIndex;      /** gene name -> column of \p expression */
+    QString traitName;
+    bool empty() const { return species.empty(); }
+};
+
 /** Additional statistics of the trait correlation of one gene (NaN = not available). */
 struct GeneTraitExtras {
     float ciLow = std::numeric_limits<float>::quiet_NaN();   /** lower end of the 95% confidence interval */
@@ -302,6 +313,9 @@ public: // Action getters
     TriggerAction& getPerformGeneTableTsneTrigger() { return _performGeneTableTsneTrigger; }
     TriggerAction& getSaveGeneTable() { return _saveGeneTable; }
     TriggerAction& getSaveSpeciesTable() { return _saveSpeciesTable; }
+    TriggerAction& getSaveTraitMatrix() { return _saveTraitMatrix; }   /** save the species x genes expression matrix with the trait */
+    TriggerAction& getShowTraitPlot() { return _showTraitPlot; }       /** plot the expression of the selected gene against the trait */
+    const TraitMatrix& getTraitMatrix() const { return _traitMatrix; }
     ToggleAction& getSaveIncludeParameters() { return _saveIncludeParameters; } /** write the analysis parameters as '#' comment lines on top of the CSV */
     TriggerAction& getComputeTreesToDisplayFromHierarchy() { return _computeTreesToDisplayFromHierarchy; }
     StringAction& getClusterOrderHierarchy() { return _clusterOrderHierarchy; }
@@ -398,6 +412,7 @@ public: // Action getters
     void computeHierarchyAppearanceVector();
     void exportTableViewToCSVForGenes(QTableView* tableView);
     void exportTableViewToCSVPerGene(QTableView* tableView);
+    void exportTraitMatrixToCSV(QTableView* tableView);   /** species x genes matrix + trait of the listed genes */
 
     // ---- CSV export helpers (see SettingsAction_Data.inl) ----
     /** True when trait columns of \p model hold a computed result (otherwise they would only contain placeholder zeros). */
@@ -520,6 +535,7 @@ protected:
     std::unordered_map<QString, float> _geneTraitFdrValues;        /** gene -> Benjamini-Hochberg FDR */
     std::unordered_map<QString, GeneTraitExtras> _geneTraitExtras; /** gene -> confidence interval, leave-one-out range */
     int     _traitSampleSize = 0;                                  /** species that entered the last computation */
+    TraitMatrix _traitMatrix;                                      /** data of the last trait correlation */
     bool    _traitContributionShown = false;                       /** the trait column shows the contribution of selected species (not the correlation) */
     QString _traitValueLabel;                                      /** what the trait column holds, e.g. "Trait correlation (Pearson)" */
     QString _traitMethodNote;                                      /** description of the method used (for the tooltips) */
@@ -581,6 +597,8 @@ protected:
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
     ToggleAction                  _saveIncludeParameters; /** CSV export: add the analysis parameters on top */
+    TriggerAction                 _saveTraitMatrix;
+    TriggerAction                 _showTraitPlot;
     QStringList                   _currentHierarchyItemsMiddleForTable;
     StringAction               _topSelectedHierarchyStatus;
     bool                      _projectOpened = false;

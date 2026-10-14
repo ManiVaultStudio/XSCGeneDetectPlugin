@@ -23,6 +23,9 @@
 #include <QScrollBar>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
+#include <QVBoxLayout>
+#include <QDialog>
+#include <QLabel>
 #include <QPointer>
 #include <QPainter>
 #include <QApplication>
@@ -962,6 +965,8 @@ void XSCGeneDetectPlugin::init()
     traitCorrelationGroup->addAction(&_settingsAction.getTraitPoolingMode());
     traitCorrelationGroup->addAction(&_settingsAction.getTraitMinCells());
     traitCorrelationGroup->addAction(&_settingsAction.getTraitSignificantOnly());
+    traitCorrelationGroup->addAction(&_settingsAction.getShowTraitPlot());
+    connect(&_settingsAction.getShowTraitPlot(), &TriggerAction::triggered, this, [this]() { showTraitPlot(); });
 
     auto traitLayout = new QVBoxLayout();
     auto traitWidget = traitCorrelationGroup->createCollapsedWidget(&getWidget());
@@ -973,6 +978,7 @@ void XSCGeneDetectPlugin::init()
     downloadOptionsGroup->setIcon(mv::util::StyledIcon("download"));
     downloadOptionsGroup->addAction(&_settingsAction.getSaveGeneTable());
     downloadOptionsGroup->addAction(&_settingsAction.getSaveSpeciesTable());
+    downloadOptionsGroup->addAction(&_settingsAction.getSaveTraitMatrix());
     downloadOptionsGroup->addAction(&_settingsAction.getSaveIncludeParameters());
 
     auto downloadLayout = new QVBoxLayout();
@@ -1288,6 +1294,144 @@ QColor getColorFromValue(int value, int min, int max) {
 }
 
 
+
+// ============================================================================================================
+//  Plot: mean expression of one gene against the trait (one point per species)
+// ============================================================================================================
+
+/**
+ * Scatter plot of the trait value (x) against the mean expression of a gene (y), one labelled point per species.
+ * Species that are selected in the species explorer are blue, the others grey. A dashed least-squares line shows the trend.
+ * (No Q_OBJECT: the widget has no signals or slots of its own.)
+ */
+class TraitPlotWidget : public QWidget
+{
+public:
+    struct Point {
+        double x = 0.0;
+        double y = 0.0;
+        QString label;
+        bool highlighted = false;
+    };
+
+    explicit TraitPlotWidget(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setMinimumSize(420, 320);
+    }
+
+    void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle)
+    {
+        _points = points;
+        _xTitle = xTitle;
+        _yTitle = yTitle;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(rect(), palette().color(QPalette::Base));
+
+        const QColor textColor = palette().color(QPalette::Text);
+        const QRect plot(70, 20, width() - 70 - 24, height() - 20 - 56);
+        if (_points.isEmpty() || plot.width() < 40 || plot.height() < 40) {
+            painter.setPen(textColor);
+            painter.drawText(rect(), Qt::AlignCenter, "No data to plot");
+            return;
+        }
+
+        // value ranges with a small margin
+        double minX = _points[0].x, maxX = minX, minY = _points[0].y, maxY = minY;
+        for (const Point& point : _points) {
+            minX = std::min(minX, point.x);
+            maxX = std::max(maxX, point.x);
+            minY = std::min(minY, point.y);
+            maxY = std::max(maxY, point.y);
+        }
+        const auto pad = [](double& low, double& high) {
+            const double span = high - low;
+            if (span <= 0.0) {
+                low -= 1.0;
+                high += 1.0;
+            }
+            else {
+                low -= 0.06 * span;
+                high += 0.06 * span;
+            }
+            };
+        pad(minX, maxX);
+        pad(minY, maxY);
+
+        const auto toPixel = [&](double x, double y) {
+            return QPointF(plot.left() + (x - minX) / (maxX - minX) * plot.width(), plot.bottom() - (y - minY) / (maxY - minY) * plot.height());
+            };
+
+        // frame, ticks and tick labels
+        painter.setPen(palette().color(QPalette::Mid));
+        painter.drawRect(plot);
+        painter.setPen(textColor);
+        constexpr int kTicks = 4;
+        for (int i = 0; i <= kTicks; ++i) {
+            const double fraction = static_cast<double>(i) / kTicks;
+            const double xValue = minX + fraction * (maxX - minX);
+            const double yValue = minY + fraction * (maxY - minY);
+            const QPointF xPixel = toPixel(xValue, minY);
+            const QPointF yPixel = toPixel(minX, yValue);
+            painter.drawLine(QPointF(xPixel.x(), plot.bottom()), QPointF(xPixel.x(), plot.bottom() + 4));
+            painter.drawLine(QPointF(plot.left() - 4, yPixel.y()), QPointF(plot.left(), yPixel.y()));
+            painter.drawText(QRectF(xPixel.x() - 30, plot.bottom() + 6, 60, 16), Qt::AlignHCenter | Qt::AlignTop, QString::number(xValue, 'g', 3));
+            painter.drawText(QRectF(plot.left() - 66, yPixel.y() - 8, 60, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(yValue, 'g', 3));
+        }
+
+        // axis titles
+        painter.drawText(QRect(plot.left(), height() - 22, plot.width(), 18), Qt::AlignCenter, _xTitle);
+        painter.save();
+        painter.translate(14, plot.center().y());
+        painter.rotate(-90);
+        painter.drawText(QRect(-plot.height() / 2, -8, plot.height(), 16), Qt::AlignCenter, _yTitle);
+        painter.restore();
+
+        // least-squares line (an illustration of the trend; it is not the statistic of the chosen method)
+        double meanX = 0.0, meanY = 0.0;
+        for (const Point& point : _points) {
+            meanX += point.x;
+            meanY += point.y;
+        }
+        meanX /= _points.size();
+        meanY /= _points.size();
+        double sxx = 0.0, sxy = 0.0;
+        for (const Point& point : _points) {
+            sxx += (point.x - meanX) * (point.x - meanX);
+            sxy += (point.x - meanX) * (point.y - meanY);
+        }
+        if (_points.size() >= 2 && sxx > 0.0) {
+            const double slope = sxy / sxx;
+            const double intercept = meanY - slope * meanX;
+            painter.save();
+            painter.setClipRect(plot);
+            painter.setPen(QPen(textColor, 1, Qt::DashLine));
+            painter.drawLine(toPixel(minX, intercept + slope * minX), toPixel(maxX, intercept + slope * maxX));
+            painter.restore();
+        }
+
+        // points with the species name
+        for (const Point& point : _points) {
+            const QPointF pixel = toPixel(point.x, point.y);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray));
+            painter.drawEllipse(pixel, 5.0, 5.0);
+            painter.setPen(textColor);
+            painter.drawText(QPointF(pixel.x() + 8.0, pixel.y() - 6.0), point.label);
+        }
+    }
+
+private:
+    QVector<Point> _points;
+    QString _xTitle;
+    QString _yTitle;
+};
 
 // ============================================================================================================
 //  Gene table: filter model and Trait Correlation bar delegate
@@ -1606,7 +1750,94 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
         onGeneRowChanged(current);
         });
 
+    // the open trait plot follows the correlation values (they are published as one dataChanged signal)
+    connect(model, &QAbstractItemModel::dataChanged, this, [this]() { refreshTraitPlot(); });
+
     emit model->layoutChanged();
+}
+
+// ============================================================================================================
+//  Trait plot window
+// ============================================================================================================
+
+void XSCGeneDetectPlugin::showTraitPlot()
+{
+    if (!_traitPlotDialog) {
+        auto* dialog = new QDialog(&getWidget());
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+
+        auto* canvas = new TraitPlotWidget(dialog);
+        auto* info = new QLabel(dialog);
+        info->setWordWrap(true);
+        info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+        auto* layout = new QVBoxLayout(dialog);
+        layout->addWidget(canvas, 1);
+        layout->addWidget(info);
+        dialog->resize(700, 560);
+
+        _traitPlotDialog = dialog;
+        _traitPlotCanvas = canvas;
+        _traitPlotInfo = info;
+    }
+
+    refreshTraitPlot();
+    _traitPlotDialog->show();
+    _traitPlotDialog->raise();
+    _traitPlotDialog->activateWindow();
+}
+
+void XSCGeneDetectPlugin::refreshTraitPlot()
+{
+    if (!_traitPlotDialog || !_traitPlotCanvas || !_traitPlotInfo) {
+        return;
+    }
+    auto* canvas = static_cast<TraitPlotWidget*>(_traitPlotCanvas.data()); // created as a TraitPlotWidget in showTraitPlot()
+
+    const QString gene = _settingsAction.getSelectedGeneAction().getString();
+    const TraitMatrix& matrix = _settingsAction.getTraitMatrix();
+
+    QVector<TraitPlotWidget::Point> points;
+    QString infoText;
+
+    if (gene.isEmpty()) {
+        infoText = "Select a gene in the gene table.";
+    }
+    else if (matrix.empty()) {
+        infoText = "No trait correlation has been computed yet: choose a trait and cell type(s).";
+    }
+    else {
+        const auto geneIt = matrix.geneIndex.find(gene);
+        if (geneIt == matrix.geneIndex.end()) {
+            infoText = "The gene is not part of the trait matrix.";
+        }
+        else {
+            for (size_t i = 0; i < matrix.species.size(); ++i) {
+                QString label = matrix.species[i];
+                label.replace("_", " ");
+                points.push_back({ matrix.trait[i], static_cast<double>(matrix.expression[i][geneIt->second]), label, matrix.selected[i] != 0 });
+            }
+
+            // the statistics are the tooltip of the trait cell: method, number of species, correlation, interval, p, FDR, leave-one-out
+            auto variant = _settingsAction.getListModelAction().getVariant();
+            auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
+            if (model && model->columnCount() > kTraitCorrelationColumn) {
+                for (int row = 0; row < model->rowCount(); ++row) {
+                    auto* idItem = model->item(row, 0);
+                    auto* traitItem = model->item(row, kTraitCorrelationColumn);
+                    if (idItem && traitItem && idItem->text() == gene) {
+                        infoText = traitItem->data(Qt::ToolTipRole).toString();
+                        break;
+                    }
+                }
+            }
+            infoText += "\n\nDashed line: least-squares trend (illustration). Blue points: species selected in the species explorer.";
+        }
+    }
+
+    canvas->setData(points, matrix.traitName, "Mean expression of " + gene);
+    _traitPlotInfo->setText(infoText);
+    _traitPlotDialog->setWindowTitle(gene.isEmpty() ? QString("Gene expression vs trait") : gene + " - expression vs trait");
 }
 
 // ============================================================================================================
@@ -1752,6 +1983,9 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
         _settingsAction.getSelctedSpeciesVals().setString("");
     }
     _settingsAction.getSelctedSpeciesVals().setString(finalSpeciesNameString);
+
+    // an open trait plot shows the newly selected gene
+    refreshTraitPlot();
 }
 
 // ============================================================================================================

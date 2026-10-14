@@ -9,6 +9,9 @@
 #include "SettingsAction.h"
 #include <QWidget>
 #include <QModelIndex>
+#include <QPointer>
+#include <QDialog>
+#include <QLabel>
 #include <QStandardItemModel>
 #include <actions/HorizontalToolbarAction.h>
 #include <actions/VerticalToolbarAction.h>
@@ -64,6 +67,12 @@ public:
      * @return false when the required datasets are not available (nothing was changed)
      */
     bool showGeneInSpeciesEmbedding(const QString& gene, const QStringList& speciesNames);
+
+    /** Open (or bring to front) the plot of the expression of the selected gene against the trait. */
+    void showTraitPlot();
+
+    /** Update the open plot (selected gene, new correlation values); does nothing when it is not open. */
+    void refreshTraitPlot();
     /**
      * Invoked when a data event occurs
      * @param dataEvent Data event which occurred
@@ -94,6 +103,10 @@ protected:
     mv::Dataset<Points> _pointsDataset;
     mv::Dataset<Clusters> _clusterDataset;
     mv::Dataset<Points> _lowDimTSNEDataset;
+
+    QPointer<QDialog> _traitPlotDialog;   /** the trait plot window (created on first use) */
+    QPointer<QWidget> _traitPlotCanvas;   /** its plot widget (a TraitPlotWidget, see the .cpp) */
+    QPointer<QLabel>  _traitPlotInfo;     /** its statistics text */
 
 };
 
