@@ -1489,6 +1489,22 @@ public:
     }
 
 protected:
+    /** Genes with the same number of species are ordered by their weighted appearance (better ranks first when sorted descending). */
+    bool lessThan(const QModelIndex& left, const QModelIndex& right) const override
+    {
+        if (left.column() == 1 && right.column() == 1) {
+            const int leftCount = left.data().toInt();
+            const int rightCount = right.data().toInt();
+            if (leftCount != rightCount) {
+                return leftCount < rightCount;
+            }
+            const QAbstractItemModel* source = sourceModel();
+            return source->index(left.row(), kWeightedAppearanceColumn, left.parent()).data().toDouble()
+                < source->index(right.row(), kWeightedAppearanceColumn, right.parent()).data().toDouble();
+        }
+        return QSortFilterProxyModel::lessThan(left, right);
+    }
+
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override
     {
         const QAbstractItemModel* source = sourceModel();
@@ -1508,7 +1524,7 @@ protected:
             return false;
 
         if (_significantOnly) {
-            const QVariant fdr = source->index(sourceRow, kTraitCorrelationColumn, sourceParent).data(kTraitFdrRole);
+            const QVariant fdr = source->index(sourceRow, kTraitCorrelationColumn, sourceParent).data(kTraitSignificanceFdrRole);
             return fdr.isValid() && fdr.toDouble() < kSignificanceLevel;
         }
         return true;
@@ -1573,7 +1589,7 @@ public:
         painter->setClipRect(option.rect); // never paint outside a narrow column
 
         // grey bar, like every other bar column; a thin black outline marks a significant correlation (FDR < 0.05)
-        const QVariant fdr = index.data(kTraitFdrRole);
+        const QVariant fdr = index.data(kTraitSignificanceFdrRole); // phylogenetically corrected when a species tree is usable
         const bool significant = fdr.isValid() && fdr.toDouble() < 0.05;
         painter->setPen(significant ? QPen(Qt::black, 1) : QPen(Qt::NoPen));
         painter->setBrush(Qt::gray);
@@ -1599,6 +1615,69 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
         // fixed: the bar defines the size, the column width is chosen by the user
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.setWidth(defaultColumnWidth());
+        return size;
+    }
+};
+
+/**
+ * Draws the weighted appearance (0..1) like the other bar columns: a grey bar of fixed width growing from the left,
+ * with a thin black outline when the rank consistency across the species is significant (FDR < 0.05).
+ * The number is only printed when the column is wide enough.
+ */
+class WeightedAppearanceBarDelegate : public QStyledItemDelegate
+{
+public:
+    static constexpr int kBarWidth = 60;
+    static constexpr int kBarHeight = 20;
+    static constexpr int kMargin = 4;
+    static constexpr int kTextWidth = 40;
+
+    static constexpr int defaultColumnWidth() { return kBarWidth + 2 * kMargin + 2; }
+
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        opt.text.clear();
+        opt.features &= ~QStyleOptionViewItem::HasDecoration;
+
+        const QWidget* widget = option.widget;
+        QStyle* style = widget ? widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, widget);
+
+        bool ok = false;
+        const double value = index.data(Qt::UserRole).toDouble(&ok);
+        if (!ok || std::isnan(value))
+            return;
+
+        const int barHeight = std::min(kBarHeight, option.rect.height() - 4);
+        const int barTop = option.rect.top() + (option.rect.height() - barHeight) / 2;
+        const int barLeft = option.rect.left() + kMargin;
+        const int length = static_cast<int>(std::max(0.0, std::min(1.0, value)) * kBarWidth);
+
+        const QVariant fdr = index.data(kWeightedFdrRole);
+        const bool significant = fdr.isValid() && fdr.toDouble() < 0.05;
+
+        painter->save();
+        painter->setClipRect(option.rect);
+        painter->setPen(significant ? QPen(Qt::black, 1) : QPen(Qt::NoPen));
+        painter->setBrush(Qt::gray);
+        painter->drawRect(barLeft, barTop, length, barHeight);
+
+        if (option.rect.width() >= kBarWidth + kTextWidth + 2 * kMargin) {
+            const QRect textArea(barLeft + kBarWidth + kMargin, option.rect.top(), kTextWidth, option.rect.height());
+            painter->setPen((option.state & QStyle::State_Selected) ? option.palette.color(QPalette::HighlightedText) : option.palette.color(QPalette::Text));
+            painter->drawText(textArea, Qt::AlignLeft | Qt::AlignVCenter, QString::number(value, 'f', 2));
+        }
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
         QSize size = QStyledItemDelegate::sizeHint(option, index);
         size.setWidth(defaultColumnWidth());
         return size;
@@ -1740,6 +1819,10 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     // (findChild<>() cannot be used here: the delegate has no Q_OBJECT macro, so it is looked up through the view)
     if (!dynamic_cast<TraitCorrelationBarDelegate*>(geneTableView->itemDelegateForColumn(kTraitCorrelationColumn))) {
         geneTableView->setItemDelegateForColumn(kTraitCorrelationColumn, new TraitCorrelationBarDelegate(geneTableView));
+    }
+    geneTableView->setColumnWidth(kWeightedAppearanceColumn, WeightedAppearanceBarDelegate::defaultColumnWidth());
+    if (!dynamic_cast<WeightedAppearanceBarDelegate*>(geneTableView->itemDelegateForColumn(kWeightedAppearanceColumn))) {
+        geneTableView->setItemDelegateForColumn(kWeightedAppearanceColumn, new WeightedAppearanceBarDelegate(geneTableView));
     }
     fitGeneTableWidth(geneTableView);
     geneTableView->update();

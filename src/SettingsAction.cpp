@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cmath> // Include for std::log
 #include <climits>
+#include <functional>
 #include <random>
 #include <QMutex>
 #include <QThread>
@@ -327,12 +328,14 @@ namespace {
      * Fill the trait correlation cell of the gene table: correlation (display + sorting), p-value, FDR, the other statistics
      * and a tooltip that explains how far the number can be trusted.
      */
-    inline void setTraitCorrelationItemData(QStandardItem* item, double value, double p, double q, const GeneTraitExtras& extras, int sampleSize, const QString& methodNote) {
+    inline void setTraitCorrelationItemData(QStandardItem* item, double value, double p, double q, const GeneTraitExtras& extras, int sampleSize, const QString& methodNote, const QString& significanceBasis) {
         item->setData(value, Qt::DisplayRole);
         item->setData(value, Qt::UserRole);
         item->setData(p, kTraitPValueRole);
         item->setData(q, kTraitFdrRole);
-        item->setData(QVariantList{ sampleSize, extras.ciLow, extras.ciHigh, extras.looMin, extras.looMax, extras.overall }, kTraitStatsRole);
+        item->setData(static_cast<double>(extras.significanceFdr), kTraitSignificanceFdrRole);
+        item->setData(QVariantList{ sampleSize, extras.ciLow, extras.ciHigh, extras.looMin, extras.looMax, extras.overall,
+                                    extras.phyloCorrelation, extras.phyloPValue, extras.phyloFdr }, kTraitStatsRole);
 
         QString tooltip = methodNote.isEmpty() ? QString("Trait correlation") : methodNote;
         tooltip += QString("\nValue shown = %1").arg(value, 0, 'f', 3);
@@ -342,12 +345,19 @@ namespace {
         if (std::isfinite(extras.ciLow) && std::isfinite(extras.ciHigh)) {
             tooltip += QString("\n95% confidence interval of the correlation: [%1, %2]").arg(extras.ciLow, 0, 'f', 2).arg(extras.ciHigh, 0, 'f', 2);
         }
-        tooltip += QString("\np-value = %1\nFDR (Benjamini-Hochberg) = %2").arg(p, 0, 'g', 3).arg(q, 0, 'g', 3);
+        tooltip += QString("\np-value = %1, FDR (Benjamini-Hochberg) = %2").arg(p, 0, 'g', 3).arg(q, 0, 'g', 3);
+        if (std::isfinite(extras.phyloPValue)) {
+            tooltip += QString("\nPhylogenetically corrected: correlation = %1, p-value = %2, FDR = %3")
+                .arg(extras.phyloCorrelation, 0, 'f', 3).arg(extras.phyloPValue, 0, 'g', 3).arg(extras.phyloFdr, 0, 'g', 3);
+        }
         if (std::isfinite(extras.looMin) && std::isfinite(extras.looMax)) {
             tooltip += QString("\nLeaving one species out: [%1, %2]").arg(extras.looMin, 0, 'f', 2).arg(extras.looMax, 0, 'f', 2);
             if (extras.looMin < 0.0f && extras.looMax > 0.0f) {
                 tooltip += "\nWarning: the sign changes when a single species is left out";
             }
+        }
+        if (!significanceBasis.isEmpty()) {
+            tooltip += QString("\nSignificance (outline, filter, export) is based on the %1").arg(significanceBasis);
         }
         if (sampleSize > 0 && sampleSize < 5) {
             tooltip += QString("\nWarning: only %1 species - interpret with care").arg(sampleSize);
@@ -1010,6 +1020,46 @@ namespace {
                 }
             }
         }
+    }
+
+    // ----------------------------------------------------------------------------------------------------------
+    //  Weight of a gene across the ranked lists of the species
+    // ----------------------------------------------------------------------------------------------------------
+
+    /**
+     * Weight of one appearance of a gene in the top-N list of a species: 1 for position 1, falling linearly to 1 / topN for
+     * position topN, 0 outside the top-N. (A gene on position 1 says more about a species than one on position topN.)
+     * @param position 1-based position in the species' top-N ordering
+     */
+    inline double rankWeight(int position, int topN) {
+        if (topN <= 0 || position < 1 || position > topN) {
+            return 0.0;
+        }
+        return static_cast<double>(topN - position + 1) / static_cast<double>(topN);
+    }
+
+    /**
+     * Robust rank aggregation (Kolde et al., Bioinformatics 2012).
+     * Question: is a gene ranked better than expected by chance across the ranked lists (here: the species)?
+     * Each species contributes the normalised rank of the gene (position / list length, in (0, 1]); under the null hypothesis
+     * these values are uniform on (0, 1). The k-th smallest of n uniform values follows Beta(k, n - k + 1), so
+     *     rho = min over k of  P( Beta(k, n - k + 1) <= k-th smallest normalised rank )
+     * is small when several species rank the gene near the top. The Bonferroni corrected value min(1, n * rho) is returned
+     * (conservative). Works for any number of species, also one (then it is the normalised rank itself).
+     */
+    inline double robustRankAggregationPValue(std::vector<double> normalizedRanks) {
+        const size_t count = normalizedRanks.size();
+        if (count == 0) {
+            return 1.0;
+        }
+        std::sort(normalizedRanks.begin(), normalizedRanks.end());
+
+        double rho = 1.0;
+        for (size_t k = 1; k <= count; ++k) {
+            const double rank = std::max(0.0, std::min(1.0, normalizedRanks[k - 1]));
+            rho = std::min(rho, regularizedIncompleteBeta(static_cast<double>(k), static_cast<double>(count - k + 1), rank));
+        }
+        return std::min(1.0, rho * static_cast<double>(count));
     }
 
 } // namespace

@@ -2270,6 +2270,7 @@ void SettingsAction::computeTraitCorrelation()
         _traitContributionShown = false;
         _traitValueLabel.clear();
         _traitMatrix = TraitMatrix();
+        _traitSignificanceBasis.clear();
         publishTraitCorrelationToModel();
         return;
     }
@@ -2475,6 +2476,7 @@ void SettingsAction::computeTraitCorrelation()
     _traitContributionShown = false;
     _traitValueLabel.clear();
     _traitMatrix = TraitMatrix();
+    _traitSignificanceBasis.clear();
     if (usable.size() < kMinSpeciesForTraitCorrelation) {
         qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and at least" << minCells << "cells of the selected cell types; found" << usable.size();
         _traitMethodNote = QString("No trait correlation: only %1 species have a trait value and at least %2 cells of the selected cell type(s)").arg(usable.size()).arg(minCells);
@@ -2517,48 +2519,56 @@ void SettingsAction::computeTraitCorrelation()
         };
     std::vector<QString> population = namesOf(plan.population);
 
-    // ---- 7. Species tree for phylogenetic contrasts (falls back to Pearson when it is not usable) -------------------
+    // ---- 7. Species tree ------------------------------------------------------------------------------------------
+    // The reference tree of the phylogenetic tree view. It is needed for the phylogenetic contrasts AND for the significance
+    // of the other methods: related species are not independent, which makes plain p-values too optimistic.
     std::vector<PicNode> treeNodes;
     int treeRoot = 0;
     size_t speciesInTree = 0;
-    bool treeFallback = false;
-
-    if (method == TraitMethod::Phylogenetic) {
-        // the species tree is the reference tree of the phylogenetic tree view
+    const auto buildTree = [&]() {
+        treeNodes.clear();
+        treeRoot = 0;
+        speciesInTree = 0;
         const auto treePicker = _referenceTreeDataset.getCurrentDataset();
-        if (treePicker.isValid()) {
-            auto referenceTree = mv::data().getDataset<XSCTree>(treePicker.getDatasetId());
-            if (referenceTree.isValid()) {
-                std::map<QString, int> speciesIndex;
-                for (size_t i = 0; i < population.size(); ++i) {
-                    speciesIndex[population[i]] = static_cast<int>(i);
-                }
-                treeRoot = appendPicNodes(referenceTree->getTreeData(), speciesIndex, treeNodes);
+        if (!treePicker.isValid()) {
+            return;
+        }
+        auto referenceTree = mv::data().getDataset<XSCTree>(treePicker.getDatasetId());
+        if (!referenceTree.isValid()) {
+            return;
+        }
 
-                double totalBranchLength = 0.0;
-                for (const auto& node : treeNodes) {
-                    totalBranchLength += node.branchLength;
-                    if (node.leafIndex >= 0) {
-                        ++speciesInTree;
-                    }
-                }
-                if (totalBranchLength <= 0.0) {
-                    for (auto& node : treeNodes) {
-                        node.branchLength = 1.0; // the tree has no branch lengths: use its topology only
-                    }
-                }
+        std::map<QString, int> speciesIndex;
+        for (size_t i = 0; i < population.size(); ++i) {
+            speciesIndex[population[i]] = static_cast<int>(i);
+        }
+        treeRoot = appendPicNodes(referenceTree->getTreeData(), speciesIndex, treeNodes);
+
+        double totalBranchLength = 0.0;
+        for (const auto& node : treeNodes) {
+            totalBranchLength += node.branchLength;
+            if (node.leafIndex >= 0) {
+                ++speciesInTree;
             }
         }
-
-        if (speciesInTree < 3) {
-            // no usable tree: say so instead of silently pretending a phylogenetic correction was applied
-            method = TraitMethod::Pearson;
-            treeFallback = true;
-            treeNodes.clear();
-            plan = planSpeciesSelection(usable.size(), picked, scope, method);
-            population = namesOf(plan.population);
+        if (totalBranchLength <= 0.0) {
+            for (auto& node : treeNodes) {
+                node.branchLength = 1.0; // the tree has no branch lengths: use its topology only
+            }
         }
+        };
+
+    buildTree();
+    bool treeFallback = false;
+    if (method == TraitMethod::Phylogenetic && speciesInTree < 3) {
+        // no usable tree: say so instead of silently pretending a phylogenetic correction was applied
+        method = TraitMethod::Pearson;
+        treeFallback = true;
+        plan = planSpeciesSelection(usable.size(), picked, scope, method);
+        population = namesOf(plan.population);
+        buildTree(); // for the new population
     }
+    const bool treeUsable = speciesInTree >= 3;
 
     // ---- 8. Expression matrix X (N species x G genes) and trait vector t ----------------------------------------
     const TraitPooling pooling = equalWeighting ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
@@ -2584,7 +2594,13 @@ void SettingsAction::computeTraitCorrelation()
 
     // `plan.selected` already refers to rows of the matrix: for the contribution scope the population is everybody (same indices)
     const TraitStatisticsContext statisticsContext = prepareTraitStatisticsContext(method, traitValues, treeNodes, treeRoot, plan.selected);
+
+    // Phylogenetically corrected statistics next to the chosen method (when that is not already the phylogenetic one)
+    const bool phyloSeparate = (method != TraitMethod::Phylogenetic) && treeUsable;
+    const TraitStatisticsContext phyloContext = phyloSeparate ? prepareTraitStatisticsContext(TraitMethod::Phylogenetic, traitValues, treeNodes, treeRoot) : TraitStatisticsContext();
+
     std::vector<GeneTraitStatistics> statistics(geneCount);
+    std::vector<GeneTraitStatistics> phyloStatistics(phyloSeparate ? geneCount : 0);
 
     // ---- 9. Statistics of every gene (parallel over gene ranges) ----------------------------------------------------
     // Every worker owns a range of genes: it combines the cached per cell type means into the species rows of X and
@@ -2595,15 +2611,27 @@ void SettingsAction::computeTraitCorrelation()
             combineCellTypeMeans(partsPerSpecies[i], pooling, range, expressionMatrix[i]);
         }
         computeTraitStatistics(expressionRows, statisticsContext, range, statistics);
+        if (phyloSeparate) {
+            computeTraitStatistics(expressionRows, phyloContext, range, phyloStatistics);
+        }
         });
 
     // ---- 10. Multiple testing correction and result -------------------------------------------------------------------
-    // p-value, FDR, confidence interval and leave-one-out always describe the correlation across the compared species.
+    // p-value, FDR, confidence interval and leave-one-out describe the correlation across the compared species (chosen method).
     std::vector<float> pValues(geneCount);
     for (size_t g = 0; g < geneCount; ++g) {
         pValues[g] = statistics[g].pValue;
     }
     const std::vector<float> fdrValues = benjaminiHochberg(pValues);
+
+    std::vector<float> phyloFdrValues;
+    if (phyloSeparate) {
+        std::vector<float> phyloPValues(geneCount);
+        for (size_t g = 0; g < geneCount; ++g) {
+            phyloPValues[g] = phyloStatistics[g].pValue;
+        }
+        phyloFdrValues = benjaminiHochberg(phyloPValues);
+    }
 
     _geneTraitValuesComputed.reserve(geneCount);
     _geneTraitPValues.reserve(geneCount);
@@ -2618,11 +2646,31 @@ void SettingsAction::computeTraitCorrelation()
         if (plan.contribution) {
             extras.overall = statistics[g].correlation; // the cell shows the contribution, keep the correlation next to it
         }
+
+        if (phyloSeparate) {
+            extras.phyloCorrelation = phyloStatistics[g].correlation;
+            extras.phyloPValue = phyloStatistics[g].pValue;
+            extras.phyloFdr = phyloFdrValues[g];
+            extras.significanceFdr = phyloFdrValues[g];
+        }
+        else {
+            if (method == TraitMethod::Phylogenetic) {
+                extras.phyloCorrelation = statistics[g].correlation;
+                extras.phyloPValue = statistics[g].pValue;
+                extras.phyloFdr = fdrValues[g];
+            }
+            extras.significanceFdr = fdrValues[g];
+        }
+
         _geneTraitValuesComputed[geneNames[g]] = plan.contribution ? statistics[g].selectionScore : statistics[g].correlation;
         _geneTraitPValues[geneNames[g]] = statistics[g].pValue;
         _geneTraitFdrValues[geneNames[g]] = fdrValues[g];
         _geneTraitExtras[geneNames[g]] = extras;
     }
+
+    _traitSignificanceBasis = (phyloSeparate || method == TraitMethod::Phylogenetic)
+        ? QString("phylogenetically corrected FDR")
+        : QString("FDR of the chosen method (no usable species tree: the shared ancestry of the species is NOT corrected,\nso p-values are too optimistic for related species)");
 
     // ---- 11. Description for the tooltips ------------------------------------------------------------------------------
     const int sampleSize = (method == TraitMethod::Phylogenetic) ? static_cast<int>(speciesInTree) : static_cast<int>(population.size());
@@ -2638,6 +2686,9 @@ void SettingsAction::computeTraitCorrelation()
     }
     if (treeFallback) {
         methodName += "\nNo usable species tree: phylogenetic correction NOT applied";
+    }
+    else if (!treeUsable) {
+        methodName += "\nNo usable species tree: the shared ancestry of the species is not corrected";
     }
 
     QString selectionText;
@@ -2720,11 +2771,11 @@ void SettingsAction::publishTraitCorrelationToModel()
                 pIt != _geneTraitPValues.end() ? static_cast<double>(pIt->second) : 1.0,
                 qIt != _geneTraitFdrValues.end() ? static_cast<double>(qIt->second) : 1.0,
                 eIt != _geneTraitExtras.end() ? eIt->second : GeneTraitExtras(),
-                _traitSampleSize, _traitMethodNote);
+                _traitSampleSize, _traitMethodNote, _traitSignificanceBasis);
         }
     }
 
-    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole, kTraitStatsRole });
+    emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole, kTraitStatsRole, kTraitSignificanceFdrRole });
 }
 
 

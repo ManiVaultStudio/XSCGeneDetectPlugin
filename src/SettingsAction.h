@@ -210,7 +210,12 @@ inline constexpr int kTraitCorrelationColumn = 4;
 /** Extra item roles of the trait correlation cell (DisplayRole/UserRole hold the correlation coefficient r). */
 inline constexpr int kTraitPValueRole = Qt::UserRole + 1;   /** two-sided p-value of r */
 inline constexpr int kTraitFdrRole = Qt::UserRole + 2;   /** Benjamini-Hochberg FDR (q-value) over all genes */
-inline constexpr int kTraitStatsRole = Qt::UserRole + 3;   /** QVariantList: N species, CI low, CI high, leave-one-out min, leave-one-out max */
+inline constexpr int kTraitStatsRole = Qt::UserRole + 3;   /** QVariantList: N species, CI low, CI high, leave-one-out min, max, overall r, phylogenetic r, p, FDR */
+inline constexpr int kTraitSignificanceFdrRole = Qt::UserRole + 4; /** the FDR that decides "significant": phylogenetically corrected when a species tree is usable */
+inline constexpr int kWeightedPValueRole = Qt::UserRole + 5;       /** weighted appearance column: p-value of the rank consistency (robust rank aggregation) */
+inline constexpr int kWeightedFdrRole = Qt::UserRole + 6;       /** weighted appearance column: FDR of the rank consistency */
+/** Column of the gene table that holds the weighted appearance (rank weighted number of species). */
+inline constexpr int kWeightedAppearanceColumn = 5;
 
 /** The data behind the last trait correlation: one row per species of the comparison (kept for the plot and the matrix export). */
 struct TraitMatrix {
@@ -230,6 +235,10 @@ struct GeneTraitExtras {
     float looMin = std::numeric_limits<float>::quiet_NaN();  /** smallest correlation when one species is left out */
     float looMax = std::numeric_limits<float>::quiet_NaN();  /** largest correlation when one species is left out */
     float overall = std::numeric_limits<float>::quiet_NaN(); /** correlation across all compared species (set when the cell shows the contribution of the selected species) */
+    float phyloCorrelation = std::numeric_limits<float>::quiet_NaN(); /** phylogenetically corrected correlation (contrasts); NaN without a usable species tree */
+    float phyloPValue = std::numeric_limits<float>::quiet_NaN();
+    float phyloFdr = std::numeric_limits<float>::quiet_NaN();
+    float significanceFdr = 1.0f;                            /** FDR that decides significance: phylogenetic when available, else the chosen method's */
 };
 
 class SettingsAction : public WidgetAction
@@ -539,6 +548,9 @@ protected:
     bool    _traitContributionShown = false;                       /** the trait column shows the contribution of selected species (not the correlation) */
     QString _traitValueLabel;                                      /** what the trait column holds, e.g. "Trait correlation (Pearson)" */
     QString _traitMethodNote;                                      /** description of the method used (for the tooltips) */
+    QString _traitSignificanceBasis;                               /** which FDR decides "significant" (for tooltips and exports) */
+    int     _weightedTopN = 0;                                     /** top-N value the weighted appearance column was computed with */
+    bool    _weightedNegative = false;                             /** that computation used the "Negative" type (ranks count from the other end) */
     TriggerAction          _removeRowSelection;
     TriggerAction           _revertRowSelectionChangesToInitial;
     DatasetPickerAction           _scatterplotEmbeddingPointsUMAPOption;
