@@ -32,6 +32,8 @@
 #include <random>
 #include <QMutex>
 #include <QThread>
+#include <QElapsedTimer>
+#include <QFutureWatcher>
 #include <QThreadPool>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
@@ -316,12 +318,12 @@ namespace {
      * be processed by every core at once.
      * @param pointsPerWorker number of cells a single worker reads at a time
      */
-    inline int memorySafeThreadCount(size_t pointsPerWorker) {
-        constexpr double kBudgetBytes = 1024.0 * 1024.0 * 1024.0; // ~1 GiB of scratch buffers
+    inline int memorySafeThreadCount(size_t pointsPerWorker, int budgetMegabytes = 1024, int maxThreads = 0) {
+        const double budgetBytes = static_cast<double>(std::max(64, budgetMegabytes)) * 1024.0 * 1024.0; // scratch buffers of all workers together
         const double bytesPerWorker = static_cast<double>(std::max<size_t>(pointsPerWorker, 1)) * kGeneChunkSize * sizeof(float);
-        const int idealThreads = std::max(1, QThread::idealThreadCount());
-        const int budgetThreads = static_cast<int>(std::max(1.0, kBudgetBytes / bytesPerWorker));
-        return std::max(1, std::min(idealThreads, budgetThreads));
+        const int availableThreads = maxThreads > 0 ? maxThreads : std::max(1, QThread::idealThreadCount());
+        const int budgetThreads = static_cast<int>(std::max(1.0, budgetBytes / bytesPerWorker));
+        return std::max(1, std::min(availableThreads, budgetThreads));
     }
 
     /**

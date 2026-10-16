@@ -14,6 +14,27 @@ void SettingsAction::clearTemporaryDatasetHandles()
     _geneSimilarityClusterColoring = Dataset<Clusters>();
 }
 
+void SettingsAction::removeTemporaryDatasets()
+{
+    // The t-SNE analysis plugins that produced the datasets are destroyed first: removing a dataset does not necessarily
+    // destroy the plugin that computed it, so every update left a running/idle analysis plugin behind.
+    for (auto* analysis : { _selectedTsneAnalysisPlugin.data(), _geneTsneAnalysisPlugin.data() }) {
+        if (analysis) {
+            mv::plugins().destroyPlugin(analysis);
+        }
+    }
+    _selectedTsneAnalysisPlugin = nullptr;
+    _geneTsneAnalysisPlugin = nullptr;
+
+    // The handles are reset next; the datasets of every group the update creates are then removed (deepest children first).
+    // Only groups 10 (selection subsets, colors) used to be removed, so the filtered UMAP and gene similarity datasets of
+    // every earlier update stayed behind and piled up.
+    clearTemporaryDatasetHandles();
+    removeDatasets(10);
+    removeDatasets(20);
+    removeDatasets(30);
+}
+
 void SettingsAction::removeDatasets(int groupId)
 {
     auto allDatasets = mv::data().getAllDatasets();
@@ -264,6 +285,9 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             itQ != _geneTraitFdrValues.end() ? static_cast<double>(itQ->second) : 1.0,
             itE != _geneTraitExtras.end() ? itE->second : GeneTraitExtras(),
             _traitSampleSize, _traitMethodNote, _traitSignificanceBasis);
+        if (itCorr == _geneTraitValuesComputed.end() && _traitSampleSize > 0) {
+            correlationItem->setData("Not part of the trait analysis: the trait correlation is computed for the listed top-N genes only\n(setting Trait Correlation Genes -> All genes (slower) includes every gene).", Qt::ToolTipRole);
+        }
         model->setItem(rowIndex, kTraitCorrelationColumn, correlationItem);
 
         // Column 5: weighted appearance (numeric DisplayRole for sorting; a bar delegate draws it)
@@ -480,7 +504,7 @@ QStringList SettingsAction::traitExportHeaders() const
         << "Trait phylogenetic correlation"
         << "Trait phylogenetic p-value"
         << "Trait phylogenetic FDR"
-        << QString("Trait significant (FDR < 0.05, %1)").arg(_traitSignificanceBasis.startsWith("phylogenetically") ? "phylogenetically corrected" : "chosen method, ancestry not corrected")
+        << QString("Trait significant (FDR < %2, %1)").arg(_traitSignificanceBasis.startsWith("phylogenetically") ? "phylogenetically corrected" : "chosen method, ancestry not corrected").arg(significanceLevel())
         << "Trait N species"
         << "Trait CI low" + suffix
         << "Trait CI high" + suffix
@@ -525,7 +549,7 @@ QStringList SettingsAction::traitExportValues(const QAbstractItemModel* model, i
         << optionalNumber(6, 4)
         << optionalSignificant(7)
         << optionalSignificant(8)
-        << (significanceFdr < 0.05 ? "True" : "False")
+        << (significanceFdr < significanceLevel() ? "True" : "False")
         << optionalNumber(0, 0)
         << optionalNumber(1, 4)
         << optionalNumber(2, 4)
@@ -568,13 +592,13 @@ QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle,
         lines << QString("Cell type pooling: %1; minimum cells per species: %2").arg(_traitPoolingMode.getCurrentText()).arg(_traitMinCells.getValue());
         lines << "Trait column: " + (_traitValueLabel.isEmpty() ? QString("Trait correlation") : _traitValueLabel);
         if (_traitSignificantOnly.isChecked()) {
-            lines << "Only genes with a significant trait correlation (FDR < 0.05) are listed";
+            lines << QString("Only genes with a significant trait correlation (FDR < %1) are listed").arg(significanceLevel());
         }
     }
 
     lines << QString("Rows: %1").arg(rowCount);
     if (withTraitColumns && significantRows >= 0) {
-        lines << QString("Rows with FDR < 0.05: %1").arg(significantRows);
+        lines << QString("Rows with FDR < %1: %2").arg(significanceLevel()).arg(significantRows);
     }
 
     for (QString& line : lines) {
@@ -634,7 +658,7 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
         if (withTrait) {
             const QStringList traitValues = traitExportValues(model, row);
             fields << traitValues;
-            if (model->index(row, kTraitCorrelationColumn).data(kTraitSignificanceFdrRole).toDouble() < 0.05) {
+            if (model->index(row, kTraitCorrelationColumn).data(kTraitSignificanceFdrRole).toDouble() < significanceLevel()) {
                 ++significantRows;
             }
         }
@@ -790,7 +814,7 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
         const QStringList topNSpecies = model->data(model->index(row, 2)).toString().split(";", Qt::SkipEmptyParts);
         const QStringList statisticsLines = model->data(model->index(row, 3)).toString().split("\n", Qt::SkipEmptyParts);
         const QStringList traitValues = withTrait ? traitExportValues(model, row) : QStringList();
-        if (withTrait && model->index(row, kTraitCorrelationColumn).data(kTraitSignificanceFdrRole).toDouble() < 0.05) {
+        if (withTrait && model->index(row, kTraitCorrelationColumn).data(kTraitSignificanceFdrRole).toDouble() < significanceLevel()) {
             ++significantRows;
         }
         rows << speciesStatisticsRows(gene, topNSpecies, statisticsLines, explorerSelection, !middleRedundant, traitValues, rankWeightOf);

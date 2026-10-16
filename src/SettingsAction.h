@@ -53,6 +53,8 @@
 #include <QColor>
 #include <QMessageBox>
 #include <QTimer>
+#include <QFutureWatcher>
+#include <memory>
 #include <QPointer>
 
 #include <QMouseEvent>
@@ -223,6 +225,7 @@ struct TraitMatrix {
     std::vector<double> trait;                          /** trait value per species */
     std::vector<std::vector<float>> expression;         /** [species][gene]: mean expression of the selected cell type(s) */
     std::vector<char> selected;                         /** species that are selected in the species explorer */
+    std::vector<int> cells;                             /** cells per species that entered the mean (of the selected cell types) */
     std::unordered_map<QString, size_t> geneIndex;      /** gene name -> column of \p expression */
     QString traitName;
     bool empty() const { return species.empty(); }
@@ -322,9 +325,16 @@ public: // Action getters
     TriggerAction& getPerformGeneTableTsneTrigger() { return _performGeneTableTsneTrigger; }
     TriggerAction& getSaveGeneTable() { return _saveGeneTable; }
     TriggerAction& getSaveSpeciesTable() { return _saveSpeciesTable; }
+    OptionAction& getTraitGeneScope() { return _traitGeneScope; }        /** correlate the listed genes only (fast) or all genes */
+    DecimalAction& getTraitFdrThreshold() { return _traitFdrThreshold; }  /** FDR below which a trait correlation counts as significant */
+    IntegralAction& getMaxWorkerThreads() { return _maxWorkerThreads; }    /** upper limit of parallel workers */
+    IntegralAction& getMemoryBudgetMb() { return _memoryBudgetMb; }        /** scratch memory the parallel workers may use together */
     TriggerAction& getSaveTraitMatrix() { return _saveTraitMatrix; }   /** save the species x genes expression matrix with the trait */
     TriggerAction& getShowTraitPlot() { return _showTraitPlot; }       /** plot the expression of the selected gene against the trait */
     const TraitMatrix& getTraitMatrix() const { return _traitMatrix; }
+    const std::unordered_map<QString, float>& getGeneTraitValues() const { return _geneTraitValuesComputed; }
+    const std::unordered_map<QString, GeneTraitExtras>& getGeneTraitExtras() const { return _geneTraitExtras; }
+    const std::unordered_map<QString, float>& getGeneTraitPValues() const { return _geneTraitPValues; }
     ToggleAction& getSaveIncludeParameters() { return _saveIncludeParameters; } /** write the analysis parameters as '#' comment lines on top of the CSV */
     TriggerAction& getComputeTreesToDisplayFromHierarchy() { return _computeTreesToDisplayFromHierarchy; }
     StringAction& getClusterOrderHierarchy() { return _clusterOrderHierarchy; }
@@ -456,6 +466,18 @@ public: // Action getters
     /** Must be called whenever the cell selection that feeds the tables changes (invalidates cached means). */
     void markSelectionChanged() { ++_selectionRevision; }
 
+    /** Worker count for tasks that each need roughly \p pointsPerWorker x 256 floats of scratch memory (respects the settings). */
+    int parallelWorkers(size_t pointsPerWorker) const;
+
+    /** FDR below which trait correlations and rank consistencies count as significant. */
+    double significanceLevel() const { return static_cast<double>(_traitFdrThreshold.getValue()); }
+
+    /** Remove the temporary datasets of the last update (embedding subsets, colors, filtered UMAP, gene similarity). */
+    void removeTemporaryDatasets();
+
+    /** Identifies the datasets the cached species means belong to (main points + species clusters). */
+    QString currentMeanMapSignature() const;
+
 private:
     // ---- Trait correlation internals -----------------------------------------------------------------
     /** Per (cluster, cell selection) cache so that changing only the trait / species never re-reads expression data. */
@@ -473,6 +495,15 @@ private:
         std::unordered_map<QString, Entry> entries;                         /** "species\x1fcellType" -> mean expression */
     };
 
+    /** One (species, cell type) pair whose mean expression still has to be read. */
+    struct TraitEntryJob {
+        QString key;
+        const std::vector<int>* speciesPoints = nullptr;
+        const std::vector<int>* cellTypePoints = nullptr;
+        TraitCache::Entry entry;
+    };
+
+    void onTraitJobsFinished();                /** the background reading is done: store the means and finish the computation */
     void applyClusterLabelSelectionStyles();   /** (re)style the cell-type labels of the status bar from _selectedClusterNames */
 
     void computeTraitCorrelation();            /** the actual (non-debounced) computation */
@@ -576,6 +607,7 @@ protected:
     ToggleAction    _toggleScatterplotSelection;
     //bool _erroredOutFlag;
     bool _meanMapComputed = false;
+    QString _meanMapSignature;       /** datasets the cached species means were computed for */
     OptionAction                _clusterCountSortingType;
 
     std::vector<QString> _customOrderClustersFromHierarchy;
@@ -605,6 +637,10 @@ protected:
     OptionAction              _traitSpeciesScope;     /** "Contribution of selected species" (default) or "Across selected species only" */
     IntegralAction            _traitMinCells;         /** minimum cells of a cell type in a species for the species to take part */
     ToggleAction              _traitSignificantOnly;  /** gene table: only genes with a significant trait correlation */
+    OptionAction              _traitGeneScope;        /** "Listed genes (fast)" (default) or "All genes (slower)" */
+    DecimalAction             _traitFdrThreshold;     /** significance level of the trait correlation (default 0.05) */
+    IntegralAction            _maxWorkerThreads;      /** parallel workers (default: all cores) */
+    IntegralAction            _memoryBudgetMb;        /** scratch memory budget of the parallel workers (default 1024 MB) */
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
@@ -621,7 +657,14 @@ protected:
 
     // ---- Trait correlation state ----------------------------------------------------------------------
     QTimer* _traitCorrelationTimer = nullptr;   /** debounce timer, see updateTraitReverseSearchFeature() */
+    QPointer<mv::plugin::AnalysisPlugin> _selectedTsneAnalysisPlugin; /** t-SNE of the selected cells (destroyed with its datasets) */
+    QPointer<mv::plugin::AnalysisPlugin> _geneTsneAnalysisPlugin;     /** t-SNE of the gene similarity points */
     TraitCache  _traitCache;
+    std::shared_ptr<std::vector<TraitEntryJob>> _traitJobs;  /** reading in the background (see computeTraitCorrelation) */
+    QFutureWatcher<void> _traitJobWatcher;
+    bool        _traitJobRunning = false;
+    bool        _traitRecomputePending = false;              /** another request arrived while the reading was running */
+    mv::Dataset<Points> _traitJobDataset;                    /** keeps the dataset alive while the background job reads it */
     quint64     _selectionRevision = 0;             /** bumped by markSelectionChanged() */
 
     // ---- Main dataset selection watcher ---------------------------------------------------------------

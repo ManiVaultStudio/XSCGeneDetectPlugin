@@ -104,9 +104,7 @@ protected:
     mv::Dataset<Clusters> _clusterDataset;
     mv::Dataset<Points> _lowDimTSNEDataset;
 
-    QPointer<QDialog> _traitPlotDialog;   /** the trait plot window (created on first use) */
-    QPointer<QWidget> _traitPlotCanvas;   /** its plot widget (a TraitPlotWidget, see the .cpp) */
-    QPointer<QLabel>  _traitPlotInfo;     /** its statistics text */
+    QPointer<QDialog> _traitPlotDialog;   /** the plots window (a TraitPlotDialog, see the .cpp; created on first use) */
 
 };
 

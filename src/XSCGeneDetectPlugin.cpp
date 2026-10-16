@@ -23,6 +23,21 @@
 #include <QScrollBar>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
+#include <functional>
+#include <QFileDialog>
+#include <QSignalBlocker>
+#include <QPaintEvent>
+#include <QWheelEvent>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QCheckBox>
+#include <QSpinBox>
+#include <QComboBox>
+#include <QTableWidget>
+#include <QTabWidget>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <QDialog>
 #include <QLabel>
@@ -964,6 +979,8 @@ void XSCGeneDetectPlugin::init()
     traitCorrelationGroup->addAction(&_settingsAction.getTraitSpeciesScope());
     traitCorrelationGroup->addAction(&_settingsAction.getTraitPoolingMode());
     traitCorrelationGroup->addAction(&_settingsAction.getTraitMinCells());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitGeneScope());
+    traitCorrelationGroup->addAction(&_settingsAction.getTraitFdrThreshold());
     traitCorrelationGroup->addAction(&_settingsAction.getTraitSignificantOnly());
     traitCorrelationGroup->addAction(&_settingsAction.getShowTraitPlot());
     connect(&_settingsAction.getShowTraitPlot(), &TriggerAction::triggered, this, [this]() { showTraitPlot(); });
@@ -973,6 +990,18 @@ void XSCGeneDetectPlugin::init()
     traitWidget->setMaximumHeight(22);
     traitLayout->addWidget(traitWidget);
     mainOptionsLayout->addLayout(traitLayout);
+
+    // Performance settings
+    auto performanceGroup = new VerticalGroupAction(this, "Performance");
+    performanceGroup->setIcon(mv::util::StyledIcon("tachometer-alt"));
+    performanceGroup->addAction(&_settingsAction.getMaxWorkerThreads());
+    performanceGroup->addAction(&_settingsAction.getMemoryBudgetMb());
+
+    auto performanceLayout = new QVBoxLayout();
+    auto performanceWidget = performanceGroup->createCollapsedWidget(&getWidget());
+    performanceWidget->setMaximumHeight(22);
+    performanceLayout->addWidget(performanceWidget);
+    mainOptionsLayout->addLayout(performanceLayout);
 
     auto downloadOptionsGroup = new VerticalGroupAction(this, "Save table as CSV");
     downloadOptionsGroup->setIcon(mv::util::StyledIcon("download"));
@@ -1296,59 +1325,97 @@ QColor getColorFromValue(int value, int min, int max) {
 
 
 // ============================================================================================================
-//  Plot: mean expression of one gene against the trait (one point per species)
+//  Interactive plots: zoom, pan, labels on hover
 // ============================================================================================================
 
 /**
- * Scatter plot of the trait value (x) against the mean expression of a gene (y), one labelled point per species.
- * Species that are selected in the species explorer are blue, the others grey. A dashed least-squares line shows the trend.
- * (No Q_OBJECT: the widget has no signals or slots of its own.)
+ * Scatter plot with
+ *  - zoom: mouse wheel around the pointer (Shift: x only, Ctrl: y only), buttons of the owner, double click = reset
+ *  - pan: drag with the left mouse button
+ *  - hover: the point under the pointer gets its label and a tooltip with details (so labels never have to overlap)
+ *  - click: reported to the owner
+ *  - labels: none / highlighted points only / all points; labels are placed without overlapping (a label that does not fit
+ *    anywhere is left out; zoom in to see more)
+ * (No Q_OBJECT: the widget has no signals or slots of its own; the owner is informed through callbacks.)
  */
-class TraitPlotWidget : public QWidget
+class ZoomablePlotWidget : public QWidget
 {
 public:
     struct Point {
         double x = 0.0;
         double y = 0.0;
-        QString label;
+        QString label;          // drawn next to the point (when labels are on); passed to the detail provider
         bool highlighted = false;
+        QColor color;           // invalid: grey (blue when highlighted)
+        int id = -1;            // free for the owner (index of a row, a species, ...)
     };
+    struct GuideLine {
+        bool horizontal = true;
+        double value = 0.0;
+        QString text;
+    };
+    enum class LabelMode { None = 0, Highlighted = 1, All = 2 };
 
-    explicit TraitPlotWidget(QWidget* parent = nullptr) : QWidget(parent)
+    explicit ZoomablePlotWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
         setMinimumSize(420, 320);
+        setMouseTracking(true);
+        setFocusPolicy(Qt::StrongFocus);
     }
 
-    void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle)
+    // ---- content ----
+    void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle, bool keepView = false)
     {
         _points = points;
         _xTitle = xTitle;
         _yTitle = yTitle;
+        _hovered = -1;
+        if (!keepView || !_viewValid)
+            resetView();
         update();
     }
+    void setGuideLines(const QVector<GuideLine>& guides) { _guides = guides; update(); }
 
-protected:
-    void paintEvent(QPaintEvent*) override
+    // ---- appearance ----
+    void setLabelMode(LabelMode mode) { _labelMode = mode; update(); }
+    void setPointSize(int size) { _pointSize = std::max(2, size); update(); }
+    void setShowTrendLine(bool show) { _showTrend = show; update(); }
+    void setShowGrid(bool show) { _showGrid = show; update(); }
+
+    // ---- interaction ----
+    void setDetailProvider(std::function<QString(const Point&)> provider) { _detailProvider = std::move(provider); }
+    void setOnHover(std::function<void(int)> callback) { _onHover = std::move(callback); }
+    void setOnClick(std::function<void(int)> callback) { _onClick = std::move(callback); }
+    /** Highlight a point from outside (e.g. a selected table row). */
+    void setHoveredPoint(int index) { _hovered = index; update(); }
+    int pointCount() const { return _points.size(); }
+    /** The point with the given index (an empty point when out of range). */
+    Point pointData(int index) const { return (index >= 0 && index < _points.size()) ? _points[index] : Point(); }
+
+    void zoomBy(double factor) { zoomAround(QPointF(plotRect().center()), factor, false, false); }
+
+    void resetView()
     {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.fillRect(rect(), palette().color(QPalette::Base));
-
-        const QColor textColor = palette().color(QPalette::Text);
-        const QRect plot(70, 20, width() - 70 - 24, height() - 20 - 56);
-        if (_points.isEmpty() || plot.width() < 40 || plot.height() < 40) {
-            painter.setPen(textColor);
-            painter.drawText(rect(), Qt::AlignCenter, "No data to plot");
-            return;
-        }
-
-        // value ranges with a small margin
-        double minX = _points[0].x, maxX = minX, minY = _points[0].y, maxY = minY;
-        for (const Point& point : _points) {
-            minX = std::min(minX, point.x);
-            maxX = std::max(maxX, point.x);
-            minY = std::min(minY, point.y);
-            maxY = std::max(maxY, point.y);
+        double minX = -1.0, maxX = 1.0, minY = -1.0, maxY = 1.0;
+        if (!_points.isEmpty()) {
+            minX = maxX = _points[0].x;
+            minY = maxY = _points[0].y;
+            for (const Point& point : _points) {
+                minX = std::min(minX, point.x);
+                maxX = std::max(maxX, point.x);
+                minY = std::min(minY, point.y);
+                maxY = std::max(maxY, point.y);
+            }
+            for (const GuideLine& guide : _guides) {
+                if (guide.horizontal) {
+                    minY = std::min(minY, guide.value);
+                    maxY = std::max(maxY, guide.value);
+                }
+                else {
+                    minX = std::min(minX, guide.value);
+                    maxX = std::max(maxX, guide.value);
+                }
+            }
         }
         const auto pad = [](double& low, double& high) {
             const double span = high - low;
@@ -1363,74 +1430,592 @@ protected:
             };
         pad(minX, maxX);
         pad(minY, maxY);
+        _minX = minX; _maxX = maxX; _minY = minY; _maxY = maxY;
+        _viewValid = true;
+        update();
+    }
 
-        const auto toPixel = [&](double x, double y) {
-            return QPointF(plot.left() + (x - minX) / (maxX - minX) * plot.width(), plot.bottom() - (y - minY) / (maxY - minY) * plot.height());
-            };
+protected:
+    QRect plotRect() const { return QRect(72, 16, std::max(10, width() - 72 - 16), std::max(10, height() - 16 - 52)); }
 
-        // frame, ticks and tick labels
+    QPointF toPixel(double x, double y) const
+    {
+        const QRect plot = plotRect();
+        return QPointF(plot.left() + (x - _minX) / (_maxX - _minX) * plot.width(), plot.bottom() - (y - _minY) / (_maxY - _minY) * plot.height());
+    }
+
+    void zoomAround(const QPointF& pixel, double factor, bool xOnly, bool yOnly)
+    {
+        const QRect plot = plotRect();
+        const double spanX = _maxX - _minX, spanY = _maxY - _minY;
+        if (spanX <= 0.0 || spanY <= 0.0)
+            return;
+        const double centerX = _minX + (pixel.x() - plot.left()) / plot.width() * spanX;
+        const double centerY = _minY + (plot.bottom() - pixel.y()) / plot.height() * spanY;
+        if (!yOnly) {
+            _minX = centerX - (centerX - _minX) * factor;
+            _maxX = centerX + (_maxX - centerX) * factor;
+        }
+        if (!xOnly) {
+            _minY = centerY - (centerY - _minY) * factor;
+            _maxY = centerY + (_maxY - centerY) * factor;
+        }
+        update();
+    }
+
+    int pointAt(const QPointF& pixel) const
+    {
+        const double radius = _pointSize / 2.0 + 5.0;
+        double best = radius * radius;
+        int found = -1;
+        for (int i = 0; i < _points.size(); ++i) {
+            const QPointF p = toPixel(_points[i].x, _points[i].y);
+            const double distance = (p.x() - pixel.x()) * (p.x() - pixel.x()) + (p.y() - pixel.y()) * (p.y() - pixel.y());
+            if (distance <= best) {
+                best = distance;
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    // ---- events ----
+    void wheelEvent(QWheelEvent* event) override
+    {
+        const double factor = event->angleDelta().y() > 0 ? 0.85 : 1.0 / 0.85;
+        zoomAround(event->position(), factor, event->modifiers().testFlag(Qt::ShiftModifier), event->modifiers().testFlag(Qt::ControlModifier));
+        event->accept();
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            _dragging = true;
+            _dragMoved = false;
+            _lastPosition = event->position();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (_dragging) {
+            const QPointF delta = event->position() - _lastPosition;
+            if (std::abs(delta.x()) + std::abs(delta.y()) > 2.0)
+                _dragMoved = true;
+            const QRect plot = plotRect();
+            const double shiftX = delta.x() / plot.width() * (_maxX - _minX);
+            const double shiftY = delta.y() / plot.height() * (_maxY - _minY);
+            _minX -= shiftX; _maxX -= shiftX;
+            _minY += shiftY; _maxY += shiftY;
+            _lastPosition = event->position();
+            update();
+            return;
+        }
+
+        const int hovered = plotRect().contains(event->position().toPoint()) ? pointAt(event->position()) : -1;
+        if (hovered != _hovered) {
+            _hovered = hovered;
+            if (_onHover)
+                _onHover(hovered);
+            update();
+            if (hovered >= 0 && _detailProvider)
+                QToolTip::showText(event->globalPosition().toPoint(), _detailProvider(_points[hovered]), this);
+            else
+                QToolTip::hideText();
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            if (_dragging && !_dragMoved && _hovered >= 0 && _onClick)
+                _onClick(_hovered);
+            _dragging = false;
+        }
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent*) override { resetView(); }
+
+    void leaveEvent(QEvent*) override
+    {
+        _hovered = -1;
+        if (_onHover)
+            _onHover(-1);
+        update();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal)
+            zoomBy(0.8);
+        else if (event->key() == Qt::Key_Minus)
+            zoomBy(1.25);
+        else if (event->key() == Qt::Key_0 || event->key() == Qt::Key_Home)
+            resetView();
+        else
+            QWidget::keyPressEvent(event);
+    }
+
+    // ---- painting ----
+    static double niceStep(double range, int targetTicks)
+    {
+        if (range <= 0.0)
+            return 1.0;
+        const double raw = range / targetTicks;
+        const double magnitude = std::pow(10.0, std::floor(std::log10(raw)));
+        const double residual = raw / magnitude;
+        const double nice = residual < 1.5 ? 1.0 : (residual < 3.0 ? 2.0 : (residual < 7.0 ? 5.0 : 10.0));
+        return nice * magnitude;
+    }
+
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(rect(), palette().color(QPalette::Base));
+
+        const QColor textColor = palette().color(QPalette::Text);
+        const QColor gridColor = palette().color(QPalette::Midlight);
+        const QRect plot = plotRect();
+        if (_points.isEmpty() || !_viewValid || _maxX <= _minX || _maxY <= _minY) {
+            painter.setPen(textColor);
+            painter.drawText(rect(), Qt::AlignCenter, "No data to plot");
+            return;
+        }
+
+        // ---- grid, ticks and tick labels ----
+        const double stepX = niceStep(_maxX - _minX, 6);
+        const double stepY = niceStep(_maxY - _minY, 5);
+        painter.setFont(font());
+        int tickGuard = 0; // (a runaway loop is impossible even for extreme zoom levels)
+        for (double x = std::ceil(_minX / stepX) * stepX; x <= _maxX && tickGuard++ < 200; x += stepX) {
+            const QPointF pixel = toPixel(x, _minY);
+            if (_showGrid) {
+                painter.setPen(gridColor);
+                painter.drawLine(QPointF(pixel.x(), plot.top()), QPointF(pixel.x(), plot.bottom()));
+            }
+            painter.setPen(textColor);
+            painter.drawLine(QPointF(pixel.x(), plot.bottom()), QPointF(pixel.x(), plot.bottom() + 4));
+            painter.drawText(QRectF(pixel.x() - 34, plot.bottom() + 6, 68, 16), Qt::AlignHCenter | Qt::AlignTop, QString::number(x, 'g', 4));
+        }
+        tickGuard = 0;
+        for (double y = std::ceil(_minY / stepY) * stepY; y <= _maxY && tickGuard++ < 200; y += stepY) {
+            const QPointF pixel = toPixel(_minX, y);
+            if (_showGrid) {
+                painter.setPen(gridColor);
+                painter.drawLine(QPointF(plot.left(), pixel.y()), QPointF(plot.right(), pixel.y()));
+            }
+            painter.setPen(textColor);
+            painter.drawLine(QPointF(plot.left() - 4, pixel.y()), QPointF(plot.left(), pixel.y()));
+            painter.drawText(QRectF(plot.left() - 68, pixel.y() - 8, 62, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
+        }
+
+        // frame and axis titles
         painter.setPen(palette().color(QPalette::Mid));
         painter.drawRect(plot);
         painter.setPen(textColor);
-        constexpr int kTicks = 4;
-        for (int i = 0; i <= kTicks; ++i) {
-            const double fraction = static_cast<double>(i) / kTicks;
-            const double xValue = minX + fraction * (maxX - minX);
-            const double yValue = minY + fraction * (maxY - minY);
-            const QPointF xPixel = toPixel(xValue, minY);
-            const QPointF yPixel = toPixel(minX, yValue);
-            painter.drawLine(QPointF(xPixel.x(), plot.bottom()), QPointF(xPixel.x(), plot.bottom() + 4));
-            painter.drawLine(QPointF(plot.left() - 4, yPixel.y()), QPointF(plot.left(), yPixel.y()));
-            painter.drawText(QRectF(xPixel.x() - 30, plot.bottom() + 6, 60, 16), Qt::AlignHCenter | Qt::AlignTop, QString::number(xValue, 'g', 3));
-            painter.drawText(QRectF(plot.left() - 66, yPixel.y() - 8, 60, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(yValue, 'g', 3));
-        }
-
-        // axis titles
-        painter.drawText(QRect(plot.left(), height() - 22, plot.width(), 18), Qt::AlignCenter, _xTitle);
+        painter.drawText(QRect(plot.left(), height() - 24, plot.width(), 18), Qt::AlignCenter, _xTitle);
         painter.save();
         painter.translate(14, plot.center().y());
         painter.rotate(-90);
         painter.drawText(QRect(-plot.height() / 2, -8, plot.height(), 16), Qt::AlignCenter, _yTitle);
         painter.restore();
 
-        // least-squares line (an illustration of the trend; it is not the statistic of the chosen method)
-        double meanX = 0.0, meanY = 0.0;
-        for (const Point& point : _points) {
-            meanX += point.x;
-            meanY += point.y;
-        }
-        meanX /= _points.size();
-        meanY /= _points.size();
-        double sxx = 0.0, sxy = 0.0;
-        for (const Point& point : _points) {
-            sxx += (point.x - meanX) * (point.x - meanX);
-            sxy += (point.x - meanX) * (point.y - meanY);
-        }
-        if (_points.size() >= 2 && sxx > 0.0) {
-            const double slope = sxy / sxx;
-            const double intercept = meanY - slope * meanX;
-            painter.save();
-            painter.setClipRect(plot);
+        // ---- everything inside the plot is clipped to it (zoomed-in content must not leak into the margins) ----
+        painter.save();
+        painter.setClipRect(plot);
+
+        // guide lines (e.g. the significance threshold)
+        for (const GuideLine& guide : _guides) {
             painter.setPen(QPen(textColor, 1, Qt::DashLine));
-            painter.drawLine(toPixel(minX, intercept + slope * minX), toPixel(maxX, intercept + slope * maxX));
-            painter.restore();
+            if (guide.horizontal) {
+                const double y = toPixel(_minX, guide.value).y();
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+                painter.drawText(QPointF(plot.left() + 6, y - 4), guide.text);
+            }
+            else {
+                const double x = toPixel(guide.value, _minY).x();
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+                painter.drawText(QPointF(x + 4, plot.top() + 14), guide.text);
+            }
         }
 
-        // points with the species name
-        for (const Point& point : _points) {
-            const QPointF pixel = toPixel(point.x, point.y);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray));
-            painter.drawEllipse(pixel, 5.0, 5.0);
-            painter.setPen(textColor);
-            painter.drawText(QPointF(pixel.x() + 8.0, pixel.y() - 6.0), point.label);
+        // least-squares trend (an illustration; it is not the statistic of the chosen method)
+        if (_showTrend && _points.size() >= 2) {
+            double meanX = 0.0, meanY = 0.0;
+            for (const Point& point : _points) {
+                meanX += point.x;
+                meanY += point.y;
+            }
+            meanX /= _points.size();
+            meanY /= _points.size();
+            double sxx = 0.0, sxy = 0.0;
+            for (const Point& point : _points) {
+                sxx += (point.x - meanX) * (point.x - meanX);
+                sxy += (point.x - meanX) * (point.y - meanY);
+            }
+            if (sxx > 0.0) {
+                const double slope = sxy / sxx;
+                const double intercept = meanY - slope * meanX;
+                painter.setPen(QPen(textColor, 1, Qt::DashLine));
+                painter.drawLine(toPixel(_minX, intercept + slope * _minX), toPixel(_maxX, intercept + slope * _maxX));
+            }
         }
+
+        // points (the hovered one last, so that it is on top)
+        const double radius = _pointSize / 2.0;
+        for (int i = 0; i < _points.size(); ++i) {
+            if (i == _hovered)
+                continue;
+            const Point& point = _points[i];
+            const QPointF pixel = toPixel(point.x, point.y);
+            if (!plot.adjusted(-10, -10, 10, 10).contains(pixel.toPoint()))
+                continue;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(point.color.isValid() ? point.color : (point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray)));
+            painter.drawEllipse(pixel, radius, radius);
+        }
+        if (_hovered >= 0 && _hovered < _points.size()) {
+            const Point& point = _points[_hovered];
+            painter.setPen(QPen(Qt::black, 2));
+            painter.setBrush(point.color.isValid() ? point.color : (point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray)));
+            painter.drawEllipse(toPixel(point.x, point.y), radius + 2.0, radius + 2.0);
+        }
+
+        // ---- labels without overlaps: hovered point first, then highlighted points, then (mode All) the rest ----
+        if (_labelMode != LabelMode::None || _hovered >= 0) {
+            const QFontMetrics metrics(painter.font());
+            QVector<QRectF> placed;
+            const QRectF plotF(plot);
+            const double offset = radius + 3.0;
+            painter.setPen(textColor);
+
+            const auto place = [&](int index) {
+                const Point& point = _points[index];
+                if (point.label.isEmpty())
+                    return;
+                const QPointF pixel = toPixel(point.x, point.y);
+                if (!plotF.contains(pixel))
+                    return;
+                const QSizeF size(metrics.horizontalAdvance(point.label) + 4, metrics.height());
+                const QPointF candidates[4] = { QPointF(offset, -size.height() - 1.0), QPointF(offset, 1.0),
+                                                QPointF(-offset - size.width(), -size.height() - 1.0), QPointF(-offset - size.width(), 1.0) };
+                for (const QPointF& shift : candidates) {
+                    const QRectF rect(pixel + shift, size);
+                    if (!plotF.contains(rect))
+                        continue;
+                    bool free = true;
+                    for (const QRectF& other : placed) {
+                        if (rect.intersects(other)) {
+                            free = false;
+                            break;
+                        }
+                    }
+                    if (free) {
+                        placed.push_back(rect);
+                        painter.drawText(rect, Qt::AlignLeft | Qt::AlignVCenter, point.label);
+                        return;
+                    }
+                }
+                };
+
+            if (_hovered >= 0 && _hovered < _points.size())
+                place(_hovered);
+            int budget = 400; // plenty for any readable plot; keeps painting fast for thousands of points
+            for (int i = 0; i < _points.size() && budget > 0; ++i) {
+                if (i != _hovered && _points[i].highlighted && _labelMode != LabelMode::None) {
+                    place(i);
+                    --budget;
+                }
+            }
+            if (_labelMode == LabelMode::All) {
+                for (int i = 0; i < _points.size() && budget > 0; ++i) {
+                    if (i != _hovered && !_points[i].highlighted) {
+                        place(i);
+                        --budget;
+                    }
+                }
+            }
+        }
+        painter.restore();
     }
 
 private:
     QVector<Point> _points;
+    QVector<GuideLine> _guides;
     QString _xTitle;
     QString _yTitle;
+    double _minX = -1.0, _maxX = 1.0, _minY = -1.0, _maxY = 1.0;
+    bool _viewValid = false;
+    LabelMode _labelMode = LabelMode::Highlighted;
+    int _pointSize = 10;
+    bool _showTrend = true;
+    bool _showGrid = true;
+    int _hovered = -1;
+    bool _dragging = false;
+    bool _dragMoved = false;
+    QPointF _lastPosition;
+    std::function<QString(const Point&)> _detailProvider;
+    std::function<void(int)> _onHover;
+    std::function<void(int)> _onClick;
+};
+
+/**
+ * The plots window with three tabs:
+ *  1. Expression vs trait: one point per species for the selected gene, with a table of the species next to it
+ *  2. Volcano: every analysed gene (trait correlation against significance); a click selects the gene in the gene table
+ *  3. Conservation vs trait: weighted appearance against trait correlation of the listed genes
+ * Every plot can be zoomed, panned, labelled and saved as an image.
+ */
+class TraitPlotDialog : public QDialog
+{
+public:
+    using Point = ZoomablePlotWidget::Point;
+
+    struct SpeciesRow {
+        QString species;
+        double trait = 0.0;
+        double expression = 0.0;
+        int cells = 0;
+        bool selected = false;
+    };
+
+    /** Details of a gene row of the gene table (volcano / conservation tabs). */
+    std::function<QString(int row)> geneDetailProvider;
+    /** A gene point was clicked (its gene name). */
+    std::function<void(const QString& gene)> onGeneClicked;
+    /** The tab changed (the plugin refreshes the data of that tab). */
+    std::function<void()> onTabChanged;
+
+    explicit TraitPlotDialog(QWidget* parent) : QDialog(parent)
+    {
+        setWindowTitle("Trait plots");
+        auto* layout = new QVBoxLayout(this);
+        _tabs = new QTabWidget(this);
+        layout->addWidget(_tabs, 1);
+
+        // ---- tab 1: expression vs trait ----
+        auto* speciesPage = new QWidget(_tabs);
+        auto* speciesLayout = new QVBoxLayout(speciesPage);
+        _speciesPlot = new ZoomablePlotWidget(speciesPage);
+        _speciesPlot->setShowTrendLine(true);
+        addToolbar(speciesLayout, _speciesPlot, true, ZoomablePlotWidget::LabelMode::Highlighted);
+
+        _speciesTable = new QTableWidget(speciesPage);
+        _speciesTable->setColumnCount(5);
+        _speciesTable->setHorizontalHeaderLabels({ "Species", "Trait", "Mean expression", "Cells", "Selected" });
+        _speciesTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        _speciesTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        _speciesTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        _speciesTable->verticalHeader()->hide();
+        _speciesTable->horizontalHeader()->setStretchLastSection(true);
+        _speciesTable->setMaximumWidth(380);
+
+        auto* speciesRow = new QHBoxLayout();
+        speciesRow->addWidget(_speciesPlot, 1);
+        speciesRow->addWidget(_speciesTable);
+        speciesLayout->addLayout(speciesRow, 1);
+        _speciesInfo = new QLabel(speciesPage);
+        _speciesInfo->setWordWrap(true);
+        _speciesInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        speciesLayout->addWidget(_speciesInfo);
+        _tabs->addTab(speciesPage, "Expression vs trait");
+
+        // hover <-> table
+        _speciesPlot->setDetailProvider([this](const Point& point) {
+            if (point.id < 0 || point.id >= _rows.size())
+                return QString();
+            const SpeciesRow& row = _rows[point.id];
+            return QString("%1\nTrait: %2\nMean expression: %3\nCells used: %4\n%5")
+                .arg(row.species).arg(row.trait, 0, 'g', 5).arg(row.expression, 0, 'g', 5).arg(row.cells)
+                .arg(row.selected ? "Selected in the species explorer" : "Not selected");
+            });
+        _speciesPlot->setOnHover([this](int index) { selectTableRowOfPoint(index); });
+        connect(_speciesTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+            const auto selected = _speciesTable->selectedItems();
+            _speciesPlot->setHoveredPoint(selected.isEmpty() ? -1 : selected.first()->data(Qt::UserRole).toInt());
+            });
+
+        // ---- tab 2: volcano ----
+        auto* volcanoPage = new QWidget(_tabs);
+        auto* volcanoLayout = new QVBoxLayout(volcanoPage);
+        _volcanoPlot = new ZoomablePlotWidget(volcanoPage);
+        _volcanoPlot->setShowTrendLine(false);
+        addToolbar(volcanoLayout, _volcanoPlot, false, ZoomablePlotWidget::LabelMode::Highlighted);
+        volcanoLayout->addWidget(_volcanoPlot, 1);
+        _volcanoInfo = new QLabel(volcanoPage);
+        _volcanoInfo->setWordWrap(true);
+        volcanoLayout->addWidget(_volcanoInfo);
+        _tabs->addTab(volcanoPage, "Volcano (all analysed genes)");
+        wireGenePlot(_volcanoPlot);
+
+        // ---- tab 3: conservation vs trait ----
+        auto* conservationPage = new QWidget(_tabs);
+        auto* conservationLayout = new QVBoxLayout(conservationPage);
+        _conservationPlot = new ZoomablePlotWidget(conservationPage);
+        _conservationPlot->setShowTrendLine(false);
+        addToolbar(conservationLayout, _conservationPlot, false, ZoomablePlotWidget::LabelMode::Highlighted);
+        conservationLayout->addWidget(_conservationPlot, 1);
+        _conservationInfo = new QLabel(conservationPage);
+        _conservationInfo->setWordWrap(true);
+        conservationLayout->addWidget(_conservationInfo);
+        _tabs->addTab(conservationPage, "Conservation vs trait");
+        wireGenePlot(_conservationPlot);
+
+        connect(_tabs, &QTabWidget::currentChanged, this, [this](int) {
+            if (onTabChanged)
+                onTabChanged();
+            });
+        resize(980, 640);
+    }
+
+    int currentTab() const { return _tabs->currentIndex(); }
+
+    void setSpeciesData(const QVector<Point>& points, const QVector<SpeciesRow>& rows, const QString& xTitle, const QString& yTitle, const QString& info)
+    {
+        _rows = rows;
+        _speciesPlot->setData(points, xTitle, yTitle, true);
+        _speciesInfo->setText(info);
+
+        const QSignalBlocker blocker(_speciesTable);
+        _speciesTable->setSortingEnabled(false);
+        _speciesTable->setRowCount(rows.size());
+        for (int i = 0; i < rows.size(); ++i) {
+            const SpeciesRow& row = rows[i];
+            QString name = row.species;
+            name.replace("_", " ");
+            const auto numeric = [i](double value) {
+                auto* item = new QTableWidgetItem();
+                item->setData(Qt::DisplayRole, value);
+                item->setData(Qt::UserRole, i);
+                return item;
+                };
+            auto* nameItem = new QTableWidgetItem(name);
+            nameItem->setData(Qt::UserRole, i);
+            auto* selectedItem = new QTableWidgetItem(row.selected ? "yes" : "");
+            selectedItem->setData(Qt::UserRole, i);
+            _speciesTable->setItem(i, 0, nameItem);
+            _speciesTable->setItem(i, 1, numeric(row.trait));
+            _speciesTable->setItem(i, 2, numeric(row.expression));
+            _speciesTable->setItem(i, 3, numeric(row.cells));
+            _speciesTable->setItem(i, 4, selectedItem);
+        }
+        _speciesTable->setSortingEnabled(true);
+        _speciesTable->resizeColumnsToContents();
+    }
+
+    void setVolcanoData(const QVector<Point>& points, double significanceLevel, const QString& info)
+    {
+        _volcanoPlot->setGuideLines({ { true, -std::log10(significanceLevel), QString("FDR = %1").arg(significanceLevel) }, { false, 0.0, QString() } });
+        _volcanoPlot->setData(points, "Trait correlation", "-log10 FDR", true);
+        _volcanoInfo->setText(info);
+    }
+
+    void setConservationData(const QVector<Point>& points, const QString& info)
+    {
+        _conservationPlot->setGuideLines({ { true, 0.0, QString() } });
+        _conservationPlot->setData(points, "Weighted appearance", "Trait correlation", true);
+        _conservationInfo->setText(info);
+    }
+
+private:
+    void selectTableRowOfPoint(int pointIndex)
+    {
+        const QSignalBlocker blocker(_speciesTable); // (no feedback to the plot)
+        if (pointIndex < 0) {
+            _speciesTable->clearSelection();
+            return;
+        }
+        for (int row = 0; row < _speciesTable->rowCount(); ++row) {
+            const auto* item = _speciesTable->item(row, 0);
+            if (item && item->data(Qt::UserRole).toInt() == pointIndex) {
+                _speciesTable->selectRow(row);
+                _speciesTable->scrollToItem(item);
+                return;
+            }
+        }
+    }
+
+    void wireGenePlot(ZoomablePlotWidget* plot)
+    {
+        plot->setDetailProvider([this](const Point& point) { return geneDetailProvider ? geneDetailProvider(point.id) : QString(); });
+        plot->setOnClick([this, plot](int index) {
+            if (onGeneClicked && index >= 0)
+                onGeneClicked(plot->pointData(index).label); // the label of a gene point is the gene name
+            });
+    }
+
+    /** Controls above a plot: labels, point size, trend line, grid, zoom buttons and image export. */
+    void addToolbar(QVBoxLayout* layout, ZoomablePlotWidget* plot, bool withTrend, ZoomablePlotWidget::LabelMode defaultLabels)
+    {
+        auto* bar = new QHBoxLayout();
+
+        bar->addWidget(new QLabel("Labels:"));
+        auto* labels = new QComboBox();
+        labels->addItems({ "On hover only", "Highlighted points", "All points (no overlaps)" });
+        labels->setCurrentIndex(defaultLabels == ZoomablePlotWidget::LabelMode::None ? 0 : (defaultLabels == ZoomablePlotWidget::LabelMode::Highlighted ? 1 : 2));
+        bar->addWidget(labels);
+        connect(labels, &QComboBox::currentIndexChanged, plot, [plot](int index) {
+            plot->setLabelMode(index == 0 ? ZoomablePlotWidget::LabelMode::None : (index == 1 ? ZoomablePlotWidget::LabelMode::Highlighted : ZoomablePlotWidget::LabelMode::All));
+            });
+        plot->setLabelMode(defaultLabels);
+
+        bar->addWidget(new QLabel("Point size:"));
+        auto* size = new QSpinBox();
+        size->setRange(2, 30);
+        size->setValue(withTrend ? 11 : 6);
+        bar->addWidget(size);
+        connect(size, &QSpinBox::valueChanged, plot, [plot](int value) { plot->setPointSize(value); });
+        plot->setPointSize(size->value());
+
+        if (withTrend) {
+            auto* trend = new QCheckBox("Trend line");
+            trend->setChecked(true);
+            bar->addWidget(trend);
+            connect(trend, &QCheckBox::toggled, plot, [plot](bool on) { plot->setShowTrendLine(on); });
+        }
+        auto* grid = new QCheckBox("Grid");
+        grid->setChecked(true);
+        bar->addWidget(grid);
+        connect(grid, &QCheckBox::toggled, plot, [plot](bool on) { plot->setShowGrid(on); });
+
+        bar->addStretch(1);
+
+        auto* zoomIn = new QPushButton("+");
+        auto* zoomOut = new QPushButton(QString::fromUtf8("\xE2\x88\x92")); // minus sign
+        auto* reset = new QPushButton("Reset view");
+        auto* save = new QPushButton("Save image...");
+        zoomIn->setToolTip("Zoom in (mouse wheel; Shift: x axis only, Ctrl: y axis only)");
+        zoomOut->setToolTip("Zoom out");
+        reset->setToolTip("Show everything again (double click on the plot)");
+        for (QPushButton* button : { zoomIn, zoomOut }) {
+            button->setFixedWidth(28);
+        }
+        for (QWidget* widget : { static_cast<QWidget*>(zoomIn), static_cast<QWidget*>(zoomOut), static_cast<QWidget*>(reset), static_cast<QWidget*>(save) }) {
+            bar->addWidget(widget);
+        }
+        connect(zoomIn, &QPushButton::clicked, plot, [plot]() { plot->zoomBy(0.8); });
+        connect(zoomOut, &QPushButton::clicked, plot, [plot]() { plot->zoomBy(1.25); });
+        connect(reset, &QPushButton::clicked, plot, [plot]() { plot->resetView(); });
+        connect(save, &QPushButton::clicked, plot, [plot]() {
+            const QString path = QFileDialog::getSaveFileName(plot, "Save plot image", "trait_plot.png", "PNG image (*.png);;JPEG image (*.jpg)");
+            if (!path.isEmpty())
+                plot->grab().save(path);
+            });
+
+        layout->addLayout(bar);
+        Q_UNUSED(layout);
+    }
+
+    QTabWidget* _tabs = nullptr;
+    ZoomablePlotWidget* _speciesPlot = nullptr;
+    ZoomablePlotWidget* _volcanoPlot = nullptr;
+    ZoomablePlotWidget* _conservationPlot = nullptr;
+    QTableWidget* _speciesTable = nullptr;
+    QLabel* _speciesInfo = nullptr;
+    QLabel* _volcanoInfo = nullptr;
+    QLabel* _conservationInfo = nullptr;
+    QVector<SpeciesRow> _rows;
 };
 
 // ============================================================================================================
@@ -1455,7 +2040,17 @@ public:
         setFilterKeyColumn(kTraitCorrelationColumn);
     }
 
-    /** List only genes with a significant trait correlation (FDR < kSignificanceLevel) in normal mode. */
+    /** FDR below which a gene counts as significant (follows the "Significance level" setting). */
+    void setSignificanceLevel(double level)
+    {
+        if (_significanceLevel == level)
+            return;
+        _significanceLevel = level;
+        if (_significantOnly)
+            invalidateFilter();
+    }
+
+    /** List only genes with a significant trait correlation in normal mode. */
     void setSignificantOnly(bool significantOnly)
     {
         if (_significantOnly == significantOnly)
@@ -1525,14 +2120,13 @@ protected:
 
         if (_significantOnly) {
             const QVariant fdr = source->index(sourceRow, kTraitCorrelationColumn, sourceParent).data(kTraitSignificanceFdrRole);
-            return fdr.isValid() && fdr.toDouble() < kSignificanceLevel;
+            return fdr.isValid() && fdr.toDouble() < _significanceLevel;
         }
         return true;
     }
 
 private:
-    static constexpr double kSignificanceLevel = 0.05;
-
+    double             _significanceLevel = 0.05;
     QSet<QString>      _allowedGenes;
     QRegularExpression _searchPattern;
     bool               _searchMode = false;
@@ -1590,7 +2184,8 @@ public:
 
         // grey bar, like every other bar column; a thin black outline marks a significant correlation (FDR < 0.05)
         const QVariant fdr = index.data(kTraitSignificanceFdrRole); // phylogenetically corrected when a species tree is usable
-        const bool significant = fdr.isValid() && fdr.toDouble() < 0.05;
+        const QVariant level = widget ? widget->property("significanceLevel") : QVariant();
+        const bool significant = fdr.isValid() && fdr.toDouble() < (level.isValid() ? level.toDouble() : 0.05);
         painter->setPen(significant ? QPen(Qt::black, 1) : QPen(Qt::NoPen));
         painter->setBrush(Qt::gray);
         if (clamped >= 0)
@@ -1660,7 +2255,8 @@ public:
         const int length = static_cast<int>(std::max(0.0, std::min(1.0, value)) * kBarWidth);
 
         const QVariant fdr = index.data(kWeightedFdrRole);
-        const bool significant = fdr.isValid() && fdr.toDouble() < 0.05;
+        const QVariant level = widget ? widget->property("significanceLevel") : QVariant();
+        const bool significant = fdr.isValid() && fdr.toDouble() < (level.isValid() ? level.toDouble() : 0.05);
 
         painter->save();
         painter->setClipRect(option.rect);
@@ -1736,6 +2332,14 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     proxyModel->setSourceModel(model);
     proxyModel->setAllowedGenes(_settingsAction.getUniqueReturnGeneList());
     proxyModel->setSignificantOnly(_settingsAction.getTraitSignificantOnly().isChecked());
+    proxyModel->setSignificanceLevel(_settingsAction.significanceLevel());
+    geneTableView->setProperty("significanceLevel", _settingsAction.significanceLevel()); // read by the bar delegates
+
+    connect(&_settingsAction.getTraitFdrThreshold(), &DecimalAction::valueChanged, proxyModel, [this, proxyModel]() {
+        proxyModel->setSignificanceLevel(_settingsAction.significanceLevel());
+        _settingsAction.getGeneTableView()->setProperty("significanceLevel", _settingsAction.significanceLevel());
+        _settingsAction.getGeneTableView()->viewport()->update();
+        });
 
     // (the proxy is the receiver context, so the connection disappears together with it)
     connect(&_settingsAction.getTraitSignificantOnly(), &ToggleAction::toggled, proxyModel, [proxyModel](bool significantOnly) {
@@ -1846,81 +2450,165 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
 void XSCGeneDetectPlugin::showTraitPlot()
 {
     if (!_traitPlotDialog) {
-        auto* dialog = new QDialog(&getWidget());
+        auto* dialog = new TraitPlotDialog(&getWidget());
         dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowFlag(Qt::Window); // an independent window (movable, resizable, can be put beside the views)
 
-        auto* canvas = new TraitPlotWidget(dialog);
-        auto* info = new QLabel(dialog);
-        info->setWordWrap(true);
-        info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        // details of a gene point = the tooltips of its cells in the gene table
+        dialog->geneDetailProvider = [this](int row) {
+            auto variant = _settingsAction.getListModelAction().getVariant();
+            auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
+            if (!model || row < 0 || row >= model->rowCount())
+                return QString();
+            QString text = model->item(row, 0)->text() + "\n\n";
+            text += model->item(row, kTraitCorrelationColumn)->data(Qt::ToolTipRole).toString() + "\n\n";
+            text += model->item(row, kWeightedAppearanceColumn)->data(Qt::ToolTipRole).toString();
+            return text;
+            };
 
-        auto* layout = new QVBoxLayout(dialog);
-        layout->addWidget(canvas, 1);
-        layout->addWidget(info);
-        dialog->resize(700, 560);
+        // a click selects the gene in the gene table (when it is listed there)
+        dialog->onGeneClicked = [this](const QString& gene) {
+            auto* view = _settingsAction.getGeneTableView();
+            if (!view || !view->model() || gene.isEmpty())
+                return;
+            QAbstractItemModel* viewModel = view->model();
+            for (int row = 0; row < viewModel->rowCount(); ++row) {
+                if (viewModel->index(row, 0).data().toString() == gene) {
+                    view->selectRow(row);
+                    view->setCurrentIndex(viewModel->index(row, 0));
+                    view->scrollTo(viewModel->index(row, 0));
+                    return;
+                }
+            }
+            };
 
+        dialog->onTabChanged = [this]() { refreshTraitPlot(); };
         _traitPlotDialog = dialog;
-        _traitPlotCanvas = canvas;
-        _traitPlotInfo = info;
     }
 
-    refreshTraitPlot();
     _traitPlotDialog->show();
     _traitPlotDialog->raise();
     _traitPlotDialog->activateWindow();
+    refreshTraitPlot();
 }
 
 void XSCGeneDetectPlugin::refreshTraitPlot()
 {
-    if (!_traitPlotDialog || !_traitPlotCanvas || !_traitPlotInfo) {
+    if (!_traitPlotDialog || !_traitPlotDialog->isVisible()) {
         return;
     }
-    auto* canvas = static_cast<TraitPlotWidget*>(_traitPlotCanvas.data()); // created as a TraitPlotWidget in showTraitPlot()
+    auto* dialog = static_cast<TraitPlotDialog*>(_traitPlotDialog.data()); // created as a TraitPlotDialog in showTraitPlot()
+    using Point = ZoomablePlotWidget::Point;
 
-    const QString gene = _settingsAction.getSelectedGeneAction().getString();
     const TraitMatrix& matrix = _settingsAction.getTraitMatrix();
+    const QString gene = _settingsAction.getSelectedGeneAction().getString();
+    auto variant = _settingsAction.getListModelAction().getVariant();
+    auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
+    const double level = _settingsAction.significanceLevel();
+    const bool haveModel = model && model->columnCount() > kWeightedAppearanceColumn;
 
-    QVector<TraitPlotWidget::Point> points;
-    QString infoText;
+    // ---- tab 1: the selected gene across the species ----
+    {
+        QVector<Point> points;
+        QVector<TraitPlotDialog::SpeciesRow> rows;
+        QString info;
 
-    if (gene.isEmpty()) {
-        infoText = "Select a gene in the gene table.";
-    }
-    else if (matrix.empty()) {
-        infoText = "No trait correlation has been computed yet: choose a trait and cell type(s).";
-    }
-    else {
-        const auto geneIt = matrix.geneIndex.find(gene);
-        if (geneIt == matrix.geneIndex.end()) {
-            infoText = "The gene is not part of the trait matrix.";
+        if (gene.isEmpty()) {
+            info = "Select a gene in the gene table.";
+        }
+        else if (matrix.empty()) {
+            info = "No trait correlation has been computed yet: choose a trait and cell type(s).";
         }
         else {
-            for (size_t i = 0; i < matrix.species.size(); ++i) {
-                QString label = matrix.species[i];
-                label.replace("_", " ");
-                points.push_back({ matrix.trait[i], static_cast<double>(matrix.expression[i][geneIt->second]), label, matrix.selected[i] != 0 });
+            const auto geneIt = matrix.geneIndex.find(gene);
+            if (geneIt == matrix.geneIndex.end()) {
+                info = "The gene is not part of the trait matrix (the trait correlation covers the listed top-N genes; see \"Trait Correlation Genes\").";
             }
+            else {
+                for (size_t i = 0; i < matrix.species.size(); ++i) {
+                    TraitPlotDialog::SpeciesRow row;
+                    row.species = matrix.species[i];
+                    row.trait = matrix.trait[i];
+                    row.expression = static_cast<double>(matrix.expression[i][geneIt->second]);
+                    row.cells = i < matrix.cells.size() ? matrix.cells[i] : 0;
+                    row.selected = matrix.selected[i] != 0;
+                    rows.push_back(row);
 
-            // the statistics are the tooltip of the trait cell: method, number of species, correlation, interval, p, FDR, leave-one-out
-            auto variant = _settingsAction.getListModelAction().getVariant();
-            auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
-            if (model && model->columnCount() > kTraitCorrelationColumn) {
-                for (int row = 0; row < model->rowCount(); ++row) {
-                    auto* idItem = model->item(row, 0);
-                    auto* traitItem = model->item(row, kTraitCorrelationColumn);
-                    if (idItem && traitItem && idItem->text() == gene) {
-                        infoText = traitItem->data(Qt::ToolTipRole).toString();
-                        break;
+                    QString label = row.species;
+                    label.replace("_", " ");
+                    Point point;
+                    point.x = row.trait;
+                    point.y = row.expression;
+                    point.label = label;
+                    point.highlighted = row.selected;
+                    point.id = static_cast<int>(i);
+                    points.push_back(point);
+                }
+
+                // the statistics are the tooltip of the trait cell: method, number of species, correlation, interval, p, FDR, leave-one-out
+                if (haveModel) {
+                    for (int row = 0; row < model->rowCount(); ++row) {
+                        if (model->item(row, 0)->text() == gene) {
+                            info = model->item(row, kTraitCorrelationColumn)->data(Qt::ToolTipRole).toString();
+                            break;
+                        }
                     }
                 }
+                info += "\n\nHover a point for details. Wheel: zoom, drag: move, double click: reset. Blue: species selected in the species explorer.";
             }
-            infoText += "\n\nDashed line: least-squares trend (illustration). Blue points: species selected in the species explorer.";
         }
+        dialog->setWindowTitle(gene.isEmpty() ? QString("Trait plots") : gene + " - trait plots");
+        dialog->setSpeciesData(points, rows, matrix.traitName, "Mean expression of " + gene, info);
     }
 
-    canvas->setData(points, matrix.traitName, "Mean expression of " + gene);
-    _traitPlotInfo->setText(infoText);
-    _traitPlotDialog->setWindowTitle(gene.isEmpty() ? QString("Gene expression vs trait") : gene + " - expression vs trait");
+    // ---- tabs 2 and 3: all analysed genes (only the visible tab is rebuilt) ----
+    const int tab = dialog->currentTab();
+    if ((tab == 1 || tab == 2) && haveModel) {
+        const auto& values = _settingsAction.getGeneTraitValues();
+        const auto& extras = _settingsAction.getGeneTraitExtras();
+
+        QVector<Point> points;
+        points.reserve(model->rowCount());
+        int significantCount = 0;
+        for (int row = 0; row < model->rowCount(); ++row) {
+            const QString geneName = model->item(row, 0)->text();
+            const auto valueIt = values.find(geneName);
+            const auto extrasIt = extras.find(geneName);
+            if (valueIt == values.end() || extrasIt == extras.end())
+                continue;
+
+            const double fdr = static_cast<double>(extrasIt->second.significanceFdr);
+            const bool significant = fdr < level;
+            significantCount += significant ? 1 : 0;
+
+            Point point;
+            point.id = row;
+            point.label = geneName;
+            point.highlighted = significant;
+            if (tab == 1) {
+                point.x = static_cast<double>(valueIt->second);
+                point.y = -std::log10(std::max(fdr, 1e-12));
+            }
+            else {
+                if (model->item(row, 1)->data(Qt::DisplayRole).toInt() < 1)
+                    continue; // only the listed genes have a weighted appearance
+                point.x = model->item(row, kWeightedAppearanceColumn)->data(Qt::UserRole).toDouble();
+                point.y = static_cast<double>(valueIt->second);
+            }
+            points.push_back(point);
+        }
+
+        const QString basis = QString(" %1 genes are significant.").arg(significantCount);
+        if (tab == 1) {
+            dialog->setVolcanoData(points, level, QString("%1 genes analysed, %2 significant (FDR < %3; blue). Click a gene to select it in the gene table. "
+                "Hover for details. Wheel: zoom, drag: move, double click: reset.").arg(points.size()).arg(significantCount).arg(level));
+        }
+        else {
+            dialog->setConservationData(points, QString("Listed genes: weighted appearance across species (x) against the trait correlation (y). Genes in the upper right are "
+                "conserved markers whose expression rises with the trait; blue: significant (FDR < %1).%2").arg(level).arg(basis));
+        }
+
+    }
 }
 
 // ============================================================================================================

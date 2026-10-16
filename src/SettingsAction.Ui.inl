@@ -1,5 +1,16 @@
+int SettingsAction::parallelWorkers(size_t pointsPerWorker) const
+{
+    return memorySafeThreadCount(pointsPerWorker, _memoryBudgetMb.getValue(), _maxWorkerThreads.getValue());
+}
+
+QString SettingsAction::currentMeanMapSignature() const
+{
+    return _mainPointsDataset.getCurrentDataset().getDatasetId() + QLatin1Char('|') + _speciesNamesDataset.getCurrentDataset().getDatasetId();
+}
+
 SettingsAction::~SettingsAction()
 {
+    _traitJobWatcher.waitForFinished(); // the background job reads datasets that must not disappear under it
     // The two message boxes are never added to a layout, so nobody else owns them.
     delete _popupMessageInit;
     _popupMessageInit = nullptr;
@@ -69,7 +80,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitCorrelationMethod(this, "Trait Correlation Method"),
     _traitSpeciesScope(this, "Trait Species Scope"),
     _traitMinCells(this, "Min cells per species and cell type"),
-    _traitSignificantOnly(this, "Significant trait genes only (FDR < 0.05)")
+    _traitSignificantOnly(this, "Significant trait genes only"),
+    _traitGeneScope(this, "Trait Correlation Genes"),
+    _traitFdrThreshold(this, "Significance level (FDR)"),
+    _maxWorkerThreads(this, "Parallel workers"),
+    _memoryBudgetMb(this, "Memory budget for parallel workers (MB)")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -313,6 +328,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitSpeciesScope.setSerializationName("CSCGDV:Trait Species Scope");
     _traitMinCells.setSerializationName("CSCGDV:Trait Min Cells");
     _traitSignificantOnly.setSerializationName("CSCGDV:Trait Significant Only");
+    _traitGeneScope.setSerializationName("CSCGDV:Trait Gene Scope");
+    _traitFdrThreshold.setSerializationName("CSCGDV:Trait FDR Threshold");
+    _maxWorkerThreads.setSerializationName("CSCGDV:Max Worker Threads");
+    _memoryBudgetMb.setSerializationName("CSCGDV:Memory Budget MB");
     _clusterCountSortingType.setSerializationName("CSCGDV:Cluster Count Sorting Type");
     _applyLogTransformation.setSerializationName("CSCGDV:Apply Log Transformation");
     _createRowMultiSelectTree.setDisabled(true);
@@ -345,6 +364,31 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         "Pool cells: the cells of all selected cell types of a species are counted together.\n"
         "Equal cell-type weighting: every cell type needs this many cells, otherwise it is ignored for that species\n"
         "(a cell type with a single cell would otherwise get the same weight as one with thousands).");
+
+    _traitGeneScope.initialize({ "Listed genes (fast)", "All genes (slower)" }, "Listed genes (fast)");
+    _traitGeneScope.setToolTip("Which genes are correlated with the trait:\n"
+        "Listed genes: the top-N genes of the gene table. Only their expression is read (a few hundred genes instead of all of them),\n"
+        "  which makes the analysis many times faster. Significance (FDR) is then corrected over these genes.\n"
+        "All genes: every gene of the dataset (slow: all expression values of the cell type have to be read).");
+
+    _traitFdrThreshold.setMinimum(0.001f);
+    _traitFdrThreshold.setMaximum(0.5f);
+    _traitFdrThreshold.setNumberOfDecimals(3);
+    _traitFdrThreshold.setValue(0.05f);
+    _traitFdrThreshold.setToolTip("FDR below which a trait correlation is called significant (black outline, filter, CSV flag).");
+
+    _maxWorkerThreads.setMinimum(1);
+    _maxWorkerThreads.setMaximum(std::max(2, QThread::idealThreadCount() * 2));
+    _maxWorkerThreads.setValue(std::max(1, QThread::idealThreadCount()));
+    _maxWorkerThreads.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _maxWorkerThreads.setToolTip("Maximum number of parallel workers for the expression statistics (default: all cores).");
+
+    _memoryBudgetMb.setMinimum(128);
+    _memoryBudgetMb.setMaximum(32768);
+    _memoryBudgetMb.setValue(1024);
+    _memoryBudgetMb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _memoryBudgetMb.setToolTip("Scratch memory all parallel workers may use together while reading expression data.\n"
+        "Lower it if memory is tight (fewer workers run at once), raise it on large machines.");
 
     _traitSignificantOnly.setChecked(false);
     _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
@@ -554,9 +598,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateMainPointsDataset = [this]() -> void {
 
-        if (!_meanMapComputed)
+        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
         {
-            computeGeneMeanExpressionMap();
+            computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
 
 
@@ -638,9 +682,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         }
         _speciesExplorerInMap.setOptions(speciesOptions);
 
-        if (!_meanMapComputed)
+        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
         {
-            computeGeneMeanExpressionMap();
+            computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
         };
 
@@ -973,6 +1017,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_traitPoolingMode, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
     connect(&_traitCorrelationMethod, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
     connect(&_traitSpeciesScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitGeneScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
     connect(&_traitMinCells, &IntegralAction::valueChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
 
 
@@ -1282,6 +1327,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         };
     connect(&_clusterCountSortingType, &OptionAction::currentIndexChanged, this, updateClusterCountSortingType);
     // Debounced trait-correlation refresh (see updateTraitReverseSearchFeature()): bursts of requests -> one computation
+    connect(&_traitJobWatcher, &QFutureWatcher<void>::finished, this, [this]() -> void { onTraitJobsFinished(); });
+
     _traitCorrelationTimer = new QTimer(this);
     _traitCorrelationTimer->setSingleShot(true);
     _traitCorrelationTimer->setInterval(30);
