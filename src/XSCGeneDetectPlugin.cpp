@@ -24,6 +24,7 @@
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 #include <functional>
+#include <tuple>
 #include <QFileDialog>
 #include <QSignalBlocker>
 #include <QPaintEvent>
@@ -38,6 +39,7 @@
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QToolTip>
+#include <QMenu>
 #include <QVBoxLayout>
 #include <QDialog>
 #include <QLabel>
@@ -261,6 +263,196 @@ std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& for
     }
 
     return statisticsMap;
+}
+
+/**
+ * Hover text of the gene table cells that carry no tooltip of their own (gene, species count, species names, statistics and the
+ * further statistics columns). It is built on demand from the cells of the row, so nothing is stored per gene.
+ */
+static QString geneTableCellTooltip(SettingsAction& settings, const QModelIndex& index)
+{
+    const int column = index.column();
+    const bool supported = column == 0 || column == 1 || column == 2 || column == 3 || (column >= kBestPositionColumn && column <= kMeanExpressionColumn);
+    if (!index.isValid() || !supported) {
+        return QString();
+    }
+
+    const QString gene = index.siblingAtColumn(0).data().toString();
+    const int topCount = index.siblingAtColumn(1).data().toInt();
+    const auto statistics = convertToStatisticsMap(index.siblingAtColumn(3).data().toString());
+    if (statistics.empty()) {
+        return QString();
+    }
+    const int speciesTotal = static_cast<int>(statistics.size());
+    const int topN = settings.weightedTopN();
+    const bool negative = settings.weightedNegative();
+
+    struct SpeciesLine {
+        QString species;
+        int position = 0;      // 1 = strongest; 0 = unknown
+        int listLength = 0;
+        double difference = 0.0;
+        double meanSelected = 0.0;
+        double meanNonSelected = 0.0;
+        int cellsSelected = 0;
+        int cellsNonSelected = 0;
+        bool topGene = false;
+    };
+    QVector<SpeciesLine> lines;
+    for (const auto& entry : statistics) {
+        const SpeciesDetailsStats& stats = entry.second;
+        SpeciesLine line;
+        line.species = entry.first;
+        line.listLength = settings.speciesGeneListLength(entry.first);
+        line.position = GeneStats::positionFromRank(stats.rank, line.listLength, negative);
+        line.meanSelected = stats.meanSelected;
+        line.meanNonSelected = stats.meanNonSelected;
+        line.difference = line.meanSelected - line.meanNonSelected;
+        line.cellsSelected = stats.countSelected;
+        line.cellsNonSelected = stats.countNonSelected;
+        line.topGene = line.position >= 1 && line.position <= topN && stats.meanSelected > 0;
+        lines.push_back(line);
+    }
+    // best positions first; species without a position by their differential expression
+    std::sort(lines.begin(), lines.end(), [](const SpeciesLine& a, const SpeciesLine& b) {
+        if ((a.position > 0) != (b.position > 0))
+            return a.position > 0;
+        if (a.position > 0)
+            return a.position < b.position;
+        return a.difference > b.difference;
+        });
+
+    const auto pretty = [](QString name) {
+        name.replace("_", " ");
+        return name.toHtmlEscaped();
+        };
+    const auto num = [](double value, int decimals = 3) { return QString::number(value, 'f', decimals); };
+    const auto row = [](const QString& label, const QString& value) {
+        return QString("<tr><td><b>%1</b>&nbsp;&nbsp;</td><td>%2</td></tr>").arg(label.toHtmlEscaped(), value);
+        };
+    const QString title = QString("<p style='white-space:pre'><b>%1</b></p>").arg(gene.toHtmlEscaped());
+
+    // summary values shared by several cells
+    const QModelIndex weightedIndex = index.siblingAtColumn(kWeightedAppearanceColumn);
+    const double weighted = weightedIndex.data(Qt::UserRole).toDouble();
+    const double meanDifferential = index.siblingAtColumn(kMeanDifferentialColumn).data(Qt::UserRole).toDouble();
+    const double positivePercent = index.siblingAtColumn(kPositiveSpeciesColumn).data(Qt::UserRole).toDouble();
+    const double meanExpression = index.siblingAtColumn(kMeanExpressionColumn).data(Qt::UserRole).toDouble();
+    const bool havePosition = !lines.isEmpty() && lines.first().position > 0;
+    const QString bestText = havePosition ? QString("%1 in %2").arg(lines.first().position).arg(pretty(lines.first().species)) : QString("none");
+
+    const auto tableOf = [](const QStringList& headers, const QVector<QStringList>& rows) {
+        QString html = "<table cellspacing='0' cellpadding='2'><tr>";
+        for (const QString& header : headers)
+            html += "<th align='left'>" + header.toHtmlEscaped() + "&nbsp;&nbsp;</th>";
+        html += "</tr>";
+        for (const QStringList& cells : rows) {
+            html += "<tr>";
+            for (const QString& cell : cells)
+                html += "<td>" + cell + "&nbsp;&nbsp;</td>";
+            html += "</tr>";
+        }
+        return html + "</table>";
+        };
+
+    if (column == 0) {
+        QString html = title + "<table>";
+        html += row("Top-N gene in", QString("%1 of %2 species (%3%)").arg(topCount).arg(speciesTotal).arg(GeneStats::percent(topCount, speciesTotal), 0, 'f', 0));
+        html += row("Weighted appearance", num(weighted));
+        html += row("Best position", bestText);
+        html += row("Mean differential", QString("%1 (higher in the selection in %2% of the species)").arg(num(meanDifferential)).arg(positivePercent, 0, 'f', 0));
+        html += row("Mean expression (selection)", num(meanExpression));
+        html += row("Rank consistency", QString("p = %1, FDR = %2").arg(weightedIndex.data(kWeightedPValueRole).toDouble(), 0, 'g', 3).arg(weightedIndex.data(kWeightedFdrRole).toDouble(), 0, 'g', 3));
+        html += "</table><p>Hover the other columns for details.</p>";
+        return html;
+    }
+
+    if (column == 1 || column == 2) {
+        QVector<QStringList> rows;
+        for (const SpeciesLine& line : lines) {
+            if (!line.topGene)
+                continue;
+            rows.push_back({ pretty(line.species), QString::number(line.position), num(GeneStats::rankWeight(line.position, topN)), num(line.difference) });
+        }
+        QString html = title + QString("<p>Top-N gene in <b>%1 of %2</b> species (%3%).<br>A gene counts as a top-N gene of a species when its position is within the top %4 and its mean "
+            "in the selected cells is positive.</p>").arg(topCount).arg(speciesTotal).arg(GeneStats::percent(topCount, speciesTotal), 0, 'f', 0).arg(topN);
+        if (rows.isEmpty()) {
+            return html + "<p>It is a top-N gene in none of the species.</p>";
+        }
+        if (rows.size() > 30) {
+            const int more = rows.size() - 30;
+            rows = rows.mid(0, 30);
+            return html + tableOf({ "Species", "Position", "Weight", "Differential" }, rows) + QString("<p>... and %1 more</p>").arg(more);
+        }
+        return html + tableOf({ "Species", "Position", "Weight", "Differential" }, rows);
+    }
+
+    if (column == 3) {
+        QVector<QStringList> rows;
+        for (const SpeciesLine& line : lines) {
+            if (rows.size() >= 40)
+                break;
+            rows.push_back({ pretty(line.species), line.position > 0 ? QString::number(line.position) : QString("-"),
+                             line.position > 0 ? num(GeneStats::percent(line.position, line.listLength), 2) + "%" : QString("-"),
+                             num(line.difference), num(line.meanSelected), num(line.meanNonSelected),
+                             QString::number(line.cellsSelected), line.topGene ? "yes" : "" });
+        }
+        QString html = title + "<p>Statistics of the gene in every species, best positions first.</p>"
+            + tableOf({ "Species", "Position", "Percentile", "Differential", "Mean selected", "Mean other", "Selected cells", "Top-N" }, rows);
+        if (lines.size() > 40)
+            html += QString("<p>... and %1 more species</p>").arg(lines.size() - 40);
+        return html;
+    }
+
+    if (column == kBestPositionColumn) {
+        QString html = title + "<p>Best (smallest) position of the gene in the top-N ordering of any species. Position 1 = the strongest gene of that species.</p><table>";
+        html += row("Best", bestText);
+        int shown = 0;
+        for (const SpeciesLine& line : lines) {
+            if (line.position > 0 && shown++ > 0 && shown <= 4)
+                html += row(QString("#%1").arg(shown), QString("%1 in %2").arg(line.position).arg(pretty(line.species)));
+        }
+        return html + "</table>";
+    }
+
+    if (column == kMeanDifferentialColumn || column == kPositiveSpeciesColumn) {
+        const SpeciesLine* highest = nullptr;
+        const SpeciesLine* lowest = nullptr;
+        QStringList negativeSpecies;
+        for (const SpeciesLine& line : lines) {
+            if (!highest || line.difference > highest->difference)
+                highest = &line;
+            if (!lowest || line.difference < lowest->difference)
+                lowest = &line;
+            if (line.difference <= 0.0)
+                negativeSpecies << pretty(line.species);
+        }
+        QString html = title + "<table>";
+        html += row("Mean differential", QString("%1 over %2 species").arg(num(meanDifferential)).arg(speciesTotal));
+        html += row("Higher in the selection in", QString("%1% of the species").arg(positivePercent, 0, 'f', 0));
+        if (highest)
+            html += row("Largest differential", QString("%1 in %2").arg(num(highest->difference)).arg(pretty(highest->species)));
+        if (lowest)
+            html += row("Smallest differential", QString("%1 in %2").arg(num(lowest->difference)).arg(pretty(lowest->species)));
+        html += "</table>";
+        if (!negativeSpecies.isEmpty()) {
+            const QStringList shown = negativeSpecies.mid(0, 8);
+            html += "<p>Not higher in the selection: " + shown.join(", ") + (negativeSpecies.size() > 8 ? QString(" and %1 more").arg(negativeSpecies.size() - 8) : QString()) + "</p>";
+        }
+        return html + "<p>Differential = mean expression in the selected cells minus the mean in the other cells of the species.</p>";
+    }
+
+    // column == kMeanExpressionColumn
+    const SpeciesLine* highest = nullptr;
+    for (const SpeciesLine& line : lines) {
+        if (!highest || line.meanSelected > highest->meanSelected)
+            highest = &line;
+    }
+    QString html = title + "<table>";
+    html += row("Mean expression (selection)", QString("%1 averaged over %2 species").arg(num(meanExpression)).arg(speciesTotal));
+    if (highest)
+        html += row("Highest", QString("%1 in %2").arg(num(highest->meanSelected)).arg(pretty(highest->species)));
+    return html + "</table>";
 }
 
 
@@ -779,8 +971,11 @@ void XSCGeneDetectPlugin::init()
     //on hovering a cell, show the full text available in a tooltip
     connect(_settingsAction.getGeneTableView(), &QTableView::entered, [this](const QModelIndex& index) {
         if (index.isValid()) {
-            // an explicit tooltip of the cell wins over its display text
+            // an explicit tooltip of the cell wins; otherwise the summary built from the row; otherwise the cell text
             QString text = index.data(Qt::ToolTipRole).toString();
+            if (text.isEmpty()) {
+                text = geneTableCellTooltip(_settingsAction, index);
+            }
             if (text.isEmpty()) {
                 text = index.data().toString();
             }
@@ -817,6 +1012,15 @@ void XSCGeneDetectPlugin::init()
     _settingsAction.getSelectionDetailsTable()->setSortingEnabled(true);
 
     //on hovering a cell, show the full text available in a tooltip
+    // Right-click on the header of the species table: choose which columns are shown
+    {
+        auto* detailsHeader = _settingsAction.getSelectionDetailsTable()->horizontalHeader();
+        detailsHeader->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(detailsHeader, &QWidget::customContextMenuRequested, this, [this, detailsHeader](const QPoint& position) {
+            showDetailsColumnMenu(detailsHeader->mapToGlobal(position));
+            });
+    }
+
     connect(_settingsAction.getSelectionDetailsTable(), &QTableView::entered, [this](const QModelIndex& index) {
         if (index.isValid()) {
             // an explicit tooltip of the cell wins over its display text
@@ -2280,6 +2484,31 @@ public:
     }
 };
 
+/** Shows numbers with a fixed number of decimals (and a suffix) while the model keeps the numeric value for sorting. */
+class FixedDecimalDelegate : public QStyledItemDelegate
+{
+public:
+    FixedDecimalDelegate(int decimals, const QString& suffix, QObject* parent) : QStyledItemDelegate(parent), _decimals(decimals), _suffix(suffix) {}
+
+    QString displayText(const QVariant& value, const QLocale&) const override
+    {
+        bool ok = false;
+        const double number = value.toDouble(&ok);
+        return ok ? QString::number(number, 'f', _decimals) + _suffix : QString();
+    }
+
+protected:
+    void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override
+    {
+        QStyledItemDelegate::initStyleOption(option, index);
+        option->displayAlignment = Qt::AlignRight | Qt::AlignVCenter;
+    }
+
+private:
+    int _decimals;
+    QString _suffix;
+};
+
 // ============================================================================================================
 //  Gene table installation
 // ============================================================================================================
@@ -2423,6 +2652,15 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     // (findChild<>() cannot be used here: the delegate has no Q_OBJECT macro, so it is looked up through the view)
     if (!dynamic_cast<TraitCorrelationBarDelegate*>(geneTableView->itemDelegateForColumn(kTraitCorrelationColumn))) {
         geneTableView->setItemDelegateForColumn(kTraitCorrelationColumn, new TraitCorrelationBarDelegate(geneTableView));
+    }
+    // further statistics columns (hidden until chosen in the column chooser): fixed decimals, sorted numerically
+    geneTableView->setColumnWidth(kBestPositionColumn, 70);
+    for (const auto& columnFormat : { std::make_tuple(kMeanDifferentialColumn, 2, QString()), std::make_tuple(kPositiveSpeciesColumn, 1, QString("%")), std::make_tuple(kMeanExpressionColumn, 2, QString()) }) {
+        const int formatColumn = std::get<0>(columnFormat);
+        geneTableView->setColumnWidth(formatColumn, 80);
+        if (!dynamic_cast<FixedDecimalDelegate*>(geneTableView->itemDelegateForColumn(formatColumn))) {
+            geneTableView->setItemDelegateForColumn(formatColumn, new FixedDecimalDelegate(std::get<1>(columnFormat), std::get<2>(columnFormat), geneTableView));
+        }
     }
     geneTableView->setColumnWidth(kWeightedAppearanceColumn, WeightedAppearanceBarDelegate::defaultColumnWidth());
     if (!dynamic_cast<WeightedAppearanceBarDelegate*>(geneTableView->itemDelegateForColumn(kWeightedAppearanceColumn))) {
@@ -2822,16 +3060,30 @@ namespace {
     }
 
     /** Table cell with a bar: DisplayRole = text, UserRole = raw number (used for sorting), DecorationRole = bar. */
-    QStandardItem* makeBarItem(const QVariant& sortValue, const QString& text, const QPixmap& bar) {
+    QStandardItem* makeBarItem(const QVariant& sortValue, const QString& text, const QPixmap& bar, const QString& tooltip = QString()) {
         auto* item = new QStandardItem();
         item->setData(sortValue, Qt::UserRole);
         item->setData(QVariant(text), Qt::DisplayRole);
         item->setData(QVariant(bar), Qt::DecorationRole);
+        if (!tooltip.isEmpty()) {
+            item->setData(tooltip, Qt::ToolTipRole);
+        }
+        return item;
+    }
+
+    /** Table cell with plain text: DisplayRole = text, UserRole = raw number (an invalid variant sorts first). */
+    QStandardItem* makeTextItem(const QVariant& sortValue, const QString& text, const QString& tooltip = QString()) {
+        auto* item = new QStandardItem();
+        item->setData(sortValue, Qt::UserRole);
+        item->setData(QVariant(text), Qt::DisplayRole);
+        if (!tooltip.isEmpty()) {
+            item->setData(tooltip, Qt::ToolTipRole);
+        }
         return item;
     }
 
     /** Species cell: readable name, species icon (if there is one) and tooltip; UserRole keeps the raw species name. */
-    QStandardItem* makeSpeciesItem(const QString& species) {
+    QStandardItem* makeSpeciesItem(const QString& species, const QString& extraText = QString()) {
         QString displayName = species;
         displayName.replace("_", " ");
 
@@ -2839,10 +3091,14 @@ namespace {
         const QString iconPath = ":/speciesicons/SpeciesIcons/" + species + ".svg";
         if (QFile::exists(iconPath)) {
             item->setData(QIcon(iconPath), Qt::DecorationRole);
-            item->setData(QString("<img src='%1' width='16' height='16'/> %2").arg(iconPath, displayName), Qt::ToolTipRole);
+            QString html = QString("<img src='%1' width='16' height='16'/> <b>%2</b>").arg(iconPath, displayName.toHtmlEscaped());
+            if (!extraText.isEmpty()) {
+                html += "<br>" + extraText.toHtmlEscaped().replace("\n", "<br>");
+            }
+            item->setData(html, Qt::ToolTipRole);
         }
         else {
-            item->setData(displayName, Qt::ToolTipRole);
+            item->setData(extraText.isEmpty() ? displayName : displayName + "\n" + extraText, Qt::ToolTipRole);
         }
         item->setData(species, Qt::UserRole);
         return item;
@@ -2879,6 +3135,72 @@ namespace {
 //  Selection details table: "count" view (shown while no gene is selected)
 // ============================================================================================================
 
+// ============================================================================================================
+//  Species table: visible columns (header context menu)
+// ============================================================================================================
+
+void XSCGeneDetectPlugin::applyDetailsColumnVisibility()
+{
+    QTableView* view = _settingsAction.getSelectionDetailsTable();
+    QAbstractItemModel* model = view ? view->model() : nullptr;
+    if (!model) {
+        return;
+    }
+
+    // The two layouts of the table (counts / statistics) have their own choice, keyed by the number of columns.
+    // The extra statistics columns of the statistics layout start hidden.
+    const int count = model->columnCount();
+    if (!_detailsHiddenColumns.contains(count)) {
+        QSet<int> defaults;
+        if (count == 13) {
+            defaults = { 9, 10, 11, 12 };
+        }
+        _detailsHiddenColumns.insert(count, defaults);
+    }
+    const QSet<int>& hidden = _detailsHiddenColumns[count];
+    for (int column = 0; column < count; ++column) {
+        view->setColumnHidden(column, hidden.contains(column) || column == _detailsRedundantColumn);
+    }
+}
+
+void XSCGeneDetectPlugin::showDetailsColumnMenu(const QPoint& globalPosition)
+{
+    QTableView* view = _settingsAction.getSelectionDetailsTable();
+    QAbstractItemModel* model = view ? view->model() : nullptr;
+    if (!model || model->columnCount() < 2) {
+        return;
+    }
+    applyDetailsColumnVisibility(); // makes sure the choice for this layout exists
+
+    const int count = model->columnCount();
+    QMenu menu;
+    menu.addSection("Visible columns");
+    for (int column = 1; column < count; ++column) { // the species column always stays
+        if (column == _detailsRedundantColumn) {
+            continue;
+        }
+        QString name = model->headerData(column, Qt::Horizontal).toString();
+        name.replace("\n", " ");
+        QAction* action = menu.addAction(name);
+        action->setCheckable(true);
+        action->setChecked(!_detailsHiddenColumns[count].contains(column));
+        connect(action, &QAction::toggled, this, [this, count, column](bool visible) {
+            if (visible) {
+                _detailsHiddenColumns[count].remove(column);
+            }
+            else {
+                _detailsHiddenColumns[count].insert(column);
+            }
+            applyDetailsColumnVisibility();
+            });
+    }
+    menu.exec(globalPosition);
+}
+
+// ============================================================================================================
+//  Species table: "count" view (shown while no gene is selected)
+// ============================================================================================================
+
 void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 {
     const auto& speciesCountMap = _settingsAction.getSelectedSpeciesCellCountMap();
@@ -2890,39 +3212,64 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 
         bool singleColumn = false;
         const QString middleTitle = middleFractionTitle(_settingsAction.getCurrentHierarchyItemsMiddleForTable(), singleColumn);
-        model->setHorizontalHeaderLabels({ "Species", "Fraction in Neuronal", "Fraction in " + middleTitle, "Count of Selected", "Count of All" });
+        model->setHorizontalHeaderLabels({ "Species", "Fraction in Neuronal", "Fraction in " + middleTitle, "Count of Selected", "Count of All",
+                                           "Share of\nSelection (%)", "Selected Cells\nof Species (%)" });
+        model->setHeaderData(0, Qt::Horizontal, "Species. Right-click a column header to show or hide columns.", Qt::ToolTipRole);
+        model->setHeaderData(1, Qt::Horizontal, "Selected cells of the species inside the included top clusters, as a percentage of all its cells in those clusters.", Qt::ToolTipRole);
+        model->setHeaderData(2, Qt::Horizontal, "Selected cells of the species inside the included top clusters, as a percentage of its cells in the " + middleTitle + " clusters that contain selected cells.", Qt::ToolTipRole);
+        model->setHeaderData(3, Qt::Horizontal, "Number of selected cells of the species.", Qt::ToolTipRole);
+        model->setHeaderData(4, Qt::Horizontal, "Number of cells of the species (selected and not selected).", Qt::ToolTipRole);
+        model->setHeaderData(5, Qt::Horizontal, "Composition of the selection: the percentage of all selected cells that belong to the species.", Qt::ToolTipRole);
+        model->setHeaderData(6, Qt::Horizontal, "Coverage: the percentage of the cells of the species that are selected.", Qt::ToolTipRole);
 
-        // ---- pass 1: value range of every bar column ----
+        // ---- pass 1: value range of every bar column and the size of the selection ----
         ValueRange topRange, middleRange, selectedRange, totalRange;
+        double allSelectedCells = 0.0;
         for (const auto& [species, details] : speciesCountMap)
         {
             topRange.include(percentOf(details.countAbundanceNumerator, details.abundanceTop));
             middleRange.include(percentOf(details.countAbundanceNumerator, details.abundanceMiddle));
             selectedRange.include(static_cast<float>(details.selectedCellsCount));
             totalRange.include(static_cast<float>(details.selectedCellsCount + details.nonSelectedCellsCount));
+            allSelectedCells += details.selectedCellsCount;
         }
 
         // ---- pass 2: one row per species ----
         for (const auto& [species, details] : speciesCountMap)
         {
+            const int selectedCellsCount = details.selectedCellsCount;
+            const int total = details.selectedCellsCount + details.nonSelectedCellsCount;
+            const double share = GeneStats::percent(selectedCellsCount, allSelectedCells);
+            const double coverage = GeneStats::percent(selectedCellsCount, total);
+
             QList<QStandardItem*> rowItems;
-            rowItems << makeSpeciesItem(species);
+            rowItems << makeSpeciesItem(species, QString("%1 cells, %2 selected (%3% of the species)").arg(total).arg(selectedCellsCount).arg(coverage, 0, 'f', 1));
 
             const float topAbundance = percentOf(details.countAbundanceNumerator, details.abundanceTop);
             rowItems << makeBarItem(topAbundance, QString::number(topAbundance, 'f', 2),
-                makeBarPixmap(60, 20, getNormalizedSize(topAbundance, topRange.min, topRange.max)));
+                makeBarPixmap(60, 20, getNormalizedSize(topAbundance, topRange.min, topRange.max)),
+                QString("%1 selected cells of the species lie in the included top clusters, which hold %2 of its cells: %3%")
+                .arg(details.countAbundanceNumerator).arg(details.abundanceTop).arg(topAbundance, 0, 'f', 2));
 
             const float middleAbundance = percentOf(details.countAbundanceNumerator, details.abundanceMiddle);
             rowItems << makeBarItem(middleAbundance, QString::number(middleAbundance, 'f', 2),
-                makeBarPixmap(80, 20, getNormalizedSize(middleAbundance, middleRange.min, middleRange.max)));
+                makeBarPixmap(80, 20, getNormalizedSize(middleAbundance, middleRange.min, middleRange.max)),
+                QString("%1 selected cells lie in the included top clusters; the %2 clusters that contain selected cells hold %3 cells of the species: %4%")
+                .arg(details.countAbundanceNumerator).arg(middleTitle).arg(details.abundanceMiddle).arg(middleAbundance, 0, 'f', 2));
 
-            const int selectedCellsCount = details.selectedCellsCount;
             rowItems << makeBarItem(selectedCellsCount, QString::number(selectedCellsCount),
-                makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(selectedCellsCount), selectedRange.min, selectedRange.max)));
+                makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(selectedCellsCount), selectedRange.min, selectedRange.max)),
+                QString("%1 cells of the species are selected: %2% of the species and %3% of the whole selection.")
+                .arg(selectedCellsCount).arg(coverage, 0, 'f', 1).arg(share, 0, 'f', 1));
 
-            const int total = details.selectedCellsCount + details.nonSelectedCellsCount;
             rowItems << makeBarItem(total, QString::number(total),
-                makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(total), totalRange.min, totalRange.max)));
+                makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(total), totalRange.min, totalRange.max)),
+                QString("%1 cells in total: %2 selected and %3 not selected.").arg(total).arg(selectedCellsCount).arg(details.nonSelectedCellsCount));
+
+            rowItems << makeTextItem(share, QString::number(share, 'f', 1),
+                QString("%1 of the %2 selected cells (%3%) belong to this species.").arg(selectedCellsCount).arg(static_cast<long long>(allSelectedCells)).arg(share, 0, 'f', 1));
+            rowItems << makeTextItem(coverage, QString::number(coverage, 'f', 1),
+                QString("%1 of the %2 cells of this species (%3%) are selected.").arg(selectedCellsCount).arg(total).arg(coverage, 0, 'f', 1));
 
             model->appendRow(rowItems);
         }
@@ -2934,14 +3281,14 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 
         detailsTable->setSelectionMode(QAbstractItemView::NoSelection);
         detailsTable->verticalHeader()->hide();
-        if (singleColumn)
-        {
-            detailsTable->hideColumn(2);
-        }
         detailsTable->setColumnWidth(1, 70);
         detailsTable->setColumnWidth(2, 90);
         detailsTable->setColumnWidth(3, 70);
         detailsTable->setColumnWidth(4, 70);
+        detailsTable->setColumnWidth(5, 80);
+        detailsTable->setColumnWidth(6, 90);
+        _detailsRedundantColumn = singleColumn ? 2 : -1;
+        applyDetailsColumnVisibility();
         detailsTable->update();
     }
 
@@ -2949,7 +3296,7 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 }
 
 // ============================================================================================================
-//  Selection details table: "statistics" view (shown for the clicked gene)
+//  Species table: "statistics" view (shown for the clicked gene)
 // ============================================================================================================
 
 void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, SpeciesDetailsStats> statisticsValues, QStringList selectedSpecies)
@@ -2967,10 +3314,35 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
         bool singleColumn = false;
         const QString middleTitle = middleFractionTitle(_settingsAction.getCurrentHierarchyItemsMiddleForTable(), singleColumn);
-        model->setHorizontalHeaderLabels({ "Species", "Mean Gene Differential Expression", "Gene Appearance Rank", "Fraction in Neuronal", "Fraction in " + middleTitle, "Count of Selected", "Mean Gene Expression of Selected", "Count of Non Selected", "Mean Gene Expression of Non Selected" });
+        model->setHorizontalHeaderLabels({ "Species", "Mean Gene Differential Expression", "Gene Appearance Rank", "Fraction in Neuronal", "Fraction in " + middleTitle,
+                                           "Count of Selected", "Mean Gene Expression of Selected", "Count of Non Selected", "Mean Gene Expression of Non Selected",
+                                           "Log2\nFold Change", "Selected\nCells (%)", "Rank\nPercentile (%)", "Rank\nWeight" });
+
+        // header tooltips: what every column means
+        const QStringList headerTips = {
+            "Species. Right-click a column header to show or hide columns (the last four statistics are hidden by default).",
+            "Mean expression of the gene in the selected cells minus its mean expression in the other cells of the species.",
+            "Rank of the gene among all genes of the species by differential expression (1 = strongest). For the Negative type the rank counts from the other end.",
+            "Selected cells of the species inside the included top clusters, as a percentage of all its cells in those clusters.",
+            "Selected cells inside the included top clusters, as a percentage of the species' cells in the " + middleTitle + " clusters that contain selected cells.",
+            "Number of selected cells of the species.",
+            "Mean expression of the gene in the selected cells of the species.",
+            "Number of cells of the species that are not selected.",
+            "Mean expression of the gene in the cells of the species that are not selected.",
+            "log2 of (mean in the selected cells / mean in the other cells). Undefined (n/a) when a mean is not positive. Meaningful for linear-scale expression; for log-transformed data read the differential instead.",
+            "Percentage of the cells of the species that are selected.",
+            "Where the gene stands among all genes of the species: position / number of genes in percent (small = strong, 1% = in the top 1%).",
+            "Weight of the gene's position in the top-N list: 1 for position 1 down to 1/N for position N; 0 outside the top-N or when the mean in the selected cells is not positive."
+        };
+        for (int column = 0; column < headerTips.size(); ++column) {
+            model->setHeaderData(column, Qt::Horizontal, headerTips[column], Qt::ToolTipRole);
+        }
 
         const int numofGenes = _settingsAction.getTopNGenesFilter().getMaximum();
         const int topNValue = _settingsAction.getTopNGenesFilter().getValue();
+        const int topN = _settingsAction.weightedTopN();
+        const bool negativeType = _settingsAction.weightedNegative();
+        const QString orderingName = _settingsAction.getTypeofTopNGenes().getCurrentText();
 
         // ---- pass 1: value range of every bar column ----
         ValueRange differenceRange, rankRange, topRange, middleRange, selectedCountRange, meanSelectedRange, nonSelectedCountRange, meanNonSelectedRange;
@@ -2994,18 +3366,33 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
         // ---- pass 2: one row per species ----
         for (const auto& [species, details] : speciesCountMap)
         {
-            QList<QStandardItem*> rowItems;
-            rowItems << makeSpeciesItem(species);
-
             const auto it = statisticsValues.find(species);
+            QList<QStandardItem*> rowItems;
+
             if (it != statisticsValues.end()) {
                 const auto& stats = it->second;
 
-                // Mean gene differential expression: centred bar (right = higher in the selection)
+                // values shared by several cells
+                const double allCells = static_cast<double>(stats.countSelected) + static_cast<double>(stats.countNonSelected);
                 const float difference = stats.meanSelected - stats.meanNonSelected;
+                const int listLength = _settingsAction.speciesGeneListLength(species);
+                const int position = GeneStats::positionFromRank(stats.rank, listLength, negativeType);
+                const double percentile = GeneStats::percent(position, listLength);
+                const bool topGene = position >= 1 && position <= topN && stats.meanSelected > 0;
+                const double weight = topGene ? GeneStats::rankWeight(position, topN) : 0.0;
+                double log2Fold = 0.0;
+                const bool haveFold = GeneStats::log2FoldChange(stats.meanSelected, stats.meanNonSelected, log2Fold);
+                const double selectedPercent = GeneStats::percent(stats.countSelected, allCells);
+
+                rowItems << makeSpeciesItem(species, QString("%1 cells, %2 selected (%3%)").arg(static_cast<long long>(allCells)).arg(stats.countSelected).arg(selectedPercent, 0, 'f', 1));
+
+                // Mean gene differential expression: centred bar (right = higher in the selection)
                 const float differenceLength = getNormalizedSizePosNeg(difference, differenceRange.min, differenceRange.max);
                 rowItems << makeBarItem(difference, QString::number(difference, 'f', 2),
-                    makeCenteredBarPixmap(75, 25, differenceLength, difference >= 0));
+                    makeCenteredBarPixmap(75, 25, differenceLength, difference >= 0),
+                    QString("Mean differential expression = mean in the selected cells - mean in the other cells\n= %1 - %2 = %3\n%4")
+                    .arg(stats.meanSelected, 0, 'f', 4).arg(stats.meanNonSelected, 0, 'f', 4).arg(difference, 0, 'f', 4)
+                    .arg(difference > 0 ? "Higher in the selection." : (difference < 0 ? "Lower in the selection." : "No difference.")));
 
                 // Gene appearance rank: logarithmic bar (rank 1 = longest)
                 const int rank = stats.rank;
@@ -3018,33 +3405,72 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                     const float logofMaxRank = std::log(rankRange.max) / logBase;
                     rankLength = qBound(0.0f, getNormalizedSizeRank(logOfNumofGenes - logOfRank, logofMinRank, logofMaxRank), 100.0f);
                 }
-                rowItems << makeBarItem(rank, QString::number(rank), makeBarPixmap(75, 20, rankLength));
+                QString rankTip;
+                if (position > 0) {
+                    rankTip = QString("Position %1 of %2 genes of the species (%3 ordering): the top %4% of its genes.\n").arg(position).arg(listLength).arg(orderingName).arg(percentile, 0, 'f', 2);
+                    if (negativeType) {
+                        rankTip += QString("(The rank shown, %1, counts from the other end for the Negative type.)\n").arg(rank);
+                    }
+                    rankTip += topGene ? QString("It is a top-N gene of this species (N = %1); weight %2.").arg(topN).arg(weight, 0, 'f', 3)
+                        : QString("It is not a top-N gene of this species (N = %1, a positive mean in the selected cells is required).").arg(topN);
+                }
+                else {
+                    rankTip = QString("Rank %1.").arg(rank);
+                }
+                rowItems << makeBarItem(rank, QString::number(rank), makeBarPixmap(75, 20, rankLength), rankTip);
 
                 // Fractions of the species' cells
                 const float topAbundance = percentOf(stats.countAbundanceNumerator, stats.abundanceTop);
                 rowItems << makeBarItem(topAbundance, QString::number(topAbundance, 'f', 2),
-                    makeBarPixmap(60, 20, getNormalizedSize(topAbundance, topRange.min, topRange.max)));
+                    makeBarPixmap(60, 20, getNormalizedSize(topAbundance, topRange.min, topRange.max)),
+                    QString("%1 selected cells of the species lie in the included top clusters, which hold %2 of its cells: %3%")
+                    .arg(stats.countAbundanceNumerator).arg(stats.abundanceTop).arg(topAbundance, 0, 'f', 2));
 
                 const float middleAbundance = percentOf(stats.countAbundanceNumerator, stats.abundanceMiddle);
                 rowItems << makeBarItem(middleAbundance, QString::number(middleAbundance, 'f', 2),
-                    makeBarPixmap(80, 20, getNormalizedSize(middleAbundance, middleRange.min, middleRange.max)));
+                    makeBarPixmap(80, 20, getNormalizedSize(middleAbundance, middleRange.min, middleRange.max)),
+                    QString("%1 selected cells lie in the included top clusters; the %2 clusters that contain selected cells hold %3 cells of the species: %4%")
+                    .arg(stats.countAbundanceNumerator).arg(middleTitle).arg(stats.abundanceMiddle).arg(middleAbundance, 0, 'f', 2));
 
                 // Selected cells: count and mean expression
                 rowItems << makeBarItem(stats.countSelected, QString::number(stats.countSelected),
-                    makeBarPixmap(55, 20, getNormalizedSize(static_cast<float>(stats.countSelected), selectedCountRange.min, selectedCountRange.max)));
+                    makeBarPixmap(55, 20, getNormalizedSize(static_cast<float>(stats.countSelected), selectedCountRange.min, selectedCountRange.max)),
+                    QString("%1 of the %2 cells of the species are selected (%3%).").arg(stats.countSelected).arg(static_cast<long long>(allCells)).arg(selectedPercent, 0, 'f', 1));
 
+                QString meanSelectedTip = QString("Mean expression in the %1 selected cells: %2\nIn the %3 other cells: %4")
+                    .arg(stats.countSelected).arg(stats.meanSelected, 0, 'f', 4).arg(stats.countNonSelected).arg(stats.meanNonSelected, 0, 'f', 4);
+                if (stats.meanNonSelected > 0 && stats.meanSelected > 0) {
+                    meanSelectedTip += QString("\nRatio selected / other: %1").arg(stats.meanSelected / stats.meanNonSelected, 0, 'f', 2);
+                }
                 rowItems << makeBarItem(stats.meanSelected, QString::number(stats.meanSelected, 'f', 2),
-                    makeBarPixmap(70, 20, getNormalizedSize(stats.meanSelected, meanSelectedRange.min, meanSelectedRange.max)));
+                    makeBarPixmap(70, 20, getNormalizedSize(stats.meanSelected, meanSelectedRange.min, meanSelectedRange.max)), meanSelectedTip);
 
                 // Non selected cells: count and mean expression
                 rowItems << makeBarItem(stats.countNonSelected, QString::number(stats.countNonSelected),
-                    makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(stats.countNonSelected), nonSelectedCountRange.min, nonSelectedCountRange.max)));
+                    makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(stats.countNonSelected), nonSelectedCountRange.min, nonSelectedCountRange.max)),
+                    QString("%1 cells of the species are not selected.").arg(stats.countNonSelected));
 
                 rowItems << makeBarItem(stats.meanNonSelected, QString::number(stats.meanNonSelected, 'f', 2),
-                    makeBarPixmap(75, 20, getNormalizedSize(stats.meanNonSelected, meanNonSelectedRange.min, meanNonSelectedRange.max)));
+                    makeBarPixmap(75, 20, getNormalizedSize(stats.meanNonSelected, meanNonSelectedRange.min, meanNonSelectedRange.max)),
+                    QString("Mean expression in the %1 cells that are not selected: %2").arg(stats.countNonSelected).arg(stats.meanNonSelected, 0, 'f', 4));
+
+                // Further statistics (hidden by default; right-click the header to show them)
+                rowItems << makeTextItem(haveFold ? QVariant(log2Fold) : QVariant(), haveFold ? QString::number(log2Fold, 'f', 2) : QString("n/a"),
+                    haveFold ? QString("log2(%1 / %2) = %3: the gene is %4 times %5 in the selection.")
+                    .arg(stats.meanSelected, 0, 'f', 3).arg(stats.meanNonSelected, 0, 'f', 3).arg(log2Fold, 0, 'f', 3)
+                    .arg(std::pow(2.0, std::abs(log2Fold)), 0, 'f', 2).arg(log2Fold >= 0 ? "higher" : "lower")
+                    : QString("Undefined: a mean is not positive, so the ratio cannot be taken."));
+                rowItems << makeTextItem(selectedPercent, QString::number(selectedPercent, 'f', 1),
+                    QString("%1 of the %2 cells of the species are selected.").arg(stats.countSelected).arg(static_cast<long long>(allCells)));
+                rowItems << makeTextItem(position > 0 ? QVariant(percentile) : QVariant(), position > 0 ? QString::number(percentile, 'f', 2) : QString("n/a"),
+                    position > 0 ? QString("Position %1 of %2 genes: the top %3% of the genes of this species.").arg(position).arg(listLength).arg(percentile, 0, 'f', 2) : QString("Position unknown."));
+                rowItems << makeTextItem(weight, QString::number(weight, 'f', 3),
+                    topGene ? QString("(N - position + 1) / N = (%1 - %2 + 1) / %1 = %3").arg(topN).arg(position).arg(weight, 0, 'f', 3)
+                    : QString("0: not a top-N gene of this species."));
             }
             else {
                 // species without statistics for this gene
+                rowItems << makeSpeciesItem(species);
                 for (int column = 1; column < model->columnCount(); ++column) {
                     rowItems << new QStandardItem("N/A");
                 }
@@ -3061,9 +3487,6 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
         detailsTable->setSelectionMode(QAbstractItemView::SingleSelection);
         detailsTable->verticalHeader()->hide();
-        if (singleColumn) {
-            detailsTable->hideColumn(4);
-        }
         detailsTable->setColumnWidth(1, 85);
         detailsTable->setColumnWidth(2, 85);
         detailsTable->setColumnWidth(3, 70);
@@ -3072,6 +3495,11 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
         detailsTable->setColumnWidth(6, 80);
         detailsTable->setColumnWidth(7, 70);
         detailsTable->setColumnWidth(8, 85);
+        for (int column = 9; column <= 12; ++column) {
+            detailsTable->setColumnWidth(column, 75);
+        }
+        _detailsRedundantColumn = singleColumn ? 4 : -1;
+        applyDetailsColumnVisibility();
         detailsTable->update();
         emit model->layoutChanged();
 

@@ -10,6 +10,8 @@
 #include <QWidget>
 #include <QModelIndex>
 #include <QPointer>
+#include <QHash>
+#include <QSet>
 #include <QDialog>
 #include <QLabel>
 #include <QStandardItemModel>
@@ -68,6 +70,12 @@ public:
      */
     bool showGeneInSpeciesEmbedding(const QString& gene, const QStringList& speciesNames);
 
+    /** Show/hide the columns of the species table according to the user's choice (header context menu). */
+    void applyDetailsColumnVisibility();
+
+    /** Context menu of the species table header: choose the visible columns. */
+    void showDetailsColumnMenu(const QPoint& globalPosition);
+
     /** Open (or bring to front) the plot of the expression of the selected gene against the trait. */
     void showTraitPlot();
 
@@ -103,6 +111,9 @@ protected:
     mv::Dataset<Points> _pointsDataset;
     mv::Dataset<Clusters> _clusterDataset;
     mv::Dataset<Points> _lowDimTSNEDataset;
+
+    QHash<int, QSet<int>> _detailsHiddenColumns;   /** hidden columns of the species table, per layout (keyed by its number of columns) */
+    int _detailsRedundantColumn = -1;              /** column hidden because it repeats another one (middle fraction), -1: none */
 
     QPointer<QDialog> _traitPlotDialog;   /** the plots window (a TraitPlotDialog, see the .cpp; created on first use) */
 

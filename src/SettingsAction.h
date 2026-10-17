@@ -44,6 +44,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <random>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <QSet>
@@ -218,6 +219,49 @@ inline constexpr int kWeightedPValueRole = Qt::UserRole + 5;       /** weighted 
 inline constexpr int kWeightedFdrRole = Qt::UserRole + 6;       /** weighted appearance column: FDR of the rank consistency */
 /** Column of the gene table that holds the weighted appearance (rank weighted number of species). */
 inline constexpr int kWeightedAppearanceColumn = 5;
+/** Further statistics columns of the gene table (hidden by default; shown through the column chooser). */
+inline constexpr int kBestPositionColumn = 6;        /** best (smallest) position of the gene in the top-N ordering of any species */
+inline constexpr int kMeanDifferentialColumn = 7;    /** mean differential expression over all species */
+inline constexpr int kPositiveSpeciesColumn = 8;     /** percentage of species in which the differential expression is positive */
+inline constexpr int kMeanExpressionColumn = 9;      /** mean expression in the selected cells, averaged over the species */
+
+/** Small formulas shared by the tables, tooltips and exports. */
+namespace GeneStats {
+
+    /** log2(mean selected / mean non-selected); false when a mean is not positive (the ratio is undefined then). */
+    inline bool log2FoldChange(double meanSelected, double meanNonSelected, double& result) {
+        if (meanSelected <= 0.0 || meanNonSelected <= 0.0) {
+            return false;
+        }
+        result = std::log2(meanSelected / meanNonSelected);
+        return true;
+    }
+
+    /** part / whole in percent (0 when whole is 0). */
+    inline double percent(double part, double whole) {
+        return whole != 0.0 ? part / whole * 100.0 : 0.0;
+    }
+
+    /**
+     * Position (1 = strongest) of a gene in the top-N ordering of a species, from the stored rank. The stored rank counts from
+     * the other end for the "Negative" type (see findTopNGenesPerCluster). 0 when it cannot be determined.
+     */
+    inline int positionFromRank(int storedRank, int listLength, bool negativeType) {
+        if (storedRank < 1 || listLength < 1) {
+            return 0;
+        }
+        return negativeType ? listLength - storedRank + 1 : storedRank;
+    }
+
+    /** Weight of an appearance: 1 for position 1 down to 1/topN for position topN; 0 outside the top-N. */
+    inline double rankWeight(int position, int topN) {
+        if (topN <= 0 || position < 1 || position > topN) {
+            return 0.0;
+        }
+        return static_cast<double>(topN - position + 1) / static_cast<double>(topN);
+    }
+
+} // namespace GeneStats
 
 /** The data behind the last trait correlation: one row per species of the comparison (kept for the plot and the matrix export). */
 struct TraitMatrix {
@@ -468,6 +512,11 @@ public: // Action getters
 
     /** Worker count for tasks that each need roughly \p pointsPerWorker x 256 floats of scratch memory (respects the settings). */
     int parallelWorkers(size_t pointsPerWorker) const;
+
+    /** Number of genes ranked in \p species (length of its top-N ordering); 0 when unknown. */
+    int speciesGeneListLength(const QString& species) const;
+    int  weightedTopN() const { return _weightedTopN; }              /** top-N the tables were computed with */
+    bool weightedNegative() const { return _weightedNegative; }      /** ... with the "Negative" type */
 
     /** FDR below which trait correlations and rank consistencies count as significant. */
     double significanceLevel() const { return static_cast<double>(_traitFdrThreshold.getValue()); }

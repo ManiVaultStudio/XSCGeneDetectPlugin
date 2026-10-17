@@ -14,6 +14,12 @@ void SettingsAction::clearTemporaryDatasetHandles()
     _geneSimilarityClusterColoring = Dataset<Clusters>();
 }
 
+int SettingsAction::speciesGeneListLength(const QString& species) const
+{
+    const auto it = _clusterNameToGeneNameToExpressionValue.find(species);
+    return it != _clusterNameToGeneNameToExpressionValue.end() ? static_cast<int>(it->second.size()) : 0;
+}
+
 void SettingsAction::removeTemporaryDatasets()
 {
     // The t-SNE analysis plugins that produced the datasets are destroyed first: removing a dataset does not necessarily
@@ -116,7 +122,7 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     // ---- 1. Model skeleton: one row per gene of the dataset ------------------------------------------------
     QStandardItemModel* model = new QStandardItemModel();
 
-    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait\nCorrelation", "Weighted\nAppearance" }; // two lines so the headers fit the narrow bar columns
+    _initColumnNames = { "ID", "Species \nAppearance", "Gene Appearance Species Names", "Statistics", "Trait\nCorrelation", "Weighted\nAppearance", "Best\nPosition", "Mean\nDifferential", "Positive\nSpecies (%)", "Mean\nExpression" }; // two lines so the headers fit the narrow bar columns
     const int geneCount = static_cast<int>(_totalGeneList.size());
     model->setColumnCount(_initColumnNames.size());
     model->setRowCount(geneCount);
@@ -127,7 +133,14 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     _hiddenShowncolumns.setOptions(headers);
     _hiddenShowncolumns.setSelectedOptions({ headers[0], headers[1], headers[kWeightedAppearanceColumn], headers[kTraitCorrelationColumn] });
 
-    model->setHeaderData(1, Qt::Horizontal, "Number of species in which the gene is a top-N gene (all appearances count the same).", Qt::ToolTipRole);
+    model->setHeaderData(0, Qt::Horizontal, "Gene. Hover a gene for a summary of its statistics across the species.", Qt::ToolTipRole);
+    model->setHeaderData(1, Qt::Horizontal, "Number of species in which the gene is a top-N gene (all appearances count the same).\nSee Weighted Appearance for a version that weighs the positions.", Qt::ToolTipRole);
+    model->setHeaderData(2, Qt::Horizontal, "The species in which the gene is a top-N gene. Hover a cell for the position of the gene in each of them.", Qt::ToolTipRole);
+    model->setHeaderData(3, Qt::Horizontal, "Statistics of the gene in every species (one line per species). Hover a cell for a readable table.", Qt::ToolTipRole);
+    model->setHeaderData(kBestPositionColumn, Qt::Horizontal, "Best (smallest) position of the gene in the top-N ordering of any species: 1 = the strongest gene of a species.\nShown through the column chooser.", Qt::ToolTipRole);
+    model->setHeaderData(kMeanDifferentialColumn, Qt::Horizontal, "Mean differential expression over ALL species: mean of (mean expression in the selected cells - mean expression in the other cells).\nShown through the column chooser.", Qt::ToolTipRole);
+    model->setHeaderData(kPositiveSpeciesColumn, Qt::Horizontal, "Percentage of species in which the gene is higher in the selected cells than in the other cells (direction consistency).\nShown through the column chooser.", Qt::ToolTipRole);
+    model->setHeaderData(kMeanExpressionColumn, Qt::Horizontal, "Mean expression in the selected cells, averaged over the species.\nShown through the column chooser.", Qt::ToolTipRole);
     model->setHeaderData(kTraitCorrelationColumn, Qt::Horizontal, "Correlation of the gene's expression with the trait across species (see the Trait correlation group).\nHover a cell for the statistics.", Qt::ToolTipRole);
     model->setHeaderData(kWeightedAppearanceColumn, Qt::Horizontal,
         "Weighted appearance: the number of species in which the gene is a top-N gene, but every appearance is weighted by its position:\n"
@@ -173,6 +186,10 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     std::vector<double> weightedAppearance(static_cast<size_t>(geneCount), 0.0);
     std::vector<float> rankConsistencyP(static_cast<size_t>(geneCount), 1.0f);
     std::vector<QString> bestPositionsText(static_cast<size_t>(geneCount));
+    std::vector<int> bestPosition(static_cast<size_t>(geneCount), 0);               // 0: the gene has no position
+    std::vector<double> meanDifferential(static_cast<size_t>(geneCount), 0.0);      // over all species
+    std::vector<double> positiveSpeciesPercent(static_cast<size_t>(geneCount), 0.0);
+    std::vector<double> meanExpression(static_cast<size_t>(geneCount), 0.0);
     auto geneRanges = splitGeneRanges(static_cast<size_t>(geneCount), static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
     QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
         for (size_t row = range.begin; row < range.end; ++row) {
@@ -189,7 +206,14 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             std::vector<double> normalizedRanks;
             std::vector<std::pair<int, QString>> positions;
             normalizedRanks.reserve(static_cast<size_t>(statsIt->size()));
+            double differenceSum = 0.0, expressionSum = 0.0;
+            int positiveSpecies = 0;
             for (const auto& speciesStats : *statsIt) {
+                const double difference = static_cast<double>(speciesStats.second.meanSelected) - static_cast<double>(speciesStats.second.meanNonSelected);
+                differenceSum += difference;
+                expressionSum += static_cast<double>(speciesStats.second.meanSelected);
+                positiveSpecies += difference > 0.0 ? 1 : 0;
+
                 const int storedRank = (rankIt != geneToSpeciesRank.constEnd()) ? rankIt->value(speciesStats.first) : 0;
                 const auto lengthIt = speciesListLength.find(speciesStats.first);
                 if (storedRank < 1 || lengthIt == speciesListLength.end()) {
@@ -209,7 +233,13 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             weightedAppearance[row] = speciesTotal > 0.0 ? weightSum / speciesTotal : 0.0;
             rankConsistencyP[row] = static_cast<float>(robustRankAggregationPValue(normalizedRanks));
 
+            const double speciesSeen = static_cast<double>(statsIt->size());
+            meanDifferential[row] = speciesSeen > 0.0 ? differenceSum / speciesSeen : 0.0;
+            meanExpression[row] = speciesSeen > 0.0 ? expressionSum / speciesSeen : 0.0;
+            positiveSpeciesPercent[row] = GeneStats::percent(positiveSpecies, speciesSeen);
+
             std::sort(positions.begin(), positions.end());
+            bestPosition[row] = positions.empty() ? 0 : positions.front().first;
             QStringList best;
             for (size_t k = 0; k < positions.size() && k < 5; ++k) {
                 QString name = positions[k].second;
@@ -307,6 +337,19 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             .arg(static_cast<double>(rankConsistencyP[static_cast<size_t>(rowIndex)]), 0, 'g', 3)
             .arg(static_cast<double>(rankConsistencyFdr[static_cast<size_t>(rowIndex)]), 0, 'g', 3), Qt::ToolTipRole);
         model->setItem(rowIndex, kWeightedAppearanceColumn, weightedItem);
+
+        // Columns 6-9: further statistics (numeric roles keep sorting numeric; the tooltips are built on demand when hovering)
+        const auto numberItem = [](const QVariant& value) {
+            auto* item = new QStandardItem();
+            item->setData(value, Qt::DisplayRole);
+            item->setData(value, Qt::UserRole);
+            return item;
+            };
+        const int best = bestPosition[static_cast<size_t>(rowIndex)];
+        model->setItem(rowIndex, kBestPositionColumn, numberItem(best > 0 ? QVariant(best) : QVariant()));
+        model->setItem(rowIndex, kMeanDifferentialColumn, numberItem(meanDifferential[static_cast<size_t>(rowIndex)]));
+        model->setItem(rowIndex, kPositiveSpeciesColumn, numberItem(positiveSpeciesPercent[static_cast<size_t>(rowIndex)]));
+        model->setItem(rowIndex, kMeanExpressionColumn, numberItem(meanExpression[static_cast<size_t>(rowIndex)]));
     }
 
     return QVariant::fromValue(model);
@@ -435,7 +478,8 @@ namespace {
      */
     QStringList speciesStatisticsRows(const QString& gene, const QStringList& topNSpecies, const QStringList& statisticsLines,
         const QStringList& explorerSelection, bool withMiddleFraction, const QStringList& traitValues,
-        const std::function<double(const QString&, int, double)>& rankWeightOf)
+        const std::function<double(const QString&, int, double)>& rankWeightOf,
+        const std::function<int(const QString&)>& listLengthOf, bool negativeType)
     {
         QStringList rows;
         for (const QString& line : statisticsLines) {
@@ -467,8 +511,20 @@ namespace {
                 << (explorerSelection.contains(species) ? "True" : "False")
                 << QString::number(meanSelected - meanNotSelected, 'f', 4)
                 << values.value("Rank")
-                << QString::number(rankWeightOf(species, values.value("Rank").toInt(), meanSelected), 'f', 4)
-                << QString::number(percentOfCounts(numerator, values.value("AbundanceTop").toDouble()), 'f', 2);
+                << QString::number(rankWeightOf(species, values.value("Rank").toInt(), meanSelected), 'f', 4);
+            {
+                // rank percentile: where the gene stands among all genes of the species (small = strong)
+                const int listLength = listLengthOf(species);
+                const int position = GeneStats::positionFromRank(values.value("Rank").toInt(), listLength, negativeType);
+                fields << (position > 0 ? QString::number(GeneStats::percent(position, listLength), 'f', 3) : QString());
+
+                double log2Fold = 0.0;
+                fields << (GeneStats::log2FoldChange(meanSelected, meanNotSelected, log2Fold) ? QString::number(log2Fold, 'f', 4) : QString());
+
+                const double selectedCells = values.value("CountSelected").toDouble();
+                fields << QString::number(GeneStats::percent(selectedCells, selectedCells + values.value("CountNotSelected").toDouble()), 'f', 2);
+            }
+            fields << QString::number(percentOfCounts(numerator, values.value("AbundanceTop").toDouble()), 'f', 2);
             if (withMiddleFraction) {
                 fields << QString::number(percentOfCounts(numerator, values.value("AbundanceMiddle").toDouble()), 'f', 2);
             }
@@ -654,7 +710,11 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
             << model->data(model->index(row, 2)).toString()
             << QString::number(weightedIndex.data(Qt::UserRole).toDouble(), 'f', 4)
             << QString::number(weightedIndex.data(kWeightedPValueRole).toDouble(), 'g', 4)
-            << QString::number(weightedIndex.data(kWeightedFdrRole).toDouble(), 'g', 4);
+            << QString::number(weightedIndex.data(kWeightedFdrRole).toDouble(), 'g', 4)
+            << model->data(model->index(row, kBestPositionColumn), Qt::UserRole).toString()
+            << QString::number(model->data(model->index(row, kMeanDifferentialColumn), Qt::UserRole).toDouble(), 'f', 4)
+            << QString::number(model->data(model->index(row, kPositiveSpeciesColumn), Qt::UserRole).toDouble(), 'f', 1)
+            << QString::number(model->data(model->index(row, kMeanExpressionColumn), Qt::UserRole).toDouble(), 'f', 4);
         if (withTrait) {
             const QStringList traitValues = traitExportValues(model, row);
             fields << traitValues;
@@ -672,7 +732,9 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
     }
 
     QStringList header = { "Gene", "Species Appearance", "Gene Appearance Species Names", "Weighted Appearance",
-                           "Rank consistency p-value (robust rank aggregation)", "Rank consistency FDR" };
+                           "Rank consistency p-value (robust rank aggregation)", "Rank consistency FDR",
+                           "Best position in a species", "Mean differential expression (all species)",
+                           "Species with positive differential (%)", "Mean expression in selected cells (mean over species)" };
     if (withTrait) {
         header << traitExportHeaders();
     }
@@ -817,7 +879,8 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
         if (withTrait && model->index(row, kTraitCorrelationColumn).data(kTraitSignificanceFdrRole).toDouble() < significanceLevel()) {
             ++significantRows;
         }
-        rows << speciesStatisticsRows(gene, topNSpecies, statisticsLines, explorerSelection, !middleRedundant, traitValues, rankWeightOf);
+        rows << speciesStatisticsRows(gene, topNSpecies, statisticsLines, explorerSelection, !middleRedundant, traitValues, rankWeightOf,
+            [this](const QString& species) { return speciesGeneListLength(species); }, weightNegative);
     }
 
     if (_saveIncludeParameters.isChecked()) {
@@ -828,7 +891,8 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
     }
 
     QStringList header = { "Gene", "Top-N gene in species", "Species", "Species selected in explorer", "Mean Gene Differential Expression",
-                           "Gene Appearance Rank", "Rank weight in species", "Fraction in Neuronal (%)" };
+                           "Gene Appearance Rank", "Rank weight in species", "Rank percentile (% of genes, small = strong)",
+                           "Log2 fold change (selected / other cells)", "Selected cells of the species (%)", "Fraction in Neuronal (%)" };
     if (!middleRedundant) {
         header << "Fraction in " + middleName + " (%)";
     }
