@@ -2110,7 +2110,7 @@ public:
 
     void setVolcanoData(const QVector<Point>& points, double significanceLevel, const QString& info)
     {
-        _volcanoPlot->setGuideLines({ { true, -std::log10(significanceLevel), QString("FDR = %1").arg(significanceLevel) }, { false, 0.0, QString() } });
+        _volcanoPlot->setGuideLines({ { true, -std::log10(significanceLevel), QString("FDR = %1").arg(significanceLevel) },{ false, 0.0, QString() } });
         _volcanoPlot->setData(points, "Trait correlation", "-log10 FDR", true);
         _volcanoInfo->setText(info);
     }
@@ -3223,7 +3223,7 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         model->setHeaderData(6, Qt::Horizontal, "Coverage: the percentage of the cells of the species that are selected.", Qt::ToolTipRole);
 
         // ---- pass 1: value range of every bar column and the size of the selection ----
-        ValueRange topRange, middleRange, selectedRange, totalRange;
+        ValueRange topRange, middleRange, selectedRange, totalRange, shareRange, coverageRange;
         double allSelectedCells = 0.0;
         for (const auto& [species, details] : speciesCountMap)
         {
@@ -3232,6 +3232,12 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
             selectedRange.include(static_cast<float>(details.selectedCellsCount));
             totalRange.include(static_cast<float>(details.selectedCellsCount + details.nonSelectedCellsCount));
             allSelectedCells += details.selectedCellsCount;
+        }
+        // (the share needs the size of the whole selection, so these two ranges are collected after the loop above)
+        for (const auto& [species, details] : speciesCountMap)
+        {
+            shareRange.include(static_cast<float>(GeneStats::percent(details.selectedCellsCount, allSelectedCells)));
+            coverageRange.include(static_cast<float>(GeneStats::percent(details.selectedCellsCount, details.selectedCellsCount + details.nonSelectedCellsCount)));
         }
 
         // ---- pass 2: one row per species ----
@@ -3266,9 +3272,11 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
                 makeBarPixmap(60, 20, getNormalizedSize(static_cast<float>(total), totalRange.min, totalRange.max)),
                 QString("%1 cells in total: %2 selected and %3 not selected.").arg(total).arg(selectedCellsCount).arg(details.nonSelectedCellsCount));
 
-            rowItems << makeTextItem(share, QString::number(share, 'f', 1),
+            rowItems << makeBarItem(share, QString::number(share, 'f', 1),
+                makeBarPixmap(70, 20, getNormalizedSize(static_cast<float>(share), shareRange.min, shareRange.max)),
                 QString("%1 of the %2 selected cells (%3%) belong to this species.").arg(selectedCellsCount).arg(static_cast<long long>(allSelectedCells)).arg(share, 0, 'f', 1));
-            rowItems << makeTextItem(coverage, QString::number(coverage, 'f', 1),
+            rowItems << makeBarItem(coverage, QString::number(coverage, 'f', 1),
+                makeBarPixmap(80, 20, getNormalizedSize(static_cast<float>(coverage), coverageRange.min, coverageRange.max)),
                 QString("%1 of the %2 cells of this species (%3%) are selected.").arg(selectedCellsCount).arg(total).arg(coverage, 0, 'f', 1));
 
             model->appendRow(rowItems);
@@ -3285,8 +3293,8 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
         detailsTable->setColumnWidth(2, 90);
         detailsTable->setColumnWidth(3, 70);
         detailsTable->setColumnWidth(4, 70);
-        detailsTable->setColumnWidth(5, 80);
-        detailsTable->setColumnWidth(6, 90);
+        detailsTable->setColumnWidth(5, 80);   // bar 70 px
+        detailsTable->setColumnWidth(6, 90);   // bar 80 px
         _detailsRedundantColumn = singleColumn ? 2 : -1;
         applyDetailsColumnVisibility();
         detailsTable->update();
@@ -3346,6 +3354,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
         // ---- pass 1: value range of every bar column ----
         ValueRange differenceRange, rankRange, topRange, middleRange, selectedCountRange, meanSelectedRange, nonSelectedCountRange, meanNonSelectedRange;
+        ValueRange foldRange, selectedPercentRange, strengthRange, weightRange; // the four further statistics columns
         for (const auto& [species, details] : speciesCountMap)
         {
             const auto it = statisticsValues.find(species);
@@ -3361,6 +3370,20 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
             meanSelectedRange.include(stats.meanSelected);
             nonSelectedCountRange.include(static_cast<float>(stats.countNonSelected));
             meanNonSelectedRange.include(stats.meanNonSelected);
+
+            // further statistics (same formulas as in pass 2)
+            const int rangeListLength = _settingsAction.speciesGeneListLength(species);
+            const int rangePosition = GeneStats::positionFromRank(stats.rank, rangeListLength, negativeType);
+            selectedPercentRange.include(static_cast<float>(GeneStats::percent(stats.countSelected, static_cast<double>(stats.countSelected) + stats.countNonSelected)));
+            if (rangePosition > 0) {
+                strengthRange.include(static_cast<float>(100.0 - GeneStats::percent(rangePosition, rangeListLength))); // strong = long bar, like the rank column
+            }
+            const bool rangeTopGene = rangePosition >= 1 && rangePosition <= topN && stats.meanSelected > 0;
+            weightRange.include(static_cast<float>(rangeTopGene ? GeneStats::rankWeight(rangePosition, topN) : 0.0));
+            double rangeFold = 0.0;
+            if (GeneStats::log2FoldChange(stats.meanSelected, stats.meanNonSelected, rangeFold)) {
+                foldRange.include(static_cast<float>(rangeFold));
+            }
         }
 
         // ---- pass 2: one row per species ----
@@ -3454,17 +3477,37 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
                     makeBarPixmap(75, 20, getNormalizedSize(stats.meanNonSelected, meanNonSelectedRange.min, meanNonSelectedRange.max)),
                     QString("Mean expression in the %1 cells that are not selected: %2").arg(stats.countNonSelected).arg(stats.meanNonSelected, 0, 'f', 4));
 
-                // Further statistics (hidden by default; right-click the header to show them)
-                rowItems << makeTextItem(haveFold ? QVariant(log2Fold) : QVariant(), haveFold ? QString::number(log2Fold, 'f', 2) : QString("n/a"),
-                    haveFold ? QString("log2(%1 / %2) = %3: the gene is %4 times %5 in the selection.")
+                // Further statistics (hidden by default; right-click the header to show them) - drawn like the other columns
+                const QString foldTip = haveFold
+                    ? QString("log2(%1 / %2) = %3: the gene is %4 times %5 in the selection.")
                     .arg(stats.meanSelected, 0, 'f', 3).arg(stats.meanNonSelected, 0, 'f', 3).arg(log2Fold, 0, 'f', 3)
                     .arg(std::pow(2.0, std::abs(log2Fold)), 0, 'f', 2).arg(log2Fold >= 0 ? "higher" : "lower")
-                    : QString("Undefined: a mean is not positive, so the ratio cannot be taken."));
-                rowItems << makeTextItem(selectedPercent, QString::number(selectedPercent, 'f', 1),
+                    : QString("Undefined: a mean is not positive, so the ratio cannot be taken.");
+                if (haveFold) {
+                    // centred bar like the differential: right = higher in the selection
+                    const float foldLength = getNormalizedSizePosNeg(static_cast<float>(log2Fold), foldRange.min, foldRange.max);
+                    rowItems << makeBarItem(log2Fold, QString::number(log2Fold, 'f', 2), makeCenteredBarPixmap(75, 25, foldLength, log2Fold >= 0), foldTip);
+                }
+                else {
+                    rowItems << makeTextItem(QVariant(), "n/a", foldTip);
+                }
+
+                rowItems << makeBarItem(selectedPercent, QString::number(selectedPercent, 'f', 1),
+                    makeBarPixmap(70, 20, getNormalizedSize(static_cast<float>(selectedPercent), selectedPercentRange.min, selectedPercentRange.max)),
                     QString("%1 of the %2 cells of the species are selected.").arg(stats.countSelected).arg(static_cast<long long>(allCells)));
-                rowItems << makeTextItem(position > 0 ? QVariant(percentile) : QVariant(), position > 0 ? QString::number(percentile, 'f', 2) : QString("n/a"),
-                    position > 0 ? QString("Position %1 of %2 genes: the top %3% of the genes of this species.").arg(position).arg(listLength).arg(percentile, 0, 'f', 2) : QString("Position unknown."));
-                rowItems << makeTextItem(weight, QString::number(weight, 'f', 3),
+
+                if (position > 0) {
+                    // the bar shows the STRENGTH (100 - percentile): a gene near the top gets a long bar, like in the rank column
+                    rowItems << makeBarItem(percentile, QString::number(percentile, 'f', 2),
+                        makeBarPixmap(75, 20, getNormalizedSize(static_cast<float>(100.0 - percentile), strengthRange.min, strengthRange.max)),
+                        QString("Position %1 of %2 genes: the top %3% of the genes of this species (long bar = strong).").arg(position).arg(listLength).arg(percentile, 0, 'f', 2));
+                }
+                else {
+                    rowItems << makeTextItem(QVariant(), "n/a", "Position unknown.");
+                }
+
+                rowItems << makeBarItem(weight, QString::number(weight, 'f', 3),
+                    makeBarPixmap(70, 20, getNormalizedSize(static_cast<float>(weight), weightRange.min, weightRange.max)),
                     topGene ? QString("(N - position + 1) / N = (%1 - %2 + 1) / %1 = %3").arg(topN).arg(position).arg(weight, 0, 'f', 3)
                     : QString("0: not a top-N gene of this species."));
             }
@@ -3495,9 +3538,10 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
         detailsTable->setColumnWidth(6, 80);
         detailsTable->setColumnWidth(7, 70);
         detailsTable->setColumnWidth(8, 85);
-        for (int column = 9; column <= 12; ++column) {
-            detailsTable->setColumnWidth(column, 75);
-        }
+        detailsTable->setColumnWidth(9, 85);    // centred bar 75 px
+        detailsTable->setColumnWidth(10, 80);   // bar 70 px
+        detailsTable->setColumnWidth(11, 85);   // bar 75 px
+        detailsTable->setColumnWidth(12, 80);   // bar 70 px
         _detailsRedundantColumn = singleColumn ? 4 : -1;
         applyDetailsColumnVisibility();
         detailsTable->update();
