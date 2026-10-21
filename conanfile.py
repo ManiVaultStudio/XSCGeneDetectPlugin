@@ -18,7 +18,7 @@ class XSCGeneDetectPluginConan(ConanFile):
     """
 
     name = "XSCGeneDetectPlugin"
-    description = """Viewer of cell XSCTreeData data as described in a .swc file."""
+    description = """Viewer of cell XSCTreeData and XSCTreeMetaData data as described in a .swc file."""
     topics = ("manivault", "plugin", "view", "XSCGeneDetectPlugin")
     url = "https://github.com/ManiVaultStudio/XSCGeneDetectPlugin"
     author = "sbasu"  # conan recipe author
@@ -33,7 +33,7 @@ class XSCGeneDetectPluginConan(ConanFile):
     default_options = {"shared": True, "fPIC": True}
 
     # Data plugin dependencies
-    #requires = ("XSCTreeData/latest@lkeb/stable")
+    #requires = ("XSCTreeData/bican_bg@lkeb/stable", "XSCTreeMetaData/bican_bg@lkeb/stable")
 
     # Qt requirement is inherited from hdps-core
 
@@ -97,6 +97,7 @@ class XSCGeneDetectPluginConan(ConanFile):
         self.output.info(f"Using XSCTreeData channel: {channel}")
 
         self.requires(f"XSCTreeData/{channel}@lkeb/stable")
+        self.requires(f"XSCTreeMetaData/{channel}@lkeb/stable")
 
         branch_info = PluginBranchInfo(self.__get_git_path())
         self.output.info(f"Core requirement {branch_info.core_requirement}")
@@ -140,6 +141,8 @@ class XSCGeneDetectPluginConan(ConanFile):
         # Give the installation directory to CMake
         MV_CSCTD_PATH = pathlib.Path(self.deps_cpp_info["XSCTreeData"].rootpath).as_posix()
         tc.variables["MV_CSCTD_INSTALL_DIR"] = MV_CSCTD_PATH
+        MV_CSCTMD_PATH = pathlib.Path(self.deps_cpp_info["XSCTreeMetaData"].rootpath).as_posix()
+        tc.variables["MV_CSCTMD_INSTALL_DIR"] = MV_CSCTMD_PATH
 
         # Set some build options
         tc.variables["MV_UNITY_BUILD"] = "ON"

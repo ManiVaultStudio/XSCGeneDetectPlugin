@@ -34,7 +34,10 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
     if (clusterValuesData.isEmpty()) {
         return QString("<table><tr><td><b>Total points: </b></td><td>%1</td></tr></table>").arg(global_local_PointIndices.size());
     }
-    
+
+    // Sort the hovered indices once instead of once per cluster
+    std::sort(global_local_PointIndices.begin(), global_local_PointIndices.end());
+
     // Process each cluster and find intersections with global point indices
     std::map<QString, std::pair<int, QColor>> clusterCountMap;
     for (const auto& cluster : clusterValuesData) {
@@ -44,7 +47,6 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
 
         // Sort the indices before performing the intersection
         std::sort(clusterIndices.begin(), clusterIndices.end());
-        std::sort(global_local_PointIndices.begin(), global_local_PointIndices.end());
 
         std::vector<std::seed_seq::result_type> intersect;
         std::set_intersection(clusterIndices.begin(), clusterIndices.end(),
@@ -53,7 +55,7 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
 
         // If there is an intersection, store the result in the map
         if (!intersect.empty()) {
-            clusterCountMap[clusterName] = std::make_pair(intersect.size(), clusterColor);
+            clusterCountMap[clusterName] = std::make_pair(static_cast<int>(intersect.size()), clusterColor);
         }
     }
 
@@ -77,7 +79,7 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
     // Sort the vector by count in descending order
     std::sort(clusterVector.begin(), clusterVector.end(), [](const auto& a, const auto& b) {
         return a.second.first > b.second.first;
-    });
+        });
 
     // Find the maximum count for scaling the bars
     int maxCount = clusterVector.empty() ? 1 : clusterVector.front().second.first; // Default to 1 if no data.
@@ -110,17 +112,19 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
             if (file.open(QIODevice::ReadOnly)) {
                 QByteArray iconData = file.readAll().toBase64();
                 iconHtml = QString("<img src='data:image/svg+xml;base64,%1' width='16' height='16'/> ").arg(QString(iconData));
-            } else {
+            }
+            else {
                 iconHtml = "<div style='width:16px; height:16px;'></div>"; // Placeholder
             }
-        } else {
+        }
+        else {
             iconHtml = "<div style='width:16px; height:16px;'></div>"; // Placeholder
         }
 
         html += "<div class='bar-container'>";
         html += "<div class='bar' style='width:" + QString::number(barWidth) + "%; background-color:" + colorHex + "; color:" + textColor + ";'></div>";
         html += "<div class='label' style='width:" + QString::number(maxTextIconWidth) + "px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'>"
-            + iconHtml + clusterName + ": " + QString::number(count) + "</div>";
+            + iconHtml + clusterName.toHtmlEscaped() + ": " + QString::number(count) + "</div>";
         html += "</div>";
     }
 
@@ -262,14 +266,19 @@ std::string SettingsAction::mergeToNewick(int* merge, int numOfLeaves) {
 }
 */
 double* SettingsAction::condensedDistanceMatrix(const std::vector<float>& items) {
-    size_t n = items.size();
+    // NOTE: the caller owns the returned buffer and must release it with delete[].
+    const size_t n = items.size();
+    if (n < 2) {
+        return nullptr; // (n * (n - 1)) / 2 underflows for n == 0 and is empty for n == 1
+    }
     double* distmat = new double[(n * (n - 1)) / 2];
-    size_t k = 0;
 
-#pragma omp parallel for schedule(dynamic) collapse(2) private(k)
-    for (size_t i = 0; i < n; ++i) {
+    // collapse(2) is not valid for this triangular loop nest (inner bound depends on i)
+#pragma omp parallel for schedule(dynamic)
+    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+        const size_t i = static_cast<size_t>(ii);
         for (size_t j = i + 1; j < n; ++j) {
-            k = ((n * (n - 1)) / 2) - ((n - i) * (n - i - 1)) / 2 + j - i - 1;
+            const size_t k = ((n * (n - 1)) / 2) - ((n - i) * (n - i - 1)) / 2 + j - i - 1;
             distmat[k] = std::abs(items[i] - items[j]);
         }
     }
@@ -279,9 +288,11 @@ double* SettingsAction::condensedDistanceMatrix(const std::vector<float>& items)
 
 SettingsAction::Widget::Widget(QWidget* parent, SettingsAction* SettingsAction) :
     WidgetActionWidget(parent, SettingsAction)
-{ }
+{
+}
 
 SettingsAction::OptionSelectionAction::Widget::Widget(QWidget* parent, OptionSelectionAction* optionSelectionAction) :
     WidgetActionWidget(parent, optionSelectionAction)
-{ }
+{
+}
 

@@ -1,3 +1,23 @@
+int SettingsAction::parallelWorkers(size_t pointsPerWorker) const
+{
+    return memorySafeThreadCount(pointsPerWorker, _memoryBudgetMb.getValue(), _maxWorkerThreads.getValue());
+}
+
+QString SettingsAction::currentMeanMapSignature() const
+{
+    return _mainPointsDataset.getCurrentDataset().getDatasetId() + QLatin1Char('|') + _speciesNamesDataset.getCurrentDataset().getDatasetId();
+}
+
+SettingsAction::~SettingsAction()
+{
+    _traitJobWatcher.waitForFinished(); // the background job reads datasets that must not disappear under it
+    // The two message boxes are never added to a layout, so nobody else owns them.
+    delete _popupMessageInit;
+    _popupMessageInit = nullptr;
+    delete _popupMessageTreeCreationCompletion;
+    _popupMessageTreeCreationCompletion = nullptr;
+}
+
 SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     WidgetAction(&XSCGeneDetectPlugin, "XSCGeneDetectPlugin Settings"),
     _XSCGeneDetectPlugin(XSCGeneDetectPlugin),
@@ -50,8 +70,21 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _clearRightClickedCluster(this, "Clear Right Clicked Cluster"),
     _toggleScatterplotSelection(this, "Show Scatterplot Selection"),
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker(this, "Map For Hierarchy Items Change Method Stop For Project Load Blocker"),
-    _saveSpeciesTable(this, "Save Left Gene Table"),
-    _saveGeneTable(this, "Save Right Species Selection Table")
+    _saveSpeciesTable(this, "Save Gene Table"),
+    _saveGeneTable(this, "Save Species Statistics Table"),
+    _saveIncludeParameters(this, "Add analysis parameters to the CSV"),
+    _saveTraitMatrix(this, "Save Trait Matrix"),
+    _showTraitPlot(this, "Plot Selected Gene vs Trait"),
+    _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String"),
+    _traitPoolingMode(this, "Trait Pooling"),
+    _traitCorrelationMethod(this, "Trait Correlation Method"),
+    _traitSpeciesScope(this, "Trait Species Scope"),
+    _traitMinCells(this, "Min cells per species and cell type"),
+    _traitSignificantOnly(this, "Significant trait genes only"),
+    _traitGeneScope(this, "Trait Correlation Genes"),
+    _traitFdrThreshold(this, "Significance level (FDR)"),
+    _maxWorkerThreads(this, "Parallel workers"),
+    _memoryBudgetMb(this, "Memory budget for parallel workers (MB)")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -81,6 +114,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         "The precomputed tree method has been completed. "
         "Right-click is available in the hierarchy view. "
         "To explore expression values across species for each cluster in the phylogenetic tree, "
+        "right-click a cluster in the hierarchy view."
     );
     _popupMessageTreeCreationCompletion->setInformativeText(
         "Right Click available in the cluster hierarchy view."
@@ -246,6 +280,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedSpeciesVals.setSerializationName("CSCGDV:Selected Species Vals");
     _clusterOrderHierarchy.setSerializationName("CSCGDV:Cluster Order Hierarchy");
     _rightClickedCluster.setSerializationName("CSCGDV:Right Clicked Cluster");
+    _reverseSearchTraitSelectionString.setSerializationName("CSCGDV:Reverse Search Trait Selection String");
     _topSelectedHierarchyStatus.setSerializationName("CSCGDV:Top Selected Hierarchy Status");
     _clearRightClickedCluster.setSerializationName("CSCGDV:Clear Right Clicked Cluster");
     _removeRowSelection.setSerializationName("CSCGDV:Remove Row Selection");
@@ -271,6 +306,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _performGeneTableTsneTrigger.setDisabled(true);
     _clusterOrderHierarchy.setString("");
     _rightClickedCluster.setString("");
+    _reverseSearchTraitSelectionString.setString("");
     _topSelectedHierarchyStatus.setString("");
     _tsnePerplexity.setSerializationName("CSCGDV:TSNE Perplexity");
     _tsnePerplexity.setMinimum(1);
@@ -287,6 +323,15 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _scatterplotReembedColorOption.setSerializationName("CSCGDV:Scatterplot Reembedding Color Option");
     _scatterplotEmbeddingPointsUMAPOption.setSerializationName("CSCGDV:Scatterplot Embedding UMAP Points Option");
     _typeofTopNGenes.setSerializationName("CSCGDV:Type of Top N Genes");
+    _traitPoolingMode.setSerializationName("CSCGDV:Trait Pooling");
+    _traitCorrelationMethod.setSerializationName("CSCGDV:Trait Correlation Method");
+    _traitSpeciesScope.setSerializationName("CSCGDV:Trait Species Scope");
+    _traitMinCells.setSerializationName("CSCGDV:Trait Min Cells");
+    _traitSignificantOnly.setSerializationName("CSCGDV:Trait Significant Only");
+    _traitGeneScope.setSerializationName("CSCGDV:Trait Gene Scope");
+    _traitFdrThreshold.setSerializationName("CSCGDV:Trait FDR Threshold");
+    _maxWorkerThreads.setSerializationName("CSCGDV:Max Worker Threads");
+    _memoryBudgetMb.setSerializationName("CSCGDV:Memory Budget MB");
     _clusterCountSortingType.setSerializationName("CSCGDV:Cluster Count Sorting Type");
     _applyLogTransformation.setSerializationName("CSCGDV:Apply Log Transformation");
     _createRowMultiSelectTree.setDisabled(true);
@@ -294,6 +339,62 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedRowIndex.setString("");
     _scatterplotReembedColorOption.initialize({ "Species","Cluster","Expression" }, "Species");
     _typeofTopNGenes.initialize({ "Absolute","Negative","Positive" }, "Positive");
+    _traitPoolingMode.initialize({ "Pool cells", "Equal cell-type weighting" }, "Pool cells");
+
+    _traitCorrelationMethod.initialize({ "Pearson", "Spearman (rank)", "Phylogenetic contrasts" }, "Pearson");
+    _traitCorrelationMethod.setToolTip("Correlation of the mean expression with the trait across species:\n"
+        "Pearson: linear correlation.\n"
+        "Spearman (rank): rank based, robust to outlier species and skewed expression.\n"
+        "Phylogenetic contrasts: Pearson on independent contrasts of the species tree; corrects for the shared ancestry of\n"
+        "related species, which otherwise inflates correlations (uses the reference tree).");
+
+    _traitSpeciesScope.initialize({ "Contribution of selected species", "Across selected species only" }, "Contribution of selected species");
+    _traitSpeciesScope.setToolTip("What the species picked in the species explorer mean for the Trait Correlation column:\n"
+        "Contribution of selected species: the trend (correlation with the trait) is always taken across ALL species. The value is how strongly\n"
+        "  the picked species follow it: the mean over them of z(gene expression) x z(trait). Works for one species up to all of them; with all species picked\n"
+        "  it is exactly the correlation. Not defined for phylogenetic contrasts (those behave like the second option).\n"
+        "Across selected species only: the correlation is computed across the picked species themselves (at least 3; otherwise all species are used).");
+
+    _traitMinCells.setMinimum(1);
+    _traitMinCells.setMaximum(1000);
+    _traitMinCells.setValue(10);
+    _traitMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _traitMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out of the trait correlation:\n"
+        "the mean expression of a handful of cells is too noisy to correlate.\n"
+        "Pool cells: the cells of all selected cell types of a species are counted together.\n"
+        "Equal cell-type weighting: every cell type needs this many cells, otherwise it is ignored for that species\n"
+        "(a cell type with a single cell would otherwise get the same weight as one with thousands).");
+
+    _traitGeneScope.initialize({ "Listed genes (fast)", "All genes (slower)" }, "Listed genes (fast)");
+    _traitGeneScope.setToolTip("Which genes are correlated with the trait:\n"
+        "Listed genes: the top-N genes of the gene table. Only their expression is read (a few hundred genes instead of all of them),\n"
+        "  which makes the analysis many times faster. Significance (FDR) is then corrected over these genes.\n"
+        "All genes: every gene of the dataset (slow: all expression values of the cell type have to be read).");
+
+    _traitFdrThreshold.setMinimum(0.001f);
+    _traitFdrThreshold.setMaximum(0.5f);
+    _traitFdrThreshold.setNumberOfDecimals(3);
+    _traitFdrThreshold.setValue(0.05f);
+    _traitFdrThreshold.setToolTip("FDR below which a trait correlation is called significant (black outline, filter, CSV flag).");
+
+    _maxWorkerThreads.setMinimum(1);
+    _maxWorkerThreads.setMaximum(std::max(2, QThread::idealThreadCount() * 2));
+    _maxWorkerThreads.setValue(std::max(1, QThread::idealThreadCount()));
+    _maxWorkerThreads.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _maxWorkerThreads.setToolTip("Maximum number of parallel workers for the expression statistics (default: all cores).");
+
+    _memoryBudgetMb.setMinimum(128);
+    _memoryBudgetMb.setMaximum(32768);
+    _memoryBudgetMb.setValue(1024);
+    _memoryBudgetMb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _memoryBudgetMb.setToolTip("Scratch memory all parallel workers may use together while reading expression data.\n"
+        "Lower it if memory is tight (fewer workers run at once), raise it on large machines.");
+
+    _traitSignificantOnly.setChecked(false);
+    _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
+    _traitPoolingMode.setToolTip("How the expression of several selected cell types is combined per species:\n"
+        "Pool cells: all cells of the selected cell types are pooled (cell types with more cells weigh more).\n"
+        "Equal cell-type weighting: every selected cell type weighs the same, regardless of its cell count.");
     _clusterCountSortingType.initialize({ "Count","Name","Hierarchy View" }, "Count");
     _topNGenesFilter.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
 
@@ -313,6 +414,19 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     QIcon saveGeneTableIcon = mv::util::StyledIcon("save");
     _saveGeneTable.setIcon(saveGeneTableIcon);
     _saveGeneTable.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+
+    _saveIncludeParameters.setChecked(true);
+    _saveIncludeParameters.setSerializationName("CSCGDV:Save Include Parameters");
+    _saveIncludeParameters.setToolTip("Write the analysis parameters (cell types, species, trait, method, ...) as lines starting with '#' on top of the CSV.\n"
+        "Read it with a comment character (pandas: comment='#', R: comment.char='#') or switch this off for a plain table.");
+
+    _saveTraitMatrix.setIcon(mv::util::StyledIcon("save"));
+    _saveTraitMatrix.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _saveTraitMatrix.setToolTip("Save the species x genes expression matrix of the listed genes together with the trait values,\n"
+        "e.g. to repeat or extend the correlation analysis in R or Python.");
+    _showTraitPlot.setIcon(mv::util::StyledIcon("chart-line"));
+    _showTraitPlot.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _showTraitPlot.setToolTip("Open a plot of the mean expression of the selected gene against the trait: one point per species.");
 
     QIcon saveSpeciesTableIcon = mv::util::StyledIcon("save");
     _saveSpeciesTable.setIcon(saveSpeciesTableIcon);
@@ -367,6 +481,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
             removeSelectionTableRows(&leafValues);
+            updateTraitReverseSearchFeature();
             enableDisableButtonsAutomatically();
         };
     connect(&_speciesExplorerInMap, &OptionsAction::selectedOptionsChanged, this, updatespeciesExplorerInMap);
@@ -415,6 +530,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         {
             disableActions();
             _pauseStatusUpdates = true;
+            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 423";
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
             //_erroredOutFlag = false;
             QApplication::processEvents();
@@ -423,9 +539,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
             QApplication::processEvents();
             auto pointsDataset = _mainPointsDataset.getCurrentDataset();
-            pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+            if (pointsDataset.isValid())
+            {
+                pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+            }
             _statusColorAction.setString("C");
-            
+
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
     const auto updateCreateRowMultiSelectTreeTrigger = [this]() -> void {
@@ -479,9 +598,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateMainPointsDataset = [this]() -> void {
 
-        if (!_meanMapComputed)
+        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
         {
-            computeGeneMeanExpressionMap();
+            computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
 
 
@@ -508,10 +627,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setWhatsThis("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            const auto mainSelectionChanged = [this]() -> void {
+            // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
+            // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
+            // changing the dataset repeatedly never stacks up duplicate listeners.
+            QObject::disconnect(_mainSelectionConnection);
+            _watchedMainPointsDataset = fullDataset;
+            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this]() -> void {
                 _toggleScatterplotSelection.setChecked(true);
-                };
-            connect(&fullDataset, &Dataset<Points>::dataSelectionChanged, this, mainSelectionChanged);
+                });
 
         }
         else
@@ -559,9 +682,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         }
         _speciesExplorerInMap.setOptions(speciesOptions);
 
-        if (!_meanMapComputed)
+        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
         {
-            computeGeneMeanExpressionMap();
+            computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
         };
 
@@ -620,9 +743,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         if (selectedColorType != "")
         {
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-            mv::gui::DatasetPickerAction* colorDatasetPickerAction;
-            mv::gui::DatasetPickerAction* pointDatasetPickerAction;
-            mv::gui::ViewPluginSamplerAction* samplerActionAction;
+            mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
+            mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
+            mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                     if (plugin->getGuiName() == "Scatterplot Cell Selection Overview") {
@@ -642,8 +765,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                     if (selectedColorType != "")
                                     {
                                         auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
-                                        DatasetPickerAction* legendDatasetPickerAction;
-                                        StringAction* chartTitle;
+                                        DatasetPickerAction* legendDatasetPickerAction = nullptr;
+                                        StringAction* chartTitle = nullptr;
                                         //ColorAction* selectionColor;
                                         //StringAction* selectionStringDelimiter;
                                         //StringAction* selectionClustersString;
@@ -656,18 +779,18 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                     //legendPlugin->printChildren();
                                                     legendDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster dataset"));
                                                     chartTitle = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Chart Title"));
-                                                
+
                                                     //selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
                                                     //selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
                                                     //selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
                                                 }
                                             }
                                         }
-                                        
-                                         
-                                        
-                                        
-                                        
+
+
+
+
+
                                         if (selectedColorType == "Cluster")
                                         {
                                             if (_bottomClusterNamesDataset.getCurrentDataset().isValid())
@@ -687,12 +810,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     selectionColor->setColor(QColor(53, 126, 199));
                                                 }
-                                                
+
                                                 if (selectionStringDelimiter)
                                                 {
                                                     selectionStringDelimiter->setString(",");
                                                 }
-                                                
+
                                                 if (selectionClustersString)
                                                 {
                                                     selectionClustersString->setString(""); //TODO
@@ -714,22 +837,22 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Species");
                                                 }
-                                               /*
-                                                if (selectionColor)
-                                                {
-                                                    selectionColor->setColor(QColor(53, 126, 199));
-                                                }
-                                               
-                                                if (selectionStringDelimiter)
-                                                {
-                                                    selectionStringDelimiter->setString(",");
-                                                }
-                                                
-                                                if (selectionClustersString)
-                                                {
-                                                    selectionClustersString->setString(""); //TODO
-                                                }
-                                                */
+                                                /*
+                                                 if (selectionColor)
+                                                 {
+                                                     selectionColor->setColor(QColor(53, 126, 199));
+                                                 }
+
+                                                 if (selectionStringDelimiter)
+                                                 {
+                                                     selectionStringDelimiter->setString(",");
+                                                 }
+
+                                                 if (selectionClustersString)
+                                                 {
+                                                     selectionClustersString->setString(""); //TODO
+                                                 }
+                                                 */
                                             }
                                         }
                                         else if (selectedColorType == "Expression")
@@ -890,6 +1013,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_typeofTopNGenes, &OptionAction::currentIndexChanged, this, updateTypeOfTopNGenesFilter);
+    // Changing the pooling only re-combines the cached per cell type means (debounced)
+    connect(&_traitPoolingMode, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitCorrelationMethod, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitSpeciesScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitGeneScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+    connect(&_traitMinCells, &IntegralAction::valueChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
 
 
     const auto updateClusterOrderHierarchy = [this]() -> void {
@@ -993,6 +1122,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_rightClickedCluster, &StringAction::stringChanged, this, updateRightClickedCluster);
+    const auto updateReverseSearchTraitSelectionString = [this]() -> void {
+
+        updateTraitReverseSearchFeature();
+
+        };
+
+    connect(&_reverseSearchTraitSelectionString, &StringAction::stringChanged, this, updateReverseSearchTraitSelectionString);
+
     const auto updateTopSelectedHierarchyStatus = [this]() -> void {
 
 
@@ -1067,13 +1204,13 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     const auto updateToggleScatterplotSelection = [this]() -> void {
 
         auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-        mv::gui::DecimalAction* overlayopacityAction;
-        mv::gui::DecimalAction* overlayscaleAction;
+        mv::gui::DecimalAction* overlayopacityAction = nullptr;
+        mv::gui::DecimalAction* overlayscaleAction = nullptr;
 
         if (scatterplotViewFactory) {
             for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                 if (plugin->getGuiName() == "Scatterplot Embedding View") {
-                    
+
                     overlayopacityAction = dynamic_cast<DecimalAction*>(plugin->findChildByPath("Settings/Selection/Opacity"));
                     if (overlayopacityAction)
                     {
@@ -1162,12 +1299,13 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
         exportTableViewToCSVForGenes(_geneTableView);
-        
+
 
         };
     connect(&_saveSpeciesTable, &TriggerAction::triggered, this, triggerSaveSpeciesTable);
-    
-    
+    connect(&_saveTraitMatrix, &TriggerAction::triggered, this, [this]() -> void { exportTraitMatrixToCSV(_geneTableView); });
+
+
     const auto updateComputeTreesToDisplayFromHierarchy = [this]() -> void {
 
         _computeTreesToDisplayFromHierarchy.setDisabled(true);
@@ -1188,6 +1326,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_clusterCountSortingType, &OptionAction::currentIndexChanged, this, updateClusterCountSortingType);
+    // Debounced trait-correlation refresh (see updateTraitReverseSearchFeature()): bursts of requests -> one computation
+    connect(&_traitJobWatcher, &QFutureWatcher<void>::finished, this, [this]() -> void { onTraitJobsFinished(); });
+
+    _traitCorrelationTimer = new QTimer(this);
+    _traitCorrelationTimer->setSingleShot(true);
+    _traitCorrelationTimer->setInterval(30);
+    connect(_traitCorrelationTimer, &QTimer::timeout, this, [this]() -> void { computeTraitCorrelation(); });
+
     QTimer* debounceTimer = new QTimer(this);
     debounceTimer->setSingleShot(true);
     debounceTimer->setInterval(500); // 500 milliseconds wait time
@@ -1201,7 +1347,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         {
             _statusColorAction.setString("C");
         }
-      
+
         enableActions();
         };
 
@@ -1215,5 +1361,5 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, updateTopGenesSlider);
 
 
-    
+
 }
