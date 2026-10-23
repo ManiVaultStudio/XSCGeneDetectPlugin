@@ -10,6 +10,7 @@ QString SettingsAction::currentMeanMapSignature() const
 
 SettingsAction::~SettingsAction()
 {
+    _deJobWatcher.waitForFinished(); // (same reason as for the trait job)
     _traitJobWatcher.waitForFinished(); // the background job reads datasets that must not disappear under it
     // The two message boxes are never added to a layout, so nobody else owns them.
     delete _popupMessageInit;
@@ -84,7 +85,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitGeneScope(this, "Trait Correlation Genes"),
     _traitFdrThreshold(this, "Significance level (FDR)"),
     _maxWorkerThreads(this, "Parallel workers"),
-    _memoryBudgetMb(this, "Memory budget for parallel workers (MB)")
+    _memoryBudgetMb(this, "Memory budget for parallel workers (MB)"),
+    _deTopGenes(this, "Top genes per species"),
+    _deDirection(this, "Direction"),
+    _deRankBy(this, "Rank genes by"),
+    _deMinDetection(this, "Min. cells expressing the gene (%)"),
+    _deMaxCells(this, "Max cells per species and cell type"),
+    _deMinCells(this, "Min. cells per species"),
+    _showSpeciesDe(this, "Species Differential Expression...")
 {
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
@@ -332,6 +340,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitFdrThreshold.setSerializationName("CSCGDV:Trait FDR Threshold");
     _maxWorkerThreads.setSerializationName("CSCGDV:Max Worker Threads");
     _memoryBudgetMb.setSerializationName("CSCGDV:Memory Budget MB");
+    _deTopGenes.setSerializationName("CSCGDV:DE Top Genes");
+    _deDirection.setSerializationName("CSCGDV:DE Direction");
+    _deRankBy.setSerializationName("CSCGDV:DE Rank By");
+    _deMinDetection.setSerializationName("CSCGDV:DE Min Detection");
+    _deMaxCells.setSerializationName("CSCGDV:DE Max Cells");
+    _deMinCells.setSerializationName("CSCGDV:DE Min Cells");
     _clusterCountSortingType.setSerializationName("CSCGDV:Cluster Count Sorting Type");
     _applyLogTransformation.setSerializationName("CSCGDV:Apply Log Transformation");
     _createRowMultiSelectTree.setDisabled(true);
@@ -389,6 +403,44 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _memoryBudgetMb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
     _memoryBudgetMb.setToolTip("Scratch memory all parallel workers may use together while reading expression data.\n"
         "Lower it if memory is tight (fewer workers run at once), raise it on large machines.");
+
+    // ---- species differential expression (each species against all the others) ----
+    _deTopGenes.setMinimum(1);
+    _deTopGenes.setMaximum(100);
+    _deTopGenes.setValue(10);
+    _deTopGenes.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _deTopGenes.setToolTip("Number of top differentially expressed genes shown for every species.");
+
+    _deDirection.initialize({ "Up in the species", "Down in the species", "Either direction" }, "Up in the species");
+    _deDirection.setToolTip("Which genes are reported for a species: higher in it than in the other species, lower, or both.");
+
+    _deRankBy.initialize({ "Effect size", "Moderated t" }, "Effect size");
+    _deRankBy.setToolTip("How the genes are ranked (only genes with FDR below the significance level are ranked):\n"
+        "Effect size: the difference between the species and the mean of the other species.\n"
+        "Moderated t: that difference relative to the spread among the other species (favours consistent differences).");
+
+    _deMinDetection.setMinimum(0);
+    _deMinDetection.setMaximum(100);
+    _deMinDetection.setValue(10);
+    _deMinDetection.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _deMinDetection.setToolTip("A gene is only reported when it is detected (value not 0) in at least this percentage of the cells of the group that has the higher expression.");
+
+    _deMaxCells.setMinimum(0);
+    _deMaxCells.setMaximum(1000000);
+    _deMaxCells.setValue(3000);
+    _deMaxCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _deMaxCells.setToolTip("Upper limit of cells that are read per species and cell type (0 = all cells). The cells are taken evenly from the whole set.\n"
+        "A few thousand cells give practically the same means and make the first computation much faster.");
+
+    _deMinCells.setMinimum(1);
+    _deMinCells.setMaximum(100000);
+    _deMinCells.setValue(20);
+    _deMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    _deMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out: their mean expression is too noisy.");
+
+    _showSpeciesDe.setIcon(mv::util::StyledIcon("chart-bar"));
+    _showSpeciesDe.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _showSpeciesDe.setToolTip("Open the species differential expression window: every species against all the others, for the selected cell type(s).");
 
     _traitSignificantOnly.setChecked(false);
     _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
@@ -1018,6 +1070,17 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_traitCorrelationMethod, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
     connect(&_traitSpeciesScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
     connect(&_traitGeneScope, &OptionAction::currentIndexChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
+
+    // species differential expression: any relevant change recomputes (debounced; nothing happens while the window is closed)
+    const auto requestDe = [this]() -> void { requestSpeciesDifferentialExpression(); };
+    connect(&_deTopGenes, &IntegralAction::valueChanged, this, requestDe);
+    connect(&_deDirection, &OptionAction::currentIndexChanged, this, requestDe);
+    connect(&_deRankBy, &OptionAction::currentIndexChanged, this, requestDe);
+    connect(&_deMinDetection, &IntegralAction::valueChanged, this, requestDe);
+    connect(&_deMaxCells, &IntegralAction::valueChanged, this, requestDe);
+    connect(&_deMinCells, &IntegralAction::valueChanged, this, requestDe);
+    connect(&_traitPoolingMode, &OptionAction::currentIndexChanged, this, requestDe);
+    connect(&_traitFdrThreshold, &DecimalAction::valueChanged, this, requestDe);
     connect(&_traitMinCells, &IntegralAction::valueChanged, this, [this]() -> void { updateTraitReverseSearchFeature(); });
 
 
@@ -1328,6 +1391,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_clusterCountSortingType, &OptionAction::currentIndexChanged, this, updateClusterCountSortingType);
     // Debounced trait-correlation refresh (see updateTraitReverseSearchFeature()): bursts of requests -> one computation
     connect(&_traitJobWatcher, &QFutureWatcher<void>::finished, this, [this]() -> void { onTraitJobsFinished(); });
+    connect(&_deJobWatcher, &QFutureWatcher<void>::finished, this, [this]() -> void { onSpeciesDeJobsFinished(); });
+
+    _deTimer = new QTimer(this);
+    _deTimer->setSingleShot(true);
+    _deTimer->setInterval(80);
+    connect(_deTimer, &QTimer::timeout, this, [this]() -> void { computeSpeciesDifferentialExpression(); });
 
     _traitCorrelationTimer = new QTimer(this);
     _traitCorrelationTimer->setSingleShot(true);

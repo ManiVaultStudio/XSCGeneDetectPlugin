@@ -76,6 +76,13 @@ public:
     /** Context menu of the species table header: choose the visible columns. */
     void showDetailsColumnMenu(const QPoint& globalPosition);
 
+    // ---- species differential expression window ----
+    void showSpeciesDe();                                 /** open the window (and start computing) */
+    void refreshSpeciesDe();                              /** a new result is available */
+    void refreshSpeciesDeDetail(const QString& species);  /** volcano plot and table of one species against the others */
+    void refreshSpeciesDeHighlights();                    /** the selected species / gene changed: highlight them (same blue everywhere) */
+    bool selectGeneInGeneTable(const QString& gene);      /** select a gene in the gene table; false when it is not listed there */
+
     /** Open (or bring to front) the plot of the expression of the selected gene against the trait. */
     void showTraitPlot();
 
@@ -114,6 +121,9 @@ protected:
 
     QHash<int, QSet<int>> _detailsHiddenColumns;   /** hidden columns of the species table, per layout (keyed by its number of columns) */
     int _detailsRedundantColumn = -1;              /** column hidden because it repeats another one (middle fraction), -1: none */
+
+    QPointer<QDialog> _speciesDeDialog;   /** the species differential expression window (a SpeciesDeDialog, see the .cpp) */
+    QString _speciesDeLastGene;           /** gene that was selected when the highlights were last refreshed */
 
     QPointer<QDialog> _traitPlotDialog;   /** the plots window (a TraitPlotDialog, see the .cpp; created on first use) */
 

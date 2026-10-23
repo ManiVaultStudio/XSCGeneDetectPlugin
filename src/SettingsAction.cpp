@@ -313,6 +313,52 @@ namespace {
     }
 
     /**
+     * Like computeChunkedGeneMeans(), but also reports the fraction of cells in which each gene is detected (value != 0).
+     * callback(start, geneChunkIndices, means, detectionFractions)
+     */
+    template <typename PointIndexContainer, typename Callback>
+    void computeChunkedGeneMeansAndDetection(const mv::Dataset<Points>& pointDataset, const std::vector<int>& allGeneIndices, const PointIndexContainer& pointIndices, Callback&& callback) {
+        if (!pointDataset.isValid() || allGeneIndices.empty() || pointIndices.empty()) {
+            return;
+        }
+
+        std::vector<int> geneChunkIndices;
+        geneChunkIndices.reserve(std::min<int>(kGeneChunkSize, static_cast<int>(allGeneIndices.size())));
+        std::vector<float> chunkData;
+        std::vector<float> chunkMeans;
+        std::vector<float> chunkDetection;
+        const int pointCount = static_cast<int>(pointIndices.size());
+
+        for (int start = 0; start < static_cast<int>(allGeneIndices.size()); start += kGeneChunkSize) {
+            const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(allGeneIndices.size()) - start);
+
+            geneChunkIndices.assign(allGeneIndices.begin() + start, allGeneIndices.begin() + start + chunkSize);
+            chunkData.assign(static_cast<size_t>(pointCount) * static_cast<size_t>(chunkSize), 0.0f);
+            chunkMeans.assign(chunkSize, 0.0f);
+            chunkDetection.assign(chunkSize, 0.0f);
+
+            pointDataset->populateDataForDimensions(chunkData, geneChunkIndices, pointIndices);
+
+            for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+                const size_t rowOffset = static_cast<size_t>(pointIndex) * static_cast<size_t>(chunkSize);
+                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
+                    const float value = chunkData[rowOffset + geneOffset];
+                    chunkMeans[geneOffset] += value;
+                    chunkDetection[geneOffset] += (value != 0.0f) ? 1.0f : 0.0f;
+                }
+            }
+
+            const float inversePointCount = 1.0f / static_cast<float>(pointCount);
+            for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
+                chunkMeans[geneOffset] *= inversePointCount;
+                chunkDetection[geneOffset] *= inversePointCount;
+            }
+
+            callback(start, geneChunkIndices, chunkMeans, chunkDetection);
+        }
+    }
+
+    /**
      * Number of worker threads that keeps the temporary expression buffers within a fixed memory budget.
      * Each worker reading a gene chunk holds (points * kGeneChunkSize * 4 bytes), so very large cell sets must not
      * be processed by every core at once.
@@ -1062,6 +1108,148 @@ namespace {
             rho = std::min(rho, regularizedIncompleteBeta(static_cast<double>(k), static_cast<double>(count - k + 1), rank));
         }
         return std::min(1.0, rho * static_cast<double>(count));
+    }
+
+    // ----------------------------------------------------------------------------------------------------------
+    //  Species level differential expression: one species against all the others
+    //
+    //  Cells of a species are not independent replicates; the species are. So every species contributes ONE value per gene (its
+    //  mean expression over the selected cells) and "species A against the rest" asks how far A lies from the spread of the other
+    //  species: a single observation against a control sample (Crawford-Howell t-test). The variance of the others is
+    //  moderated (shrunk towards the typical variance of all genes, like limma) so that genes without variation among the
+    //  others (e.g. not expressed anywhere else) still get a finite, sensible statistic.
+    // ----------------------------------------------------------------------------------------------------------
+
+    /** Which genes may be reported for a species. */
+    enum class DeDirection {
+        Up,      /** higher in the species than in the others */
+        Down,    /** lower in the species than in the others */
+        Either   /** both */
+    };
+
+    /** What ranks the genes. */
+    enum class DeRank {
+        Effect,      /** size of the difference between the species and the mean of the others */
+        ModeratedT   /** moderated t statistic: the difference relative to the spread among the others */
+    };
+
+    /** Statistics of every gene for one species against the others. */
+    struct DeSpeciesStatistics {
+        std::vector<float> delta;      /** mean of the species - mean of the other species' means */
+        std::vector<float> restMean;   /** mean of the other species' means */
+        std::vector<float> restSd;     /** standard deviation of the other species' means (not moderated) */
+        std::vector<float> t;          /** moderated t statistic */
+        std::vector<float> pValue;     /** two-sided p-value */
+        double priorVariance = 0.0;    /** the typical variance the variances were shrunk towards */
+    };
+
+    /**
+     * @param speciesMeans one entry per species: mean expression of every gene (all of equal length)
+     * @param species      index of the species that is compared with all the others
+     * @param totalSum     per gene: sum over all species of the means
+     * @param totalSumSq   per gene: sum over all species of the squared means
+     * @param priorDf      weight of the prior variance in degrees of freedom
+     * Needs at least 3 species (2 others) - otherwise an empty result is returned.
+     */
+    inline DeSpeciesStatistics speciesAgainstRest(const std::vector<const std::vector<float>*>& speciesMeans, size_t species,
+        const std::vector<double>& totalSum, const std::vector<double>& totalSumSq, double priorDf = 4.0) {
+        DeSpeciesStatistics out;
+        const size_t speciesCount = speciesMeans.size();
+        const size_t geneCount = totalSum.size();
+        if (speciesCount < 3 || species >= speciesCount || totalSumSq.size() != geneCount) {
+            return out;
+        }
+
+        const double others = static_cast<double>(speciesCount - 1);
+        const double restDf = others - 1.0;
+        out.delta.assign(geneCount, 0.0f);
+        out.restMean.assign(geneCount, 0.0f);
+        out.restSd.assign(geneCount, 0.0f);
+        out.t.assign(geneCount, 0.0f);
+        out.pValue.assign(geneCount, 1.0f);
+
+        // 1. difference and variance of the others
+        std::vector<double> restVariance(geneCount, 0.0);
+        for (size_t g = 0; g < geneCount; ++g) {
+            const double own = static_cast<double>((*speciesMeans[species])[g]);
+            const double restMean = (totalSum[g] - own) / others;
+            const double restSumSq = totalSumSq[g] - own * own;
+            const double variance = std::max(0.0, (restSumSq - others * restMean * restMean) / restDf);
+            out.delta[g] = static_cast<float>(own - restMean);
+            out.restMean[g] = static_cast<float>(restMean);
+            out.restSd[g] = static_cast<float>(std::sqrt(variance));
+            restVariance[g] = variance;
+        }
+
+        // 2. prior variance: median of the positive variances
+        std::vector<double> positive;
+        positive.reserve(geneCount);
+        for (const double variance : restVariance) {
+            if (variance > 0.0) {
+                positive.push_back(variance);
+            }
+        }
+        if (!positive.empty()) {
+            const size_t middle = positive.size() / 2;
+            std::nth_element(positive.begin(), positive.begin() + static_cast<std::ptrdiff_t>(middle), positive.end());
+            out.priorVariance = positive[middle];
+        }
+
+        // 3. moderated t and p-value
+        const double df = restDf + priorDf;
+        for (size_t g = 0; g < geneCount; ++g) {
+            const double moderated = (priorDf * out.priorVariance + restDf * restVariance[g]) / (priorDf + restDf);
+            const double standardError = std::sqrt(moderated * (1.0 + 1.0 / others));
+            const double delta = static_cast<double>(out.delta[g]);
+            if (standardError > 0.0) {
+                const double t = delta / standardError;
+                out.t[g] = static_cast<float>(t);
+                out.pValue[g] = static_cast<float>(std::max(0.0, std::min(1.0, regularizedIncompleteBeta(df / 2.0, 0.5, df / (df + t * t)))));
+            }
+            else if (delta != 0.0) {
+                out.t[g] = delta > 0.0 ? 1.0e6f : -1.0e6f; // no variation at all and a difference: as extreme as it gets
+                out.pValue[g] = 0.0f;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The genes to report for one species: significant (FDR below \p fdrLevel), detected in at least \p minDetection of the cells of
+     * the group that has the higher expression, in the wanted direction; the best \p count by the chosen rank.
+     * @param detection      per gene: fraction of cells of the species with the gene detected
+     * @param restDetection  per gene: mean over the other species of that fraction
+     */
+    inline std::vector<size_t> selectTopDeGenes(const DeSpeciesStatistics& statistics, const std::vector<float>& fdr,
+        const std::vector<float>& detection, const std::vector<float>& restDetection,
+        double fdrLevel, double minDetection, DeDirection direction, DeRank rank, size_t count) {
+        std::vector<std::pair<double, size_t>> candidates;
+        for (size_t g = 0; g < statistics.delta.size(); ++g) {
+            if (!(static_cast<double>(fdr[g]) < fdrLevel)) {
+                continue;
+            }
+            const double delta = static_cast<double>(statistics.delta[g]);
+            const bool up = delta > 0.0 && static_cast<double>(detection[g]) >= minDetection;
+            const bool down = delta < 0.0 && static_cast<double>(restDetection[g]) >= minDetection;
+            const bool eligible = (direction == DeDirection::Up && up) || (direction == DeDirection::Down && down) || (direction == DeDirection::Either && (up || down));
+            if (eligible) {
+                const double score = rank == DeRank::Effect ? std::fabs(delta) : std::fabs(static_cast<double>(statistics.t[g]));
+                candidates.emplace_back(score, g);
+            }
+        }
+
+        const size_t keep = std::min(count, candidates.size());
+        std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(keep), candidates.end(),
+            [](const std::pair<double, size_t>& a, const std::pair<double, size_t>& b) {
+                return a.first != b.first ? a.first > b.first : a.second < b.second; // ties: the gene that comes first
+            });
+
+        std::vector<size_t> top;
+        top.reserve(keep);
+        for (size_t i = 0; i < keep; ++i) {
+            top.push_back(candidates[i].second);
+        }
+        return top;
     }
 
 } // namespace

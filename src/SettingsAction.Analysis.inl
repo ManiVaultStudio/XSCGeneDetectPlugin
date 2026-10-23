@@ -1301,6 +1301,7 @@ void SettingsAction::updateClusterInfoStatusBar()
                         _selectedClusterLabel = _clusterLabelsByName.value(_selectedClusterName).data();
                         applyClusterLabelSelectionStyles();
                         updateTraitReverseSearchFeature();
+                        requestSpeciesDifferentialExpression(); // (does nothing while the species DE window is closed)
                     }
                     });
 
@@ -1507,9 +1508,9 @@ void SettingsAction::precomputeTreesFromHierarchy()
 
         if (!mainPointDimensionNames.empty()) {
             std::map<QString, QVector<Cluster>> combinedClusters = {
-                {"top", topClusters},
-                {"middle", middleClusters},
-                {"bottom", bottomClusters}
+                { "top", topClusters },
+                { "middle", middleClusters },
+                { "bottom", bottomClusters }
             };
 
             // Read the option once on the GUI thread instead of from every worker thread
@@ -2450,7 +2451,7 @@ void SettingsAction::computeTraitCorrelation()
                 if (_traitCache.entries.count(key) > 0) {
                     continue;
                 }
-                jobs.push_back({ key, &_traitCache.speciesSorted.at(species), &_traitCache.cellTypeSorted.at(cellType), {} });
+                jobs.push_back({ key, &_traitCache.speciesSorted.at(species), &_traitCache.cellTypeSorted.at(cellType),{} });
             }
         }
         return jobs;
@@ -2897,7 +2898,7 @@ void SettingsAction::findTopNGenesPerCluster() {
     std::vector<SpeciesRanking> speciesRankings;
     speciesRankings.reserve(_clusterNameToGeneNameToExpressionValue.size());
     for (const auto& outerPair : _clusterNameToGeneNameToExpressionValue) {
-        speciesRankings.push_back({ outerPair.first, &outerPair.second, {}, {} });
+        speciesRankings.push_back({ outerPair.first, &outerPair.second,{},{} });
         speciesOrder.push_back(outerPair.first);
     }
 
@@ -3233,3 +3234,469 @@ void SettingsAction::findTopNGenesPerCluster() {
     //return returnedmodel;
 }
 
+
+
+// ============================================================================================================
+//  Species differential expression: every species against all the others
+//
+//  Why it is fast: for every (species, selected cell type) pair the mean expression and the fraction of cells expressing every
+//  gene are read ONCE (in the background, with a cell cap) and cached. After that, all comparisons - 25 species against the
+//  rest, any top-N, any direction, any significance level - are a few arithmetic operations per gene on those cached values.
+//  Only the cell type selection or the cell cap need new data.
+//
+//  Why it is sound: the species, not the cells, are the replicates. A species contributes ONE value per gene and the
+//  comparison "species A against the other species" is a single observation against a control sample.
+// ============================================================================================================
+
+/** Leaf names of a species tree in the order of the tree (related species end up next to each other). */
+static void collectLeafNamesInOrder(const QJsonObject& node, QStringList& names)
+{
+    const QJsonArray children = node.value("children").toArray();
+    if (children.isEmpty()) {
+        const QString name = node.value("name").toString();
+        if (!name.isEmpty()) {
+            names << name;
+        }
+        return;
+    }
+    for (const QJsonValue& child : children) {
+        collectLeafNamesInOrder(child.toObject(), names);
+    }
+}
+
+void SettingsAction::setSpeciesDeActive(bool active)
+{
+    _deActive = active;
+    if (active) {
+        requestSpeciesDifferentialExpression();
+    }
+}
+
+void SettingsAction::requestSpeciesDifferentialExpression()
+{
+    if (!_deActive) {
+        return;
+    }
+    if (_deTimer) {
+        _deTimer->start(); // restarts the single-shot timer: a burst of changes gives one computation
+    }
+    else {
+        computeSpeciesDifferentialExpression();
+    }
+}
+
+void SettingsAction::onSpeciesDeJobsFinished()
+{
+    QGuiApplication::restoreOverrideCursor();
+    if (_deJobs) {
+        for (auto& job : *_deJobs) {
+            _deCache.moments[job.key] = std::move(job.entry);
+        }
+        _deJobs.reset();
+    }
+    _deJobDataset = Dataset<Points>();
+    _deJobRunning = false;
+    _deRecomputePending = false;
+
+    computeSpeciesDifferentialExpression(); // everything is cached now (or the selection changed meanwhile)
+}
+
+void SettingsAction::computeSpeciesDifferentialExpression()
+{
+    if (!_deActive) {
+        return;
+    }
+    // The cache is being filled in the background: just remember that something changed.
+    if (_deJobRunning) {
+        _deRecomputePending = true;
+        return;
+    }
+
+    const auto finishWith = [this](const QString& message) {
+        _deResult = SpeciesDeResult();
+        _deResult.message = message;
+        _deState = DeState();
+        if (_speciesDeFinished) {
+            _speciesDeFinished();
+        }
+        };
+
+    // ---- 1. Inputs -------------------------------------------------------------------------------------------
+    if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
+        finishWith("The datasets are not available yet.");
+        return;
+    }
+
+    QStringList cellTypes = _selectedClusterNames;
+    if (cellTypes.isEmpty() && !_selectedClusterName.isEmpty()) {
+        cellTypes << _selectedClusterName;
+    }
+    if (cellTypes.isEmpty()) {
+        finishWith("Select a cell type first (click a cell type label of the status bar; Shift + click selects several).");
+        return;
+    }
+
+    Dataset<Points> mainPointsDataset = _mainPointsDataset.getCurrentDataset();
+    const std::vector<QString> geneNames = mainPointsDataset->getDimensionNames();
+    const size_t geneCount = geneNames.size();
+    if (geneCount == 0) {
+        finishWith("The dataset has no genes.");
+        return;
+    }
+
+    // ---- 2. Cache: valid as long as the datasets and the cell cap stay the same ------------------------------
+    Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
+    Dataset<Clusters> cellTypeDataset = _bottomClusterNamesDataset.getCurrentDataset();
+    const int maxCells = std::max(0, _deMaxCells.getValue());
+    const QString cacheKey = mainPointsDataset->getId() + QLatin1Char('|') + speciesDataset->getId() + QLatin1Char('|') + cellTypeDataset->getId() + QLatin1Char('|') + QString::number(maxCells);
+    if (cacheKey != _deCache.key) {
+        _deCache = DeCache();
+        _deCache.key = cacheKey;
+    }
+
+    const auto speciesClusters = speciesDataset->getClusters();
+    const auto cellTypeClusters = cellTypeDataset->getClusters();
+
+    // sorted point indices of every species (once per dataset, sorted concurrently)
+    if (!_deCache.sortedBuilt) {
+        struct SortJob {
+            int index = 0;
+            std::vector<int> points;
+        };
+        std::vector<SortJob> sortJobs(speciesClusters.size());
+        for (int i = 0; i < static_cast<int>(sortJobs.size()); ++i) {
+            sortJobs[i].index = i;
+        }
+        QtConcurrent::blockingMap(sortJobs, [&](SortJob& job) {
+            const auto& idx = speciesClusters[job.index].getIndices();
+            job.points.assign(idx.begin(), idx.end());
+            std::sort(job.points.begin(), job.points.end());
+            });
+        for (auto& job : sortJobs) {
+            _deCache.speciesSorted[speciesClusters[job.index].getName()] = std::move(job.points);
+        }
+        _deCache.sortedBuilt = true;
+    }
+    // sorted point indices of the selected cell types (on first use)
+    for (const QString& cellType : cellTypes) {
+        if (_deCache.cellTypeSorted.count(cellType) > 0) {
+            continue;
+        }
+        std::vector<int> sortedPoints;
+        for (const auto& cluster : cellTypeClusters) {
+            if (cluster.getName() == cellType) {
+                const auto& idx = cluster.getIndices();
+                sortedPoints.assign(idx.begin(), idx.end());
+                std::sort(sortedPoints.begin(), sortedPoints.end());
+                break;
+            }
+        }
+        _deCache.cellTypeSorted[cellType] = std::move(sortedPoints);
+    }
+
+    std::vector<QString> allSpecies;
+    for (const auto& entry : _deCache.speciesSorted) {
+        allSpecies.push_back(entry.first);
+    }
+    std::sort(allSpecies.begin(), allSpecies.end());
+
+    const auto entryKey = [](const QString& species, const QString& cellType) {
+        return species + QLatin1Char('\x1f') + cellType;
+        };
+
+    // ---- 3. Read what is missing, in the BACKGROUND -----------------------------------------------------------
+    {
+        std::vector<DeEntryJob> missing;
+        for (const QString& species : allSpecies) {
+            for (const QString& cellType : cellTypes) {
+                const QString key = entryKey(species, cellType);
+                if (_deCache.moments.count(key) == 0) {
+                    missing.push_back({ key, &_deCache.speciesSorted.at(species), &_deCache.cellTypeSorted.at(cellType),{} });
+                }
+            }
+        }
+
+        if (!missing.empty()) {
+            size_t largestPointSet = 0;
+            for (const auto& job : missing) {
+                largestPointSet = std::max(largestPointSet, std::min(job.speciesPoints->size(), job.cellTypePoints->size()));
+            }
+            if (maxCells > 0) {
+                largestPointSet = std::min(largestPointSet, static_cast<size_t>(maxCells));
+            }
+
+            _deJobs = std::make_shared<std::vector<DeEntryJob>>(std::move(missing));
+            _deJobDataset = mainPointsDataset;
+            _deJobRunning = true;
+            QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+
+            const auto jobs = _deJobs;
+            const Dataset<Points>* datasetHandle = &_deJobDataset;
+            const int workers = parallelWorkers(largestPointSet);
+            std::vector<int> allGeneIndices(geneCount);
+            std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
+
+            _deJobWatcher.setFuture(QtConcurrent::run([jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices]() {
+                QThreadPool pool;
+                pool.setMaxThreadCount(workers);
+                QtConcurrent::blockingMap(&pool, *jobs, [&](DeEntryJob& job) {
+                    std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+
+                    // cell cap: an even sample of the cells (deterministic, so the result does not change from run to run)
+                    if (maxCells > 0 && static_cast<int>(points.size()) > maxCells) {
+                        std::vector<int> sampled;
+                        sampled.reserve(static_cast<size_t>(maxCells));
+                        for (int i = 0; i < maxCells; ++i) {
+                            sampled.push_back(points[static_cast<size_t>((static_cast<long long>(i) * static_cast<long long>(points.size())) / maxCells)]);
+                        }
+                        points.swap(sampled);
+                    }
+
+                    job.entry.cellCount = static_cast<int>(points.size());
+                    if (points.empty()) {
+                        return; // remembered as "no cells" so it is not looked up again
+                    }
+                    job.entry.means.assign(geneCount, 0.0f);
+                    job.entry.detection.assign(geneCount, 0.0f);
+                    computeChunkedGeneMeansAndDetection(*datasetHandle, allGeneIndices, points,
+                        [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& means, const std::vector<float>& detection) {
+                            for (size_t g = 0; g < chunkGenes.size(); ++g) {
+                                job.entry.means[static_cast<size_t>(start) + g] = means[g];
+                                job.entry.detection[static_cast<size_t>(start) + g] = detection[g];
+                            }
+                        });
+                    });
+                }));
+            return; // continues in onSpeciesDeJobsFinished()
+        }
+    }
+
+    // ---- 4. One value per species and gene: the pooled mean expression and detection -----------------------
+    const int minCells = std::max(1, _deMinCells.getValue());
+    const bool equalWeighting = (_traitPoolingMode.getCurrentText() == "Equal cell-type weighting");
+    const TraitPooling pooling = equalWeighting ? TraitPooling::EqualCellTypeWeight : TraitPooling::PoolCells;
+
+    // species in the order of the species tree (related species next to each other); the others alphabetically after them
+    QStringList treeOrder;
+    {
+        const auto treePicker = _referenceTreeDataset.getCurrentDataset();
+        if (treePicker.isValid()) {
+            auto referenceTree = mv::data().getDataset<XSCTree>(treePicker.getDatasetId());
+            if (referenceTree.isValid()) {
+                collectLeafNamesInOrder(referenceTree->getTreeData(), treeOrder);
+            }
+        }
+    }
+    std::vector<QString> ordered;
+    for (const QString& name : treeOrder) {
+        if (std::find(allSpecies.begin(), allSpecies.end(), name) != allSpecies.end() && std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(name);
+        }
+    }
+    for (const QString& name : allSpecies) {
+        if (std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(name);
+        }
+    }
+
+    DeState state;
+    state.geneNames = geneNames;
+    const GeneRange fullRange{ 0, geneCount };
+    for (const QString& species : ordered) {
+        std::vector<CellTypeMeans> meanParts;
+        std::vector<CellTypeMeans> detectionParts;
+        int totalCells = 0;
+        bool anyCellTypeBigEnough = false;
+        for (const QString& cellType : cellTypes) {
+            const auto it = _deCache.moments.find(entryKey(species, cellType));
+            if (it == _deCache.moments.end() || it->second.cellCount <= 0) {
+                continue;
+            }
+            const DeCache::Entry& entry = it->second;
+            totalCells += entry.cellCount;
+            anyCellTypeBigEnough = anyCellTypeBigEnough || entry.cellCount >= minCells;
+            if (!equalWeighting || entry.cellCount >= minCells) {
+                meanParts.push_back({ static_cast<size_t>(entry.cellCount), &entry.means });
+                detectionParts.push_back({ static_cast<size_t>(entry.cellCount), &entry.detection });
+            }
+        }
+        if (!(equalWeighting ? anyCellTypeBigEnough : totalCells >= minCells)) {
+            continue; // too few cells: the mean would be noise
+        }
+
+        std::vector<float> meanRow(geneCount, 0.0f);
+        std::vector<float> detectionRow(geneCount, 0.0f);
+        combineCellTypeMeans(meanParts, pooling, fullRange, meanRow);
+        combineCellTypeMeans(detectionParts, pooling, fullRange, detectionRow);
+        state.species.push_back(species);
+        state.means.push_back(std::move(meanRow));
+        state.detection.push_back(std::move(detectionRow));
+        state.cells.push_back(totalCells);
+    }
+
+    const size_t speciesCount = state.species.size();
+    if (speciesCount < 3) {
+        finishWith(QString("At least 3 species with %1 or more cells of the selected cell type(s) are needed; found %2.").arg(minCells).arg(speciesCount));
+        return;
+    }
+
+    state.totalSum.assign(geneCount, 0.0);
+    state.totalSumSq.assign(geneCount, 0.0);
+    state.totalDetection.assign(geneCount, 0.0);
+    for (size_t s = 0; s < speciesCount; ++s) {
+        for (size_t g = 0; g < geneCount; ++g) {
+            const double mean = static_cast<double>(state.means[s][g]);
+            state.totalSum[g] += mean;
+            state.totalSumSq[g] += mean * mean;
+            state.totalDetection[g] += static_cast<double>(state.detection[s][g]);
+        }
+    }
+
+    // ---- 5. Every species against the others (parallel over species) -----------------------------------------
+    const DeDirection direction = _deDirection.getCurrentIndex() == 1 ? DeDirection::Down : (_deDirection.getCurrentIndex() == 2 ? DeDirection::Either : DeDirection::Up);
+    const DeRank rank = _deRankBy.getCurrentIndex() == 1 ? DeRank::ModeratedT : DeRank::Effect;
+    const size_t topCount = static_cast<size_t>(std::max(1, _deTopGenes.getValue()));
+    const double minDetection = static_cast<double>(std::max(0, _deMinDetection.getValue())) / 100.0;
+    const double level = significanceLevel();
+
+    std::vector<const std::vector<float>*> meanPointers;
+    for (const auto& row : state.means) {
+        meanPointers.push_back(&row);
+    }
+
+    std::vector<SpeciesDeComparison> comparisons(speciesCount);
+    std::vector<size_t> speciesIndices(speciesCount);
+    std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
+    QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
+        const DeSpeciesStatistics statistics = speciesAgainstRest(meanPointers, s, state.totalSum, state.totalSumSq);
+        const std::vector<float> fdr = benjaminiHochberg(statistics.pValue);
+
+        std::vector<float> restDetection(geneCount);
+        for (size_t g = 0; g < geneCount; ++g) {
+            restDetection[g] = static_cast<float>((state.totalDetection[g] - static_cast<double>(state.detection[s][g])) / static_cast<double>(speciesCount - 1));
+        }
+
+        const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, state.detection[s], restDetection, level, minDetection, direction, rank, topCount);
+
+        SpeciesDeComparison& comparison = comparisons[s];
+        comparison.species = state.species[s];
+        comparison.cells = state.cells[s];
+        comparison.topGenes.reserve(static_cast<int>(top.size()));
+        for (const size_t g : top) {
+            SpeciesDeGene gene;
+            gene.gene = geneNames[g];
+            gene.geneIndex = static_cast<int>(g);
+            gene.delta = statistics.delta[g];
+            gene.restMean = statistics.restMean[g];
+            gene.restSd = statistics.restSd[g];
+            gene.t = statistics.t[g];
+            gene.pValue = statistics.pValue[g];
+            gene.fdr = fdr[g];
+            gene.detection = state.detection[s][g];
+            gene.restDetection = restDetection[g];
+            comparison.topGenes.push_back(gene);
+        }
+        });
+
+    // ---- 6. Result: the union of the top genes (grouped by species) and their difference in every species --------
+    SpeciesDeResult result;
+    result.valid = true;
+    result.cellTypes = cellTypes;
+    for (const QString& species : state.species) {
+        result.species << species;
+    }
+    std::unordered_map<QString, int> seen;
+    for (size_t s = 0; s < speciesCount; ++s) {
+        result.comparisons.push_back(comparisons[s]);
+        for (const SpeciesDeGene& gene : comparisons[s].topGenes) {
+            if (seen.count(gene.gene) == 0) {
+                seen[gene.gene] = result.heatmapGenes.size();
+                result.heatmapGenes << gene.gene;
+                result.heatmapOwner << static_cast<int>(s);
+            }
+        }
+    }
+    const double others = static_cast<double>(speciesCount - 1);
+    result.heatmapDelta.resize(static_cast<int>(speciesCount));
+    for (size_t s = 0; s < speciesCount; ++s) {
+        result.heatmapDelta[static_cast<int>(s)].resize(result.heatmapGenes.size());
+    }
+    for (int column = 0; column < result.heatmapGenes.size(); ++column) {
+        int geneIndex = -1;
+        for (const SpeciesDeGene& gene : comparisons[static_cast<size_t>(result.heatmapOwner[column])].topGenes) {
+            if (gene.gene == result.heatmapGenes[column]) {
+                geneIndex = gene.geneIndex;
+                break;
+            }
+        }
+        if (geneIndex < 0) {
+            continue;
+        }
+        const size_t g = static_cast<size_t>(geneIndex);
+        for (size_t s = 0; s < speciesCount; ++s) {
+            const double own = static_cast<double>(state.means[s][g]);
+            result.heatmapDelta[static_cast<int>(s)][column] = static_cast<float>(own - (state.totalSum[g] - own) / others);
+        }
+    }
+
+    result.message = QString("%1 species, each against the other %2. Cell type(s): %3. Cells pooled per species (%4), at most %5 cells per species and cell type; "
+        "species with fewer than %6 cells are left out. The test treats the species as replicates (single case against the other species, moderated variance), "
+        "genes with FDR below %7 and detected in at least %8% of the cells are ranked.")
+        .arg(speciesCount).arg(speciesCount - 1).arg(cellTypes.join(", "))
+        .arg(equalWeighting ? "equal cell-type weighting" : "all cells pooled")
+        .arg(maxCells > 0 ? QString::number(maxCells) : QString("all")).arg(minCells).arg(level).arg(static_cast<int>(minDetection * 100.0 + 0.5));
+
+    _deState = std::move(state);
+    _deResult = std::move(result);
+    if (_speciesDeFinished) {
+        _speciesDeFinished();
+    }
+}
+
+SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
+{
+    SpeciesDeDetail detail;
+    const auto it = std::find(_deState.species.begin(), _deState.species.end(), species);
+    if (it == _deState.species.end() || _deState.species.size() < 3) {
+        return detail;
+    }
+    const size_t s = static_cast<size_t>(std::distance(_deState.species.begin(), it));
+    const size_t speciesCount = _deState.species.size();
+    const size_t geneCount = _deState.geneNames.size();
+
+    std::vector<const std::vector<float>*> meanPointers;
+    for (const auto& row : _deState.means) {
+        meanPointers.push_back(&row);
+    }
+    const DeSpeciesStatistics statistics = speciesAgainstRest(meanPointers, s, _deState.totalSum, _deState.totalSumSq);
+    const std::vector<float> fdr = benjaminiHochberg(statistics.pValue);
+    std::vector<float> restDetection(geneCount);
+    for (size_t g = 0; g < geneCount; ++g) {
+        restDetection[g] = static_cast<float>((_deState.totalDetection[g] - static_cast<double>(_deState.detection[s][g])) / static_cast<double>(speciesCount - 1));
+    }
+
+    // the same selection as in the overview
+    const DeDirection direction = _deDirection.getCurrentIndex() == 1 ? DeDirection::Down : (_deDirection.getCurrentIndex() == 2 ? DeDirection::Either : DeDirection::Up);
+    const DeRank rank = _deRankBy.getCurrentIndex() == 1 ? DeRank::ModeratedT : DeRank::Effect;
+    const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, _deState.detection[s], restDetection, significanceLevel(),
+        static_cast<double>(std::max(0, _deMinDetection.getValue())) / 100.0, direction, rank, static_cast<size_t>(std::max(1, _deTopGenes.getValue())));
+
+    detail.valid = true;
+    detail.species = species;
+    detail.genes.reserve(static_cast<int>(geneCount));
+    for (const QString& gene : _deState.geneNames) {
+        detail.genes << gene;
+    }
+    detail.delta = QVector<float>(statistics.delta.begin(), statistics.delta.end());
+    detail.restMean = QVector<float>(statistics.restMean.begin(), statistics.restMean.end());
+    detail.restSd = QVector<float>(statistics.restSd.begin(), statistics.restSd.end());
+    detail.t = QVector<float>(statistics.t.begin(), statistics.t.end());
+    detail.pValue = QVector<float>(statistics.pValue.begin(), statistics.pValue.end());
+    detail.fdr = QVector<float>(fdr.begin(), fdr.end());
+    detail.detection = QVector<float>(_deState.detection[s].begin(), _deState.detection[s].end());
+    detail.restDetection = QVector<float>(restDetection.begin(), restDetection.end());
+    for (const size_t g : top) {
+        detail.top << static_cast<int>(g);
+    }
+    return detail;
+}
