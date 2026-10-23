@@ -1207,6 +1207,27 @@ void XSCGeneDetectPlugin::init()
     performanceLayout->addWidget(performanceWidget);
     mainOptionsLayout->addLayout(performanceLayout);
 
+    // Differential expression of every species against all the others
+    auto speciesDeGroup = new VerticalGroupAction(this, "Species differential expression");
+    speciesDeGroup->setIcon(mv::util::StyledIcon("chart-bar"));
+    speciesDeGroup->addAction(&_settingsAction.getShowSpeciesDe());
+    speciesDeGroup->addAction(&_settingsAction.getDeTopGenes());
+    speciesDeGroup->addAction(&_settingsAction.getDeDirection());
+    speciesDeGroup->addAction(&_settingsAction.getDeRankBy());
+    speciesDeGroup->addAction(&_settingsAction.getDeMinDetection());
+    speciesDeGroup->addAction(&_settingsAction.getDeMaxCells());
+    speciesDeGroup->addAction(&_settingsAction.getDeMinCells());
+
+    auto speciesDeLayout = new QVBoxLayout();
+    auto speciesDeWidget = speciesDeGroup->createCollapsedWidget(&getWidget());
+    speciesDeWidget->setMaximumHeight(22);
+    speciesDeLayout->addWidget(speciesDeWidget);
+    mainOptionsLayout->addLayout(speciesDeLayout);
+
+    connect(&_settingsAction.getShowSpeciesDe(), &TriggerAction::triggered, this, [this]() { showSpeciesDe(); });
+    // the selected species are highlighted in the window (same blue as everywhere)
+    connect(&_settingsAction.getSpeciesExplorerInMap(), &OptionsAction::selectedOptionsChanged, this, [this]() { refreshSpeciesDeHighlights(); });
+
     auto downloadOptionsGroup = new VerticalGroupAction(this, "Save table as CSV");
     downloadOptionsGroup->setIcon(mv::util::StyledIcon("download"));
     downloadOptionsGroup->addAction(&_settingsAction.getSaveGeneTable());
@@ -2223,6 +2244,748 @@ private:
 };
 
 // ============================================================================================================
+//  Species differential expression: heatmap and window
+// ============================================================================================================
+
+/**
+ * Heatmap with row/column labels, a diverging colour scale, zoom (wheel; Shift: columns only, Ctrl: rows only), pan (drag),
+ * hover details and clicks on cells and labels. Selected rows and columns are outlined and labelled in the blue that marks
+ * the selection everywhere in the plugin. (No Q_OBJECT: the owner is informed through callbacks.)
+ */
+class HeatmapWidget : public QWidget
+{
+public:
+    explicit HeatmapWidget(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setMinimumSize(560, 380);
+        setMouseTracking(true);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    void setData(const QStringList& rowLabels, const QStringList& columnLabels, const QVector<QVector<float>>& values, const QVector<int>& columnGroup)
+    {
+        _rowLabels = rowLabels;
+        _columnLabels = columnLabels;
+        _values = values;
+        _columnGroup = columnGroup;
+
+        // colour scale: the 98th percentile of the absolute values, so that a few extreme genes do not wash out the rest
+        QVector<float> magnitudes;
+        for (const QVector<float>& row : _values) {
+            for (const float value : row) {
+                if (value != 0.0f)
+                    magnitudes.push_back(std::abs(value));
+            }
+        }
+        _scale = 1.0;
+        if (!magnitudes.isEmpty()) {
+            std::sort(magnitudes.begin(), magnitudes.end());
+            _scale = static_cast<double>(magnitudes[static_cast<int>(0.98 * (magnitudes.size() - 1))]);
+        }
+        if (_scale <= 0.0)
+            _scale = 1.0;
+
+        _hovered = QPoint(-1, -1);
+        resetView();
+    }
+
+    void setHighlight(const QSet<int>& rows, const QSet<int>& columns) { _highlightRows = rows; _highlightColumns = columns; update(); }
+    void setDetailProvider(std::function<QString(int row, int column)> provider) { _detailProvider = std::move(provider); }
+    void setOnCellClicked(std::function<void(int row, int column)> callback) { _onCellClicked = std::move(callback); }
+    void setOnRowLabelClicked(std::function<void(int row, bool additive)> callback) { _onRowLabelClicked = std::move(callback); }
+    void setOnColumnLabelClicked(std::function<void(int column)> callback) { _onColumnLabelClicked = std::move(callback); }
+
+    void resetView()
+    {
+        _col0 = 0.0;
+        _col1 = std::max(1, static_cast<int>(_columnLabels.size()));
+        _row0 = 0.0;
+        _row1 = std::max(1, static_cast<int>(_rowLabels.size()));
+        update();
+    }
+
+    void zoomBy(double factor) { zoomAround(QPointF(plotRect().center()), factor, false, false); }
+
+protected:
+    int leftMargin() const
+    {
+        const QFontMetrics metrics(font());
+        int width = 0;
+        for (const QString& label : _rowLabels)
+            width = std::max(width, metrics.horizontalAdvance(label));
+        return std::min(220, width + 14);
+    }
+    int bottomMargin() const { return _columnLabels.isEmpty() ? 20 : 120; }
+    QRect plotRect() const { return QRect(leftMargin(), 34, std::max(10, width() - leftMargin() - 16), std::max(10, height() - 34 - bottomMargin())); }
+    double cellWidth() const { return plotRect().width() / (_col1 - _col0); }
+    double cellHeight() const { return plotRect().height() / (_row1 - _row0); }
+
+    QColor colorFor(float value) const
+    {
+        const double t = std::max(-1.0, std::min(1.0, static_cast<double>(value) / _scale));
+        // dark grey for higher, orange for lower than the other species (both already used in the tables); blue is reserved for the selection
+        const QColor positive(64, 64, 64);
+        const QColor negative(255, 93, 18);
+        const QColor& target = t >= 0.0 ? positive : negative;
+        const double amount = std::abs(t);
+        return QColor(static_cast<int>(255 + (target.red() - 255) * amount), static_cast<int>(255 + (target.green() - 255) * amount), static_cast<int>(255 + (target.blue() - 255) * amount));
+    }
+
+    QPoint cellAt(const QPointF& pixel) const
+    {
+        const QRect plot = plotRect();
+        if (!plot.contains(pixel.toPoint()) || _rowLabels.isEmpty() || _columnLabels.isEmpty())
+            return QPoint(-1, -1);
+        const int column = static_cast<int>(std::floor(_col0 + (pixel.x() - plot.left()) / cellWidth()));
+        const int row = static_cast<int>(std::floor(_row0 + (pixel.y() - plot.top()) / cellHeight()));
+        if (column < 0 || column >= _columnLabels.size() || row < 0 || row >= _rowLabels.size())
+            return QPoint(-1, -1);
+        return QPoint(column, row);
+    }
+
+    void zoomAround(const QPointF& pixel, double factor, bool columnsOnly, bool rowsOnly)
+    {
+        const QRect plot = plotRect();
+        const double centerColumn = _col0 + (pixel.x() - plot.left()) / plot.width() * (_col1 - _col0);
+        const double centerRow = _row0 + (pixel.y() - plot.top()) / plot.height() * (_row1 - _row0);
+        const auto zoom = [](double& low, double& high, double center, double scale, double limit) {
+            double newLow = center - (center - low) * scale;
+            double newHigh = center + (high - center) * scale;
+            if (newHigh - newLow < std::min(3.0, limit)) // never zoom in to less than three cells
+                return;
+            newLow = std::max(0.0, newLow);
+            newHigh = std::min(limit, newHigh);
+            if (newHigh > newLow) {
+                low = newLow;
+                high = newHigh;
+            }
+            };
+        if (!rowsOnly)
+            zoom(_col0, _col1, centerColumn, factor, std::max(1, static_cast<int>(_columnLabels.size())));
+        if (!columnsOnly)
+            zoom(_row0, _row1, centerRow, factor, std::max(1, static_cast<int>(_rowLabels.size())));
+        update();
+    }
+
+    // ---- events ----
+    void wheelEvent(QWheelEvent* event) override
+    {
+        zoomAround(event->position(), event->angleDelta().y() > 0 ? 0.85 : 1.0 / 0.85,
+            event->modifiers().testFlag(Qt::ShiftModifier), event->modifiers().testFlag(Qt::ControlModifier));
+        event->accept();
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            _dragging = true;
+            _dragMoved = false;
+            _lastPosition = event->position();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (_dragging) {
+            const QPointF delta = event->position() - _lastPosition;
+            if (std::abs(delta.x()) + std::abs(delta.y()) > 2.0)
+                _dragMoved = true;
+            const QRect plot = plotRect();
+            const double shiftColumns = delta.x() / plot.width() * (_col1 - _col0);
+            const double shiftRows = delta.y() / plot.height() * (_row1 - _row0);
+            const double columnLimit = std::max(1, static_cast<int>(_columnLabels.size()));
+            const double rowLimit = std::max(1, static_cast<int>(_rowLabels.size()));
+            if (_col0 - shiftColumns >= 0.0 && _col1 - shiftColumns <= columnLimit) {
+                _col0 -= shiftColumns;
+                _col1 -= shiftColumns;
+            }
+            if (_row0 - shiftRows >= 0.0 && _row1 - shiftRows <= rowLimit) {
+                _row0 -= shiftRows;
+                _row1 -= shiftRows;
+            }
+            _lastPosition = event->position();
+            update();
+            return;
+        }
+
+        const QPoint cell = cellAt(event->position());
+        if (cell != _hovered) {
+            _hovered = cell;
+            update();
+            if (cell.x() >= 0 && _detailProvider)
+                QToolTip::showText(event->globalPosition().toPoint(), _detailProvider(cell.y(), cell.x()), this);
+            else
+                QToolTip::hideText();
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton)
+            return;
+        const bool wasClick = _dragging && !_dragMoved;
+        _dragging = false;
+        if (!wasClick)
+            return;
+
+        const QRect plot = plotRect();
+        const QPointF pixel = event->position();
+        if (_hovered.x() >= 0 && _onCellClicked) {
+            _onCellClicked(_hovered.y(), _hovered.x());
+        }
+        else if (pixel.x() < plot.left() && pixel.y() >= plot.top() && pixel.y() <= plot.bottom() && _onRowLabelClicked) {
+            const int row = static_cast<int>(std::floor(_row0 + (pixel.y() - plot.top()) / cellHeight()));
+            if (row >= 0 && row < _rowLabels.size())
+                _onRowLabelClicked(row, event->modifiers().testFlag(Qt::ControlModifier));
+        }
+        else if (pixel.y() > plot.bottom() && pixel.x() >= plot.left() && pixel.x() <= plot.right() && _onColumnLabelClicked) {
+            const int column = static_cast<int>(std::floor(_col0 + (pixel.x() - plot.left()) / cellWidth()));
+            if (column >= 0 && column < _columnLabels.size())
+                _onColumnLabelClicked(column);
+        }
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent*) override { resetView(); }
+
+    void leaveEvent(QEvent*) override
+    {
+        _hovered = QPoint(-1, -1);
+        update();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal)
+            zoomBy(0.8);
+        else if (event->key() == Qt::Key_Minus)
+            zoomBy(1.25);
+        else if (event->key() == Qt::Key_0 || event->key() == Qt::Key_Home)
+            resetView();
+        else
+            QWidget::keyPressEvent(event);
+    }
+
+    // ---- painting ----
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), palette().color(QPalette::Base));
+        const QColor textColor = palette().color(QPalette::Text);
+        const QColor selectionBlue("#00A2ED"); // the highlight colour of the whole plugin
+        const QRect plot = plotRect();
+
+        if (_rowLabels.isEmpty() || _columnLabels.isEmpty()) {
+            painter.setPen(textColor);
+            painter.drawText(rect(), Qt::AlignCenter, "No data to show");
+            return;
+        }
+
+        const double cw = cellWidth();
+        const double ch = cellHeight();
+        const int firstColumn = std::max(0, static_cast<int>(std::floor(_col0)));
+        const int lastColumn = std::min(static_cast<int>(_columnLabels.size()) - 1, static_cast<int>(std::ceil(_col1)));
+        const int firstRow = std::max(0, static_cast<int>(std::floor(_row0)));
+        const int lastRow = std::min(static_cast<int>(_rowLabels.size()) - 1, static_cast<int>(std::ceil(_row1)));
+        const QFontMetrics metrics(font());
+
+        // ---- cells ----
+        painter.save();
+        painter.setClipRect(plot);
+        for (int row = firstRow; row <= lastRow; ++row) {
+            for (int column = firstColumn; column <= lastColumn; ++column) {
+                const float value = (row < _values.size() && column < _values[row].size()) ? _values[row][column] : 0.0f;
+                painter.fillRect(QRectF(plot.left() + (column - _col0) * cw, plot.top() + (row - _row0) * ch, cw + 0.6, ch + 0.6), colorFor(value));
+            }
+        }
+
+        // faint separators between the groups of columns (the genes of one species belong together)
+        painter.setPen(QPen(palette().color(QPalette::Mid), 1));
+        for (int column = std::max(1, firstColumn); column <= lastColumn; ++column) {
+            if (column < _columnGroup.size() && _columnGroup[column] != _columnGroup[column - 1]) {
+                const double x = plot.left() + (column - _col0) * cw;
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+            }
+        }
+
+        // selected species (rows) and gene (columns): outlined in blue
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(selectionBlue, 2));
+        for (const int row : _highlightRows) {
+            if (row >= firstRow && row <= lastRow)
+                painter.drawRect(QRectF(plot.left(), plot.top() + (row - _row0) * ch, plot.width(), ch));
+        }
+        for (const int column : _highlightColumns) {
+            if (column >= firstColumn && column <= lastColumn)
+                painter.drawRect(QRectF(plot.left() + (column - _col0) * cw, plot.top(), cw, plot.height()));
+        }
+        if (_hovered.x() >= 0) {
+            painter.setPen(QPen(Qt::black, 2));
+            painter.drawRect(QRectF(plot.left() + (_hovered.x() - _col0) * cw, plot.top() + (_hovered.y() - _row0) * ch, cw, ch));
+        }
+        painter.restore();
+
+        painter.setPen(palette().color(QPalette::Mid));
+        painter.drawRect(plot);
+
+        // ---- row labels (species) ----
+        QFont boldFont = font();
+        boldFont.setBold(true);
+        for (int row = firstRow; row <= lastRow; ++row) {
+            const bool selected = _highlightRows.contains(row);
+            if (!selected && ch < metrics.height())
+                continue; // too small to read: only selected species are labelled
+            painter.setFont(selected ? boldFont : font());
+            painter.setPen(selected ? selectionBlue : textColor);
+            const QRectF area(4, plot.top() + (row - _row0) * ch, plot.left() - 8, ch);
+            painter.drawText(area, Qt::AlignRight | Qt::AlignVCenter, _rowLabels[row]);
+        }
+        painter.setFont(font());
+
+        // ---- column labels (genes), rotated: all of them when there is room, otherwise the selected and the hovered one ----
+        const int labelLength = bottomMargin() - 14;
+        for (int column = firstColumn; column <= lastColumn; ++column) {
+            const bool selected = _highlightColumns.contains(column);
+            const bool hovered = column == _hovered.x();
+            if (!selected && !hovered && cw < metrics.height() * 0.9)
+                continue;
+            painter.save();
+            painter.setFont(selected ? boldFont : font());
+            painter.setPen(selected ? selectionBlue : textColor);
+            painter.translate(plot.left() + (column + 0.5 - _col0) * cw, plot.bottom() + 6);
+            painter.rotate(90);
+            painter.drawText(QPointF(0, (metrics.ascent() - metrics.descent()) / 2.0), metrics.elidedText(_columnLabels[column], Qt::ElideRight, labelLength));
+            painter.restore();
+        }
+
+        // ---- colour legend ----
+        const int legendWidth = 180;
+        const int legendLeft = std::max(plot.left(), plot.right() - legendWidth);
+        for (int x = 0; x < legendWidth; ++x) {
+            const double value = (static_cast<double>(x) / (legendWidth - 1) * 2.0 - 1.0) * _scale;
+            painter.setPen(colorFor(static_cast<float>(value)));
+            painter.drawLine(legendLeft + x, 6, legendLeft + x, 16);
+        }
+        painter.setPen(textColor);
+        painter.drawRect(legendLeft, 6, legendWidth - 1, 10);
+        painter.drawText(QRect(legendLeft - 50, 4, 46, 14), Qt::AlignRight | Qt::AlignVCenter, QString::number(-_scale, 'g', 3));
+        painter.drawText(QRect(legendLeft + legendWidth + 4, 4, 60, 14), Qt::AlignLeft | Qt::AlignVCenter, QString::number(_scale, 'g', 3));
+        painter.drawText(QRect(plot.left(), 4, 200, 14), Qt::AlignLeft | Qt::AlignVCenter, "lower  <  difference  >  higher");
+    }
+
+private:
+    QStringList _rowLabels;
+    QStringList _columnLabels;
+    QVector<QVector<float>> _values;
+    QVector<int> _columnGroup;
+    QSet<int> _highlightRows;
+    QSet<int> _highlightColumns;
+    double _scale = 1.0;
+    double _col0 = 0.0, _col1 = 1.0, _row0 = 0.0, _row1 = 1.0;
+    QPoint _hovered = QPoint(-1, -1);
+    bool _dragging = false;
+    bool _dragMoved = false;
+    QPointF _lastPosition;
+    std::function<QString(int, int)> _detailProvider;
+    std::function<void(int, int)> _onCellClicked;
+    std::function<void(int, bool)> _onRowLabelClicked;
+    std::function<void(int)> _onColumnLabelClicked;
+};
+
+/**
+ * Window for the species differential expression (every species against all the others):
+ *  1. Overview: heatmap of species (rows, in the order of the species tree) against the union of their top genes (columns,
+ *     grouped by the species they are top genes of). A diagonal block pattern shows species-specific genes; a gene that is
+ *     coloured in several rows is shared.
+ *  2. Details: one species against the others as a volcano plot (difference against significance) with its top genes in a table.
+ * The selected species and the selected gene are highlighted in blue, like everywhere else in the plugin.
+ */
+class SpeciesDeDialog : public QDialog
+{
+public:
+    using Point = ZoomablePlotWidget::Point;
+
+    std::function<void(int direction, int topCount, int rank)> onParametersChanged;
+    std::function<void(const QString& species)> onSpeciesChosen;
+    std::function<void(const QString& gene, const QString& species)> onGeneClicked;   // species may be empty
+    std::function<void(const QString& species, bool additive)> onSpeciesClicked;
+
+    explicit SpeciesDeDialog(QWidget* parent) : QDialog(parent)
+    {
+        setWindowTitle("Species differential expression");
+        auto* layout = new QVBoxLayout(this);
+
+        // ---- parameters (they are the settings of the "Species differential expression" group) ----
+        auto* bar = new QHBoxLayout();
+        bar->addWidget(new QLabel("Genes:"));
+        _direction = new QComboBox();
+        _direction->addItems({ "Up in the species", "Down in the species", "Either direction" });
+        bar->addWidget(_direction);
+        bar->addWidget(new QLabel("Top per species:"));
+        _topCount = new QSpinBox();
+        _topCount->setRange(1, 100);
+        bar->addWidget(_topCount);
+        bar->addWidget(new QLabel("Rank by:"));
+        _rank = new QComboBox();
+        _rank->addItems({ "Effect size", "Moderated t" });
+        bar->addWidget(_rank);
+        bar->addStretch(1);
+        _status = new QLabel();
+        bar->addWidget(_status);
+        layout->addLayout(bar);
+
+        const auto emitParameters = [this]() {
+            if (onParametersChanged)
+                onParametersChanged(_direction->currentIndex(), _topCount->value(), _rank->currentIndex());
+            };
+        connect(_direction, &QComboBox::currentIndexChanged, this, emitParameters);
+        connect(_rank, &QComboBox::currentIndexChanged, this, emitParameters);
+        connect(_topCount, &QSpinBox::valueChanged, this, emitParameters);
+
+        _tabs = new QTabWidget(this);
+        layout->addWidget(_tabs, 1);
+
+        // ---- tab 1: overview heatmap ----
+        auto* overviewPage = new QWidget(_tabs);
+        auto* overviewLayout = new QVBoxLayout(overviewPage);
+        auto* overviewBar = new QHBoxLayout();
+        overviewBar->addStretch(1);
+        _heatmap = new HeatmapWidget(overviewPage);
+        auto* zoomIn = new QPushButton("+");
+        auto* zoomOut = new QPushButton(QString::fromUtf8("\xE2\x88\x92"));
+        auto* reset = new QPushButton("Reset view");
+        auto* save = new QPushButton("Save image...");
+        zoomIn->setFixedWidth(28);
+        zoomOut->setFixedWidth(28);
+        zoomIn->setToolTip("Zoom in (mouse wheel; Shift: genes only, Ctrl: species only)");
+        zoomOut->setToolTip("Zoom out");
+        reset->setToolTip("Show everything again (double click on the heatmap)");
+        for (QWidget* widget : { static_cast<QWidget*>(zoomIn), static_cast<QWidget*>(zoomOut), static_cast<QWidget*>(reset), static_cast<QWidget*>(save) })
+            overviewBar->addWidget(widget);
+        connect(zoomIn, &QPushButton::clicked, _heatmap, [this]() { _heatmap->zoomBy(0.8); });
+        connect(zoomOut, &QPushButton::clicked, _heatmap, [this]() { _heatmap->zoomBy(1.25); });
+        connect(reset, &QPushButton::clicked, _heatmap, [this]() { _heatmap->resetView(); });
+        connect(save, &QPushButton::clicked, _heatmap, [this]() {
+            const QString path = QFileDialog::getSaveFileName(_heatmap, "Save heatmap image", "species_differential_expression.png", "PNG image (*.png);;JPEG image (*.jpg)");
+            if (!path.isEmpty())
+                _heatmap->grab().save(path);
+            });
+        overviewLayout->addLayout(overviewBar);
+        overviewLayout->addWidget(_heatmap, 1);
+        _info = new QLabel(overviewPage);
+        _info->setWordWrap(true);
+        _info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        overviewLayout->addWidget(_info);
+        _tabs->addTab(overviewPage, "Overview (every species against the others)");
+
+        _heatmap->setDetailProvider([this](int row, int column) { return heatmapTooltip(row, column); });
+        _heatmap->setOnCellClicked([this](int row, int column) {
+            if (onGeneClicked && column >= 0 && column < _result.heatmapGenes.size() && row >= 0 && row < _result.species.size())
+                onGeneClicked(_result.heatmapGenes[column], _result.species[row]);
+            });
+        _heatmap->setOnColumnLabelClicked([this](int column) {
+            if (onGeneClicked && column >= 0 && column < _result.heatmapGenes.size())
+                onGeneClicked(_result.heatmapGenes[column], QString());
+            });
+        _heatmap->setOnRowLabelClicked([this](int row, bool additive) {
+            if (onSpeciesClicked && row >= 0 && row < _result.species.size())
+                onSpeciesClicked(_result.species[row], additive);
+            });
+
+        // ---- tab 2: one species against the others ----
+        auto* detailPage = new QWidget(_tabs);
+        auto* detailLayout = new QVBoxLayout(detailPage);
+        auto* detailBar = new QHBoxLayout();
+        detailBar->addWidget(new QLabel("Species:"));
+        _speciesCombo = new QComboBox();
+        _speciesCombo->setMinimumWidth(220);
+        detailBar->addWidget(_speciesCombo);
+        detailBar->addWidget(new QLabel("Labels:"));
+        auto* labels = new QComboBox();
+        labels->addItems({ "On hover only", "Top genes and selected gene", "All genes (no overlaps)" });
+        labels->setCurrentIndex(1);
+        detailBar->addWidget(labels);
+        detailBar->addStretch(1);
+        auto* volcanoReset = new QPushButton("Reset view");
+        auto* volcanoSave = new QPushButton("Save image...");
+        detailBar->addWidget(volcanoReset);
+        detailBar->addWidget(volcanoSave);
+        detailLayout->addLayout(detailBar);
+
+        auto* splitter = new QSplitter(Qt::Vertical, detailPage);
+        _volcano = new ZoomablePlotWidget(splitter);
+        _volcano->setShowTrendLine(false);
+        _volcano->setPointSize(6);
+        _volcano->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
+        splitter->addWidget(_volcano);
+        _table = new QTableWidget(splitter);
+        _table->setColumnCount(9);
+        _table->setHorizontalHeaderLabels({ "Gene", "Difference", "Species", "Others", "Others SD", "Moderated t", "FDR", "Detected in species (%)", "Detected in others (%)" });
+        _table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        _table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        _table->setSelectionMode(QAbstractItemView::SingleSelection);
+        _table->verticalHeader()->hide();
+        _table->horizontalHeader()->setStretchLastSection(true);
+        splitter->addWidget(_table);
+        splitter->setStretchFactor(0, 3);
+        splitter->setStretchFactor(1, 2);
+        detailLayout->addWidget(splitter, 1);
+        _detailInfo = new QLabel(detailPage);
+        _detailInfo->setWordWrap(true);
+        detailLayout->addWidget(_detailInfo);
+        _tabs->addTab(detailPage, "Details (one species against the others)");
+
+        connect(labels, &QComboBox::currentIndexChanged, _volcano, [this](int index) {
+            _volcano->setLabelMode(index == 0 ? ZoomablePlotWidget::LabelMode::None : (index == 1 ? ZoomablePlotWidget::LabelMode::Highlighted : ZoomablePlotWidget::LabelMode::All));
+            if (index == 2)
+                rebuildVolcano(true); // "all genes" needs a label for every gene
+            else
+                rebuildVolcano(false);
+            });
+        connect(volcanoReset, &QPushButton::clicked, _volcano, [this]() { _volcano->resetView(); });
+        connect(volcanoSave, &QPushButton::clicked, _volcano, [this]() {
+            const QString path = QFileDialog::getSaveFileName(_volcano, "Save plot image", "species_volcano.png", "PNG image (*.png);;JPEG image (*.jpg)");
+            if (!path.isEmpty())
+                _volcano->grab().save(path);
+            });
+        connect(_speciesCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+            if (index >= 0 && onSpeciesChosen)
+                onSpeciesChosen(_speciesCombo->itemData(index).toString());
+            });
+        _volcano->setDetailProvider([this](const Point& point) { return volcanoTooltip(point.id); });
+        _volcano->setOnClick([this](int index) {
+            const Point point = _volcano->pointData(index);
+            if (onGeneClicked && point.id >= 0 && point.id < _detail.genes.size())
+                onGeneClicked(_detail.genes[point.id], _detail.species);
+            });
+        connect(_table, &QTableWidget::cellClicked, this, [this](int row, int) {
+            const auto* item = _table->item(row, 0);
+            if (item && onGeneClicked)
+                onGeneClicked(item->text(), _detail.species);
+            });
+
+        resize(1100, 700);
+    }
+
+    /** Show the current settings in the controls (without triggering a change). */
+    void setControls(int direction, int topCount, int rank)
+    {
+        const QSignalBlocker b1(_direction), b2(_topCount), b3(_rank);
+        _direction->setCurrentIndex(direction);
+        _topCount->setValue(topCount);
+        _rank->setCurrentIndex(rank);
+    }
+
+    void setStatus(const QString& text) { _status->setText(text); }
+
+    QString currentSpecies() const { return _speciesCombo->currentIndex() >= 0 ? _speciesCombo->currentData().toString() : QString(); }
+
+    void setResult(const SpeciesDeResult& result, const QSet<QString>& selectedSpecies, const QString& focusGene)
+    {
+        _result = result;
+        _selectedSpecies = selectedSpecies;
+        _focusGene = focusGene;
+
+        QStringList rows;
+        for (const QString& species : _result.species)
+            rows << prettyName(species);
+        _heatmap->setData(rows, _result.heatmapGenes, _result.heatmapDelta, _result.heatmapOwner);
+        _info->setText(_result.message);
+        setStatus(_result.valid ? QString("%1 species, %2 genes").arg(_result.species.size()).arg(_result.heatmapGenes.size()) : QString());
+
+        // species of the details tab: keep the chosen one when it is still there
+        const QString previous = currentSpecies();
+        {
+            const QSignalBlocker blocker(_speciesCombo);
+            _speciesCombo->clear();
+            for (const QString& species : _result.species)
+                _speciesCombo->addItem(prettyName(species), species);
+            const int keep = _speciesCombo->findData(previous);
+            _speciesCombo->setCurrentIndex(keep >= 0 ? keep : (_speciesCombo->count() > 0 ? 0 : -1));
+        }
+        updateHighlights();
+    }
+
+    /** The species that are selected in the species explorer (rows shown in blue). */
+    void setSelectedSpecies(const QSet<QString>& selectedSpecies)
+    {
+        _selectedSpecies = selectedSpecies;
+        updateHighlights();
+    }
+
+    /** The gene that is selected (column, volcano point and table row shown in blue). */
+    void setFocusGene(const QString& gene)
+    {
+        _focusGene = gene;
+        updateHighlights();
+        rebuildVolcano(_labelAll);
+        rebuildTable();
+    }
+
+    void setDetail(const SpeciesDeDetail& detail, double significanceLevel)
+    {
+        _detail = detail;
+        _level = significanceLevel;
+        _detailInfo->setText(detail.valid
+            ? QString("%1 against the other %2 species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
+                "Wheel: zoom, drag: move, double click: reset.").arg(prettyName(detail.species)).arg(_result.species.size() - 1).arg(detail.genes.size()).arg(detail.top.size())
+            : QString("No data."));
+        rebuildVolcano(_labelAll);
+        rebuildTable();
+    }
+
+private:
+    static QString prettyName(QString name)
+    {
+        name.replace("_", " ");
+        return name;
+    }
+
+    void updateHighlights()
+    {
+        QSet<int> rows;
+        for (int i = 0; i < _result.species.size(); ++i) {
+            if (_selectedSpecies.contains(_result.species[i]))
+                rows.insert(i);
+        }
+        QSet<int> columns;
+        const int column = _result.heatmapGenes.indexOf(_focusGene);
+        if (column >= 0)
+            columns.insert(column);
+        _heatmap->setHighlight(rows, columns);
+    }
+
+    QString heatmapTooltip(int row, int column) const
+    {
+        if (row < 0 || column < 0 || row >= _result.species.size() || column >= _result.heatmapGenes.size())
+            return QString();
+        const QString gene = _result.heatmapGenes[column].toHtmlEscaped();
+        const QString species = prettyName(_result.species[row]).toHtmlEscaped();
+        QString text = QString("<b>%1</b> in <b>%2</b><br>Difference to the other species: %3").arg(gene, species).arg(static_cast<double>(_result.heatmapDelta[row][column]), 0, 'f', 3);
+
+        bool detailed = false;
+        for (const SpeciesDeGene& g : _result.comparisons[row].topGenes) {
+            if (g.gene == _result.heatmapGenes[column]) {
+                text += QString("<br>Species: %1, others: %2 (SD %3)<br>Moderated t = %4, FDR = %5<br>Detected in %6% of the cells of the species, %7% of the others")
+                    .arg(static_cast<double>(g.restMean + g.delta), 0, 'f', 3).arg(static_cast<double>(g.restMean), 0, 'f', 3).arg(static_cast<double>(g.restSd), 0, 'f', 3)
+                    .arg(static_cast<double>(g.t), 0, 'f', 2).arg(static_cast<double>(g.fdr), 0, 'g', 3)
+                    .arg(static_cast<double>(g.detection) * 100.0, 0, 'f', 0).arg(static_cast<double>(g.restDetection) * 100.0, 0, 'f', 0);
+                detailed = true;
+                break;
+            }
+        }
+        const int owner = _result.heatmapOwner[column];
+        if (!detailed && owner >= 0 && owner < _result.species.size())
+            text += QString("<br>(a top gene of %1)").arg(prettyName(_result.species[owner]).toHtmlEscaped());
+        return text;
+    }
+
+    QString volcanoTooltip(int gene) const
+    {
+        if (!_detail.valid || gene < 0 || gene >= _detail.genes.size())
+            return QString();
+        return QString("<b>%1</b> in <b>%2</b><br>Difference to the other species: %3<br>Species: %4, others: %5 (SD %6)<br>Moderated t = %7, p = %8, FDR = %9<br>"
+            "Detected in %10% of the cells of the species, %11% of the others")
+            .arg(_detail.genes[gene].toHtmlEscaped(), prettyName(_detail.species).toHtmlEscaped())
+            .arg(static_cast<double>(_detail.delta[gene]), 0, 'f', 3)
+            .arg(static_cast<double>(_detail.restMean[gene] + _detail.delta[gene]), 0, 'f', 3).arg(static_cast<double>(_detail.restMean[gene]), 0, 'f', 3).arg(static_cast<double>(_detail.restSd[gene]), 0, 'f', 3)
+            .arg(static_cast<double>(_detail.t[gene]), 0, 'f', 2).arg(static_cast<double>(_detail.pValue[gene]), 0, 'g', 3).arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3)
+            .arg(static_cast<double>(_detail.detection[gene]) * 100.0, 0, 'f', 0).arg(static_cast<double>(_detail.restDetection[gene]) * 100.0, 0, 'f', 0);
+    }
+
+    void rebuildVolcano(bool labelAll)
+    {
+        _labelAll = labelAll;
+        if (!_detail.valid) {
+            _volcano->setData({}, "Difference to the other species", "-log10 FDR", true);
+            return;
+        }
+        QVector<Point> points;
+        points.reserve(_detail.genes.size());
+        const QSet<int> topSet(_detail.top.begin(), _detail.top.end());
+        for (int g = 0; g < _detail.genes.size(); ++g) {
+            Point point;
+            point.id = g;
+            point.x = static_cast<double>(_detail.delta[g]);
+            point.y = -std::log10(std::max(static_cast<double>(_detail.fdr[g]), 1e-12));
+            const bool isFocus = _detail.genes[g] == _focusGene;
+            if (isFocus) {
+                point.color = QColor("#00A2ED"); // the selected gene: blue like everywhere in the plugin
+                point.highlighted = true;
+                point.label = _detail.genes[g];
+            }
+            else if (topSet.contains(g)) {
+                point.color = QColor("#000000");
+                point.highlighted = true;
+                point.label = _detail.genes[g];
+            }
+            else {
+                point.color = static_cast<double>(_detail.fdr[g]) < _level ? QColor("#8c8c8c") : QColor("#d0d0d0");
+                if (labelAll)
+                    point.label = _detail.genes[g];
+            }
+            points.push_back(point);
+        }
+        _volcano->setGuideLines({ { true, -std::log10(_level), QString("FDR = %1").arg(_level) },{ false, 0.0, QString() } });
+        _volcano->setData(points, "Difference to the other species (higher in the species >)", "-log10 FDR", true);
+    }
+
+    void rebuildTable()
+    {
+        const QSignalBlocker blocker(_table);
+        _table->setSortingEnabled(false);
+        _table->setRowCount(_detail.valid ? _detail.top.size() : 0);
+        for (int row = 0; row < _table->rowCount(); ++row) {
+            const int g = _detail.top[row];
+            const auto number = [](double value, char format, int decimals) {
+                auto* item = new QTableWidgetItem();
+                item->setData(Qt::DisplayRole, QString::number(value, format, decimals).toDouble());
+                return item;
+                };
+            const double species = static_cast<double>(_detail.restMean[g] + _detail.delta[g]);
+            QList<QTableWidgetItem*> items;
+            items << new QTableWidgetItem(_detail.genes[g])
+                << number(static_cast<double>(_detail.delta[g]), 'f', 3)
+                << number(species, 'f', 3)
+                << number(static_cast<double>(_detail.restMean[g]), 'f', 3)
+                << number(static_cast<double>(_detail.restSd[g]), 'f', 3)
+                << number(static_cast<double>(_detail.t[g]), 'f', 2)
+                << number(static_cast<double>(_detail.fdr[g]), 'g', 3)
+                << number(static_cast<double>(_detail.detection[g]) * 100.0, 'f', 0)
+                << number(static_cast<double>(_detail.restDetection[g]) * 100.0, 'f', 0);
+            const bool isFocus = _detail.genes[g] == _focusGene;
+            for (int column = 0; column < items.size(); ++column) {
+                if (isFocus) { // the selected gene: blue background like the selected species rows of the tables
+                    items[column]->setBackground(QBrush(QColor("#00A2ED")));
+                    items[column]->setForeground(QBrush(QColor("#000000")));
+                }
+                _table->setItem(row, column, items[column]);
+            }
+        }
+        _table->setSortingEnabled(true);
+        _table->resizeColumnsToContents();
+    }
+
+    SpeciesDeResult _result;
+    SpeciesDeDetail _detail;
+    QSet<QString> _selectedSpecies;
+    QString _focusGene;
+    double _level = 0.05;
+    bool _labelAll = false;
+
+    QComboBox* _direction = nullptr;
+    QSpinBox* _topCount = nullptr;
+    QComboBox* _rank = nullptr;
+    QLabel* _status = nullptr;
+    QTabWidget* _tabs = nullptr;
+    HeatmapWidget* _heatmap = nullptr;
+    QLabel* _info = nullptr;
+    QComboBox* _speciesCombo = nullptr;
+    ZoomablePlotWidget* _volcano = nullptr;
+    QTableWidget* _table = nullptr;
+    QLabel* _detailInfo = nullptr;
+};
+
+// ============================================================================================================
 //  Gene table: filter model and Trait Correlation bar delegate
 // ============================================================================================================
 
@@ -2682,6 +3445,130 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
 }
 
 // ============================================================================================================
+//  Species differential expression window
+// ============================================================================================================
+
+bool XSCGeneDetectPlugin::selectGeneInGeneTable(const QString& gene)
+{
+    auto* view = _settingsAction.getGeneTableView();
+    if (!view || !view->model() || gene.isEmpty())
+        return false;
+
+    QAbstractItemModel* viewModel = view->model();
+    for (int row = 0; row < viewModel->rowCount(); ++row) {
+        if (viewModel->index(row, 0).data().toString() == gene) {
+            view->selectRow(row);
+            view->setCurrentIndex(viewModel->index(row, 0));
+            view->scrollTo(viewModel->index(row, 0));
+            return true;
+        }
+    }
+    return false;
+}
+
+void XSCGeneDetectPlugin::showSpeciesDe()
+{
+    if (!_speciesDeDialog) {
+        auto* dialog = new SpeciesDeDialog(&getWidget());
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowFlag(Qt::Window);
+
+        // the controls of the window are the settings of the group
+        dialog->onParametersChanged = [this](int direction, int topCount, int rank) {
+            _settingsAction.getDeDirection().setCurrentIndex(direction);
+            _settingsAction.getDeTopGenes().setValue(topCount);
+            _settingsAction.getDeRankBy().setCurrentIndex(rank);
+            };
+        dialog->onSpeciesChosen = [this](const QString& species) { refreshSpeciesDeDetail(species); };
+
+        // a gene was clicked: select it in the gene table (it may not be listed there: it is then only highlighted in the window)
+        dialog->onGeneClicked = [this](const QString& gene, const QString& species) {
+            auto* window = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
+            if (!window)
+                return;
+            window->setFocusGene(gene);
+            window->setStatus(selectGeneInGeneTable(gene) ? QString() : QString("%1 is not in the gene table (it is not a top-N gene of the current selection)").arg(gene));
+            if (!species.isEmpty())
+                _settingsAction.setSpeciesExplorerSelection({ species });
+            };
+
+        // a species label was clicked: select it in the species explorer (Ctrl: add / remove)
+        dialog->onSpeciesClicked = [this](const QString& species, bool additive) {
+            if (!additive) {
+                _settingsAction.setSpeciesExplorerSelection({ species });
+                return;
+            }
+            QStringList selection = _settingsAction.getSpeciesExplorerInMap().getSelectedOptions();
+            if (selection.contains(species))
+                selection.removeAll(species);
+            else
+                selection << species;
+            _settingsAction.setSpeciesExplorerSelection(selection);
+            };
+
+        _settingsAction.setSpeciesDeFinishedCallback([this]() { refreshSpeciesDe(); });
+        // closing the window stops all work for it
+        connect(dialog, &QObject::destroyed, this, [this]() { _settingsAction.setSpeciesDeActive(false); });
+        _speciesDeDialog = dialog;
+    }
+
+    auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
+    dialog->setControls(_settingsAction.getDeDirection().getCurrentIndex(), _settingsAction.getDeTopGenes().getValue(), _settingsAction.getDeRankBy().getCurrentIndex());
+    dialog->setStatus("Computing... (the first time the expression of the selected cell type has to be read)");
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+
+    _speciesDeLastGene = QString();
+    _settingsAction.setSpeciesDeActive(true);
+}
+
+void XSCGeneDetectPlugin::refreshSpeciesDe()
+{
+    if (!_speciesDeDialog)
+        return;
+    auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
+
+    const SpeciesDeResult& result = _settingsAction.getSpeciesDeResult();
+    const QStringList selected = _settingsAction.getSpeciesExplorerInMap().getSelectedOptions();
+    _speciesDeLastGene = _settingsAction.getSelectedGeneAction().getString();
+
+    dialog->setControls(_settingsAction.getDeDirection().getCurrentIndex(), _settingsAction.getDeTopGenes().getValue(), _settingsAction.getDeRankBy().getCurrentIndex());
+    dialog->setResult(result, QSet<QString>(selected.begin(), selected.end()), _speciesDeLastGene);
+    if (!result.valid)
+        dialog->setStatus(result.message);
+
+    refreshSpeciesDeDetail(dialog->currentSpecies());
+}
+
+void XSCGeneDetectPlugin::refreshSpeciesDeDetail(const QString& species)
+{
+    if (!_speciesDeDialog)
+        return;
+    auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
+    dialog->setDetail(species.isEmpty() ? SpeciesDeDetail() : _settingsAction.computeSpeciesDeDetail(species), _settingsAction.significanceLevel());
+}
+
+void XSCGeneDetectPlugin::refreshSpeciesDeHighlights()
+{
+    if (!_speciesDeDialog || !_speciesDeDialog->isVisible())
+        return;
+    auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
+
+    const QStringList selected = _settingsAction.getSpeciesExplorerInMap().getSelectedOptions();
+    const QString gene = _settingsAction.getSelectedGeneAction().getString();
+
+    dialog->setSelectedSpecies(QSet<QString>(selected.begin(), selected.end()));
+
+    // A gene that was clicked in the window but is not listed in the gene table keeps its highlight until the gene
+    // selection of the table changes.
+    if (gene != _speciesDeLastGene) {
+        _speciesDeLastGene = gene;
+        dialog->setFocusGene(gene);
+    }
+}
+
+// ============================================================================================================
 //  Trait plot window
 // ============================================================================================================
 
@@ -2995,6 +3882,7 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 
     // an open trait plot shows the newly selected gene
     refreshTraitPlot();
+    refreshSpeciesDeHighlights(); // ... and so does the species differential expression window
 }
 
 // ============================================================================================================
