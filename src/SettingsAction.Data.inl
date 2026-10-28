@@ -20,25 +20,30 @@ int SettingsAction::speciesGeneListLength(const QString& species) const
     return it != _clusterNameToGeneNameToExpressionValue.end() ? static_cast<int>(it->second.size()) : 0;
 }
 
+void SettingsAction::clearUpdateDatasetHandles()
+{
+    // The datasets that every update replaces (group 10): selection subset, embedding, expression colors, species and cluster colors.
+    // (The handles of the filtered UMAP datasets, the gene similarity datasets and the gene table t-SNE dataset are NOT reset here.)
+    _selectedPointsDataset = Dataset<Points>();
+    _selectedPointsEmbeddingDataset = Dataset<Points>();
+    _selectedPointsTSNEDataset = Dataset<Points>();
+    _tsneDatasetExpressionColors = Dataset<Points>();
+    _tsneDatasetSpeciesColors = Dataset<Clusters>();
+    _tsneDatasetClusterColors = Dataset<Clusters>();
+}
+
 void SettingsAction::removeTemporaryDatasets()
 {
-    // The t-SNE analysis plugins that produced the datasets are destroyed first: removing a dataset does not necessarily
-    // destroy the plugin that computed it, so every update left a running/idle analysis plugin behind.
-    for (auto* analysis : { _selectedTsneAnalysisPlugin.data(), _geneTsneAnalysisPlugin.data() }) {
-        if (analysis) {
-            mv::plugins().destroyPlugin(analysis);
-        }
-    }
-    _selectedTsneAnalysisPlugin = nullptr;
-    _geneTsneAnalysisPlugin = nullptr;
-
-    // The handles are reset next; the datasets of every group the update creates are then removed (deepest children first).
-    // Only groups 10 (selection subsets, colors) used to be removed, so the filtered UMAP and gene similarity datasets of
-    // every earlier update stayed behind and piled up.
-    clearTemporaryDatasetHandles();
+    // Group 10 (selection subset, embeddings, colors) is replaced by every update: the handles are reset and the datasets removed.
+    clearUpdateDatasetHandles();
     removeDatasets(10);
-    removeDatasets(20);
-    removeDatasets(30);
+
+    // Groups 20 (filtered UMAP datasets) and 30 (gene similarity datasets) are deliberately NOT removed and their handles are kept:
+    // the update re-uses them. They are filled again when they are needed (the filtered UMAP datasets on every gene click, the
+    // gene similarity datasets on every update), so nothing stale is shown. Resetting their handles used to create a new set on
+    // every update, which is what piled up datasets. Removing them instead is NOT safe: the Scatterplot view keeps handles to
+    // them in its coloring actions, and the next time it switched its color dataset it released a handle to a dataset that no
+    // longer existed (access violation in DimensionPickerAction::setPointsDataset).
 }
 
 void SettingsAction::removeDatasets(int groupId)

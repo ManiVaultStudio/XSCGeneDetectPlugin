@@ -17,6 +17,7 @@
 #include <AnalysisPlugin.h>
 #include <QGuiApplication>
 #include <memory>
+#include <functional>
 #include <algorithm>    
 #include <QDebug>
 #include <QLabel>
@@ -225,6 +226,48 @@ inline constexpr int kMeanDifferentialColumn = 7;    /** mean differential expre
 inline constexpr int kPositiveSpeciesColumn = 8;     /** percentage of species in which the differential expression is positive */
 inline constexpr int kMeanExpressionColumn = 9;      /** mean expression in the selected cells, averaged over the species */
 
+/** One gene of a species-versus-rest differential expression comparison. */
+struct SpeciesDeGene {
+    QString gene;
+    int geneIndex = -1;          /** index of the gene in the dataset */
+    float delta = 0.0f;          /** mean of the species - mean of the other species' means */
+    float restMean = 0.0f;       /** mean of the other species' means */
+    float restSd = 0.0f;         /** standard deviation of the other species' means */
+    float t = 0.0f;              /** moderated t statistic */
+    float pValue = 1.0f;
+    float fdr = 1.0f;            /** Benjamini-Hochberg FDR over all genes of the comparison */
+    float detection = 0.0f;      /** fraction of the species' cells in which the gene is detected */
+    float restDetection = 0.0f;  /** the same, averaged over the other species */
+};
+
+/** The top genes of one species against all the others. */
+struct SpeciesDeComparison {
+    QString species;
+    int cells = 0;                       /** cells of the species that entered (selected cell types, after the cell cap) */
+    QVector<SpeciesDeGene> topGenes;     /** best genes first */
+};
+
+/** Result for all species: one comparison per species (each against the rest). */
+struct SpeciesDeResult {
+    bool valid = false;
+    QString message;                         /** why there is no result, or what was computed */
+    QStringList cellTypes;
+    QStringList species;                     /** species in the order of the species tree (related species next to each other) */
+    QVector<SpeciesDeComparison> comparisons;/** same order as \p species */
+    QStringList heatmapGenes;                /** union of the top genes, grouped by the species they are top genes of */
+    QVector<int> heatmapOwner;               /** index (into species) of the species a heatmap gene belongs to */
+    QVector<QVector<float>> heatmapDelta;    /** [species][heatmap gene]: difference to the other species */
+};
+
+/** All genes of one species-versus-rest comparison (for the volcano plot). */
+struct SpeciesDeDetail {
+    bool valid = false;
+    QString species;
+    QStringList genes;
+    QVector<float> delta, restMean, restSd, t, pValue, fdr, detection, restDetection;
+    QVector<int> top;                        /** indices of the top genes, best first */
+};
+
 /** Small formulas shared by the tables, tooltips and exports. */
 namespace GeneStats {
 
@@ -373,6 +416,25 @@ public: // Action getters
     DecimalAction& getTraitFdrThreshold() { return _traitFdrThreshold; }  /** FDR below which a trait correlation counts as significant */
     IntegralAction& getMaxWorkerThreads() { return _maxWorkerThreads; }    /** upper limit of parallel workers */
     IntegralAction& getMemoryBudgetMb() { return _memoryBudgetMb; }        /** scratch memory the parallel workers may use together */
+    // ---- species differential expression (one species against the others) ----
+    IntegralAction& getDeTopGenes() { return _deTopGenes; }
+    OptionAction& getDeDirection() { return _deDirection; }
+    OptionAction& getDeRankBy() { return _deRankBy; }
+    IntegralAction& getDeMinDetection() { return _deMinDetection; }
+    IntegralAction& getDeMaxCells() { return _deMaxCells; }
+    IntegralAction& getDeMinCells() { return _deMinCells; }
+    TriggerAction& getShowSpeciesDe() { return _showSpeciesDe; }
+
+    /** The window is open: results are computed (and kept up to date). Closing it stops all work. */
+    void setSpeciesDeActive(bool active);
+    /** Recompute when something relevant changed (debounced; does nothing while the window is closed). */
+    void requestSpeciesDifferentialExpression();
+    const SpeciesDeResult& getSpeciesDeResult() const { return _deResult; }
+    /** All genes of the comparison of \p species with the others (fast: derived from the cached species means). */
+    SpeciesDeDetail computeSpeciesDeDetail(const QString& species);
+    /** Called (on the interface thread) whenever a new result is available. */
+    void setSpeciesDeFinishedCallback(std::function<void()> callback) { _speciesDeFinished = std::move(callback); }
+
     TriggerAction& getSaveTraitMatrix() { return _saveTraitMatrix; }   /** save the species x genes expression matrix with the trait */
     TriggerAction& getShowTraitPlot() { return _showTraitPlot; }       /** plot the expression of the selected gene against the trait */
     const TraitMatrix& getTraitMatrix() const { return _traitMatrix; }
@@ -524,6 +586,9 @@ public: // Action getters
     /** Remove the temporary datasets of the last update (embedding subsets, colors, filtered UMAP, gene similarity). */
     void removeTemporaryDatasets();
 
+    /** Reset only the handles of the datasets that every update replaces (group 10); the reusable groups 20 and 30 keep theirs. */
+    void clearUpdateDatasetHandles();
+
     /** Identifies the datasets the cached species means belong to (main points + species clusters). */
     QString currentMeanMapSignature() const;
 
@@ -553,6 +618,37 @@ private:
     };
 
     void onTraitJobsFinished();                /** the background reading is done: store the means and finish the computation */
+
+    // ---- species differential expression: cache of the species means (per species and cell type), background job ----
+    struct DeCache {
+        struct Entry {
+            int cellCount = 0;                   /** cells that were read (after the cell cap) */
+            std::vector<float> means;            /** mean expression of every gene */
+            std::vector<float> detection;        /** fraction of the cells in which every gene is detected */
+        };
+        QString key;
+        bool sortedBuilt = false;
+        std::unordered_map<QString, std::vector<int>> speciesSorted;
+        std::unordered_map<QString, std::vector<int>> cellTypeSorted;
+        std::unordered_map<QString, Entry> moments;
+    };
+    struct DeEntryJob {
+        QString key;
+        const std::vector<int>* speciesPoints = nullptr;
+        const std::vector<int>* cellTypePoints = nullptr;
+        DeCache::Entry entry;
+    };
+    /** The pooled per species values of the last computation (kept for the detail view). */
+    struct DeState {
+        std::vector<QString> species;
+        std::vector<std::vector<float>> means;       // [species][gene]
+        std::vector<std::vector<float>> detection;   // [species][gene]
+        std::vector<int> cells;
+        std::vector<double> totalSum, totalSumSq, totalDetection;
+        std::vector<QString> geneNames;
+    };
+    void computeSpeciesDifferentialExpression();
+    void onSpeciesDeJobsFinished();
     void applyClusterLabelSelectionStyles();   /** (re)style the cell-type labels of the status bar from _selectedClusterNames */
 
     void computeTraitCorrelation();            /** the actual (non-debounced) computation */
@@ -690,6 +786,13 @@ protected:
     DecimalAction             _traitFdrThreshold;     /** significance level of the trait correlation (default 0.05) */
     IntegralAction            _maxWorkerThreads;      /** parallel workers (default: all cores) */
     IntegralAction            _memoryBudgetMb;        /** scratch memory budget of the parallel workers (default 1024 MB) */
+    IntegralAction            _deTopGenes;            /** species differential expression: genes shown per species */
+    OptionAction              _deDirection;           /** up in the species / down in the species / either */
+    OptionAction              _deRankBy;              /** effect size or moderated t */
+    IntegralAction            _deMinDetection;        /** minimum percentage of cells expressing the gene (in the higher group) */
+    IntegralAction            _deMaxCells;            /** cell cap per species and cell type (0 = all cells) */
+    IntegralAction            _deMinCells;            /** species with fewer cells are left out */
+    TriggerAction             _showSpeciesDe;         /** open the species differential expression window */
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
@@ -708,6 +811,17 @@ protected:
     QTimer* _traitCorrelationTimer = nullptr;   /** debounce timer, see updateTraitReverseSearchFeature() */
     QPointer<mv::plugin::AnalysisPlugin> _selectedTsneAnalysisPlugin; /** t-SNE of the selected cells (destroyed with its datasets) */
     QPointer<mv::plugin::AnalysisPlugin> _geneTsneAnalysisPlugin;     /** t-SNE of the gene similarity points */
+    DeCache     _deCache;
+    DeState     _deState;
+    SpeciesDeResult _deResult;
+    std::shared_ptr<std::vector<DeEntryJob>> _deJobs;
+    QFutureWatcher<void> _deJobWatcher;
+    mv::Dataset<Points> _deJobDataset;
+    QTimer* _deTimer = nullptr;
+    bool        _deActive = false;
+    bool        _deJobRunning = false;
+    bool        _deRecomputePending = false;
+    std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
     std::shared_ptr<std::vector<TraitEntryJob>> _traitJobs;  /** reading in the background (see computeTraitCorrelation) */
     QFutureWatcher<void> _traitJobWatcher;
