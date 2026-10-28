@@ -586,6 +586,9 @@ public: // Action getters
     /** Remove the temporary datasets of the last update (embedding subsets, colors, filtered UMAP, gene similarity). */
     void removeTemporaryDatasets();
 
+    /** Reset only the handles of the datasets that every update replaces (group 10); the reusable groups 20 and 30 keep theirs. */
+    void clearUpdateDatasetHandles();
+
     /** Identifies the datasets the cached species means belong to (main points + species clusters). */
     QString currentMeanMapSignature() const;
 
