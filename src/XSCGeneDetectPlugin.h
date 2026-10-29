@@ -1,5 +1,7 @@
 #pragma once
 
+#include "XSCDebug.h"
+
 #include <ViewPlugin.h>
 
 #include <Dataset.h>

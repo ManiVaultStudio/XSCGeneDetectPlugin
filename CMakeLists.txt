@@ -50,6 +50,8 @@ set(PLUGIN_SOURCES
     src/SettingsAction.Data.inl
     src/SettingsAction.Tree.inl
     src/SettingsAction.Serialization.inl
+	src/StreamedPointData.h
+	src/XSCDebug.h
     src/XSCGeneDetectPlugin.json
 )
 set(LIBS

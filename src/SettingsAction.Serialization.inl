@@ -2,6 +2,7 @@ inline SettingsAction::OptionSelectionAction::OptionSelectionAction(SettingsActi
     GroupAction(nullptr, "XSCGeneDetectPluginOptionSelectionAction"),
     _settingsAction(SettingsAction)
 {
+    XSC_TRACE("SettingsAction::OptionSelectionAction::OptionSelectionAction");
     setText("Options");
     setIcon(mv::util::StyledIcon("wrench"));
     //addAction(&_settingsAction.getTableModelAction());
@@ -24,6 +25,7 @@ inline SettingsAction::OptionSelectionAction::OptionSelectionAction(SettingsActi
 
 void SettingsAction::fromVariantMap(const QVariantMap& variantMap)
 {
+    XSC_TRACE("SettingsAction::fromVariantMap");
     WidgetAction::fromVariantMap(variantMap);
 
     _geneNamesConnection.fromParentVariantMap(variantMap);
@@ -70,6 +72,7 @@ void SettingsAction::fromVariantMap(const QVariantMap& variantMap)
 
 QVariantMap SettingsAction::toVariantMap() const
 {
+    XSC_TRACE("SettingsAction::toVariantMap");
     QVariantMap variantMap = WidgetAction::toVariantMap();
 
     _geneNamesConnection.insertIntoVariantMap(variantMap);

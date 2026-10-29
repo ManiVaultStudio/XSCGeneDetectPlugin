@@ -1,4 +1,5 @@
 QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleContext& toolTipContext, const QString& clusterDatasetId, bool showTooltip, QString indicesType) {
+    XSC_TRACE("SettingsAction::generateTooltip");
     // Extract and convert GlobalPointIndices and ColorDatasetID from toolTipContext
     auto raw_Global_Local_PointIndices = toolTipContext[indicesType].toList();
 
@@ -138,6 +139,7 @@ QString SettingsAction::generateTooltip(const ViewPluginSamplerAction::SampleCon
 
 
 void SettingsAction::updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap) {
+    XSC_TRACE("SettingsAction::updateSelectedSpeciesCounts");
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -162,6 +164,7 @@ void SettingsAction::updateSelectedSpeciesCounts(QJsonObject& node, const std::m
 /*
 QString SettingsAction::createJsonTreeFromNewick(QString tree, std::vector<QString> leafnames, std::map <QString, Statistics> speciesMeanValues)
 {
+    XSC_TRACE("SettingsAction::createJsonTreeFromNewick");
     int i = 0;
     std::string jsonString = "";
     std::stringstream jsonStream;
@@ -229,6 +232,7 @@ QString SettingsAction::createJsonTreeFromNewick(QString tree, std::vector<QStri
 */
 /*
 std::string SettingsAction::mergeToNewick(int* merge, int numOfLeaves) {
+    XSC_TRACE("SettingsAction::mergeToNewick");
     std::vector<std::string> labels(numOfLeaves);
     for (int i = 0; i < numOfLeaves; ++i) {
         labels[i] = std::to_string(i + 1);
@@ -266,6 +270,7 @@ std::string SettingsAction::mergeToNewick(int* merge, int numOfLeaves) {
 }
 */
 double* SettingsAction::condensedDistanceMatrix(const std::vector<float>& items) {
+    XSC_TRACE("SettingsAction::condensedDistanceMatrix");
     // NOTE: the caller owns the returned buffer and must release it with delete[].
     const size_t n = items.size();
     if (n < 2) {
@@ -289,10 +294,12 @@ double* SettingsAction::condensedDistanceMatrix(const std::vector<float>& items)
 SettingsAction::Widget::Widget(QWidget* parent, SettingsAction* SettingsAction) :
     WidgetActionWidget(parent, SettingsAction)
 {
+    XSC_TRACE("SettingsAction::Widget::Widget");
 }
 
 SettingsAction::OptionSelectionAction::Widget::Widget(QWidget* parent, OptionSelectionAction* optionSelectionAction) :
     WidgetActionWidget(parent, optionSelectionAction)
 {
+    XSC_TRACE("SettingsAction::OptionSelectionAction::Widget::Widget");
 }
 

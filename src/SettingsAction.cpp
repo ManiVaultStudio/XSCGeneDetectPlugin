@@ -1,3 +1,4 @@
+#include "StreamedPointData.h"
 #include "SettingsAction.h"
 #include "XSCGeneDetectPlugin.h"
 #include<string>  
@@ -54,16 +55,19 @@ std::map<std::string, std::chrono::high_resolution_clock::time_point> timers;
 
 // Function to sort by count (descending)
 bool sortByCount(const ClusterOrderContainer& a, const ClusterOrderContainer& b) {
+    XSC_TRACE("sortByCount");
     return a.count > b.count;
 }
 
 // Function to sort by name (ascending)
 bool sortByName(const ClusterOrderContainer& a, const ClusterOrderContainer& b) {
+    XSC_TRACE("sortByName");
     return a.name < b.name;
 }
 
 // Prepare a map for custom list sorting
 std::unordered_map<QString, int> prepareCustomSortMap(const std::vector<QString>& customOrder) {
+    XSC_TRACE("prepareCustomSortMap");
     std::unordered_map<QString, int> sortOrderMap;
     for (size_t i = 0; i < customOrder.size(); ++i) {
         sortOrderMap[customOrder[i]] = static_cast<int>(i);
@@ -74,6 +78,7 @@ std::unordered_map<QString, int> prepareCustomSortMap(const std::vector<QString>
 // Function to sort by custom list
 bool sortByCustomList(const ClusterOrderContainer& a, const ClusterOrderContainer& b,
     const std::unordered_map<QString, int>& sortOrderMap) {
+    XSC_TRACE("sortByCustomList");
     auto posA = sortOrderMap.find(a.name);
     auto posB = sortOrderMap.find(b.name);
     int indexA = (posA != sortOrderMap.end()) ? posA->second : INT_MAX;
@@ -82,6 +87,7 @@ bool sortByCustomList(const ClusterOrderContainer& a, const ClusterOrderContaine
 }
 
 Stats combineStatisticsSingle(const StatisticsSingle& selected, const StatisticsSingle& nonSelected, const int topAbundance, const int middleAbundance, const int countAbundanceNumerator/*, const StatisticsSingle& allSelected*/) {
+    XSC_TRACE("combineStatisticsSingle");
     Stats combinedStats;
     combinedStats.meanSelected = selected.meanVal;
     combinedStats.countSelected = selected.countVal;
@@ -99,6 +105,7 @@ Stats combineStatisticsSingle(const StatisticsSingle& selected, const Statistics
 }
 
 StatisticsSingle calculateStatistics(const std::vector<float>& data) {
+    XSC_TRACE("calculateStatistics");
     const int count = static_cast<int>(data.size());
     if (count == 0) {
         return { 0.0f, 0 }; // Return early if data is empty to avoid division by zero
@@ -116,6 +123,7 @@ StatisticsSingle calculateStatistics(const std::vector<float>& data) {
     return { mean, count };
 }
 float calculateMean(const std::vector<float>& v) {
+    XSC_TRACE("calculateMean");
     if (v.empty())
         return 0.0f;
 
@@ -134,11 +142,13 @@ float calculateMean(const std::vector<float>& v) {
 
 
 void startCodeTimer(const std::string& message) {
+    XSC_TRACE("startCodeTimer");
     timers[message] = std::chrono::high_resolution_clock::now();
     std::cout << "Timer started for: " << message << std::endl;
 }
 
 void stopCodeTimer(const std::string& message) {
+    XSC_TRACE("stopCodeTimer");
     auto search = timers.find(message);
     if (search != timers.end()) {
         auto end = std::chrono::high_resolution_clock::now();
@@ -154,6 +164,7 @@ void stopCodeTimer(const std::string& message) {
 
 /*
 float calculateMeanLogTransformed(const std::vector<float>& v) {
+    XSC_TRACE("calculateMeanLogTransformed");
     if (v.empty())
         return 0.0f;
 
@@ -182,6 +193,7 @@ float calculateMeanLogTransformed(const std::vector<float>& v) {
 */
 /*
 std::string jsonToNewick(const nlohmann::json& node, const std::vector<QString>& species) {
+    XSC_TRACE("jsonToNewick");
     std::string newick;
     if (node.contains("children")) {
         newick += "(";
@@ -204,6 +216,7 @@ std::string jsonToNewick(const nlohmann::json& node, const std::vector<QString>&
 }
 */
 bool areSameIgnoreOrder(const QStringList& list1, const QStringList& list2) {
+    XSC_TRACE("areSameIgnoreOrder");
     if (list1.size() != list2.size()) {
         return false;
     }
@@ -225,6 +238,7 @@ bool areSameIgnoreOrder(const QStringList& list1, const QStringList& list2) {
 
 
 int findIndex(const std::vector<std::seed_seq::result_type>& vec, int value) {
+    XSC_TRACE("findIndex");
     auto it = std::find(vec.begin(), vec.end(), value);
     return (it != vec.end()) ? static_cast<int>(std::distance(vec.begin(), it)) : -1;
 }
@@ -276,36 +290,21 @@ namespace {
             return;
         }
 
-        // Large selections are faster when we fetch a block of genes once and
-        // aggregate the point-major buffer locally instead of calling into the
-        // dataset backend once per gene.
+        // One streamed pass over the cells gives the sums of every gene; the callback then receives the means chunk by chunk.
+        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices);
+        const double inversePointCount = 1.0 / static_cast<double>(aggregates.rows);
+
         std::vector<int> geneChunkIndices;
         geneChunkIndices.reserve(std::min<int>(kGeneChunkSize, static_cast<int>(allGeneIndices.size())));
-
-        std::vector<float> chunkData;
         std::vector<float> chunkMeans;
-
-        const int pointCount = static_cast<int>(pointIndices.size());
 
         for (int start = 0; start < static_cast<int>(allGeneIndices.size()); start += kGeneChunkSize) {
             const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(allGeneIndices.size()) - start);
 
             geneChunkIndices.assign(allGeneIndices.begin() + start, allGeneIndices.begin() + start + chunkSize);
-            chunkData.assign(static_cast<size_t>(pointCount) * static_cast<size_t>(chunkSize), 0.0f);
             chunkMeans.assign(chunkSize, 0.0f);
-
-            pointDataset->populateDataForDimensions(chunkData, geneChunkIndices, pointIndices);
-
-            for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
-                const int rowOffset = pointIndex * chunkSize;
-                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
-                    chunkMeans[geneOffset] += chunkData[rowOffset + geneOffset];
-                }
-            }
-
-            const float inversePointCount = 1.0f / static_cast<float>(pointCount);
-            for (float& meanValue : chunkMeans) {
-                meanValue *= inversePointCount;
+            for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
+                chunkMeans[geneOffset] = static_cast<float>(aggregates.sums[start + geneOffset] * inversePointCount);
             }
 
             callback(start, geneChunkIndices, chunkMeans);
@@ -322,36 +321,24 @@ namespace {
             return;
         }
 
+        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices);
+        const double inversePointCount = 1.0 / static_cast<double>(aggregates.rows);
+
         std::vector<int> geneChunkIndices;
         geneChunkIndices.reserve(std::min<int>(kGeneChunkSize, static_cast<int>(allGeneIndices.size())));
-        std::vector<float> chunkData;
         std::vector<float> chunkMeans;
         std::vector<float> chunkDetection;
-        const int pointCount = static_cast<int>(pointIndices.size());
 
         for (int start = 0; start < static_cast<int>(allGeneIndices.size()); start += kGeneChunkSize) {
             const int chunkSize = std::min(kGeneChunkSize, static_cast<int>(allGeneIndices.size()) - start);
 
             geneChunkIndices.assign(allGeneIndices.begin() + start, allGeneIndices.begin() + start + chunkSize);
-            chunkData.assign(static_cast<size_t>(pointCount) * static_cast<size_t>(chunkSize), 0.0f);
             chunkMeans.assign(chunkSize, 0.0f);
             chunkDetection.assign(chunkSize, 0.0f);
-
-            pointDataset->populateDataForDimensions(chunkData, geneChunkIndices, pointIndices);
-
-            for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
-                const size_t rowOffset = static_cast<size_t>(pointIndex) * static_cast<size_t>(chunkSize);
-                for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
-                    const float value = chunkData[rowOffset + geneOffset];
-                    chunkMeans[geneOffset] += value;
-                    chunkDetection[geneOffset] += (value != 0.0f) ? 1.0f : 0.0f;
-                }
-            }
-
-            const float inversePointCount = 1.0f / static_cast<float>(pointCount);
             for (int geneOffset = 0; geneOffset < chunkSize; ++geneOffset) {
-                chunkMeans[geneOffset] *= inversePointCount;
-                chunkDetection[geneOffset] *= inversePointCount;
+                const std::size_t g = static_cast<std::size_t>(start + geneOffset);
+                chunkMeans[geneOffset] = static_cast<float>(aggregates.sums[g] * inversePointCount);
+                chunkDetection[geneOffset] = static_cast<float>(aggregates.nonZero[g] * inversePointCount);
             }
 
             callback(start, geneChunkIndices, chunkMeans, chunkDetection);

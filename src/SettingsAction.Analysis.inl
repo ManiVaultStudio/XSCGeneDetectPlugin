@@ -1,6 +1,7 @@
 /*
 void SettingsAction::triggerTrippleHierarchyFrequencyChange()
 {
+    XSC_TRACE("SettingsAction::triggerTrippleHierarchyFrequencyChange");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -114,6 +115,7 @@ void SettingsAction::triggerTrippleHierarchyFrequencyChange()
 */
 
 QString SettingsAction::filterData(QString& key, const QString& category, const QJsonObject& data) {
+    XSC_TRACE("SettingsAction::filterData");
     QJsonObject result;
     QJsonObject keyObject;
     for (auto it = data.begin(); it != data.end(); ++it) {
@@ -132,6 +134,7 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
 }
 void SettingsAction::updateButtonTriggered()
 {
+    XSC_TRACE("SettingsAction::updateButtonTriggered");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         qDebug() << "Map for hierarchy items change method stop for project load blocker is checked";
@@ -202,7 +205,7 @@ void SettingsAction::updateButtonTriggered()
         std::vector<int> embeddingDatasetColumnIndices(embeddingDatasetallColumnNameList.size());
         std::iota(embeddingDatasetColumnIndices.begin(), embeddingDatasetColumnIndices.end(), 0);
 
-        std::vector<int> pointsDatasetallColumnIndices(pointsDatasetallColumnNameList.size());
+        std::vector<int> pointsDatasetallColumnIndices(PointStreaming::usableGeneCount(pointsDatasetallColumnNameList.size(), pointsDatasetRaw->getNumDimensions()));
         std::iota(pointsDatasetallColumnIndices.begin(), pointsDatasetallColumnIndices.end(), 0);
         //stopCodeTimer("Part4");
         {
@@ -863,51 +866,58 @@ void SettingsAction::updateButtonTriggered()
                     else {
                         const int totalGeneCount = static_cast<int>(pointsDatasetallColumnIndices.size());
 
-                        // ---- Stage 1 (parallel over gene chunks): mean expression of the SELECTED cells, per species ----
-                        // A worker reads one gene chunk for all selected cells once and fans the rows out to the species
-                        // sums. Workers write disjoint gene columns of speciesSelectedMeans -> no locking required.
-                        // The chunk is narrowed for huge selections so that (threads x buffer) stays within the memory budget.
-                        const int jobChunkSize = std::max(8, std::min(kGeneChunkSize, static_cast<int>(8000000 / std::max(1, selectedIndicesFromStorageSize))));
-                        struct GeneChunkJob { int start; int size; };
-                        std::vector<GeneChunkJob> chunkJobs;
-                        for (int jobStart = 0; jobStart < totalGeneCount; jobStart += jobChunkSize) {
-                            chunkJobs.push_back({ jobStart, std::min(jobChunkSize, totalGeneCount - jobStart) });
-                        }
-
-                        std::vector<std::vector<float>> speciesSelectedMeans(speciesCount, std::vector<float>(totalGeneCount, 0.0f));
-
-                        QThreadPool statisticsPool;
-                        statisticsPool.setMaxThreadCount(parallelWorkers(static_cast<size_t>(selectedIndicesFromStorageSize) * jobChunkSize / kGeneChunkSize));
-                        QtConcurrent::blockingMap(&statisticsPool, chunkJobs, [&](GeneChunkJob& job) {
-                            std::vector<int> geneChunkIndices(pointsDatasetallColumnIndices.begin() + job.start, pointsDatasetallColumnIndices.begin() + job.start + job.size);
-                            std::vector<float> selectedChunkData(static_cast<size_t>(selectedIndicesFromStorageSize) * static_cast<size_t>(job.size), 0.0f);
-                            pointsDatasetRaw->populateDataForDimensions(selectedChunkData, geneChunkIndices, _selectedIndicesFromStorage);
-
-                            std::vector<std::vector<double>> speciesChunkSums(speciesCount, std::vector<double>(job.size, 0.0));
-                            for (int selectedRowIndex = 0; selectedRowIndex < selectedIndicesFromStorageSize; ++selectedRowIndex) {
+                        // ---- Stage 1 (parallel over row blocks): mean expression of the SELECTED cells, per species ----
+                        // Every selected cell is streamed once. A block of cells adds its values straight into per-species
+                        // sums for all genes; the blocks are merged in a fixed order, so the result does not depend on timing.
+                        const std::vector<std::uint64_t> geneColumns(pointsDatasetallColumnIndices.begin(), pointsDatasetallColumnIndices.end());
+                        using SpeciesGeneSums = std::vector<std::vector<double>>;
+                        // Each thread holds one species x genes sum table; keep all of them within a fixed memory budget.
+                        const std::size_t stage1TableBytes = static_cast<std::size_t>(speciesCount) * static_cast<std::size_t>(totalGeneCount) * sizeof(double);
+                        const std::size_t stage1BudgetBytes = std::size_t{ 256 } << 20;
+                        XSC_LOG("stage 1: selected cells", _selectedIndicesFromStorage.size(), "species", speciesCount, "genes", totalGeneCount);
+                        const int stage1Threads = std::max(1, std::min({ 8,
+                            static_cast<int>(std::thread::hardware_concurrency()),
+                            static_cast<int>(stage1BudgetBytes / std::max<std::size_t>(stage1TableBytes, 1)) }));
+                        struct Stage1State {
+                            SpeciesGeneSums          sums;
+                            PointStreaming::SegmentColumns segment;
+                        };
+                        const Stage1State stage1 = PointStreaming::reduceRows(pointsDatasetRaw.get(), _selectedIndicesFromStorage, stage1Threads, static_cast<std::uint64_t>(totalGeneCount),
+                            [&]() {
+                                Stage1State state;
+                                state.sums.assign(static_cast<std::size_t>(speciesCount), std::vector<double>(totalGeneCount, 0.0));
+                                return state;
+                            },
+                            [&](Stage1State& state, std::size_t selectedRowIndex, const PointDataAccessView& view, std::uint64_t row, std::uint64_t offset) {
                                 const int speciesIndex = selectedPointSpeciesIndex[selectedRowIndex];
                                 if (speciesIndex < 0) {
-                                    continue;
+                                    return;
                                 }
-                                const size_t rowOffset = static_cast<size_t>(selectedRowIndex) * static_cast<size_t>(job.size);
-                                auto& currentSpeciesChunkSums = speciesChunkSums[speciesIndex];
-                                for (int geneOffset = 0; geneOffset < job.size; ++geneOffset) {
-                                    currentSpeciesChunkSums[geneOffset] += selectedChunkData[rowOffset + geneOffset];
+                                state.segment.update(geneColumns, offset, view.columns);
+                                PointStreaming::accumulateSegment(view, row, state.segment, state.sums[speciesIndex].data(), nullptr);
+                            },
+                            [](Stage1State& into, Stage1State& from) {
+                                for (std::size_t s = 0; s < into.sums.size(); ++s) {
+                                    for (std::size_t g = 0; g < into.sums[s].size(); ++g) {
+                                        into.sums[s][g] += from.sums[s][g];
+                                    }
                                 }
-                            }
-
-                            for (int speciesIndex = 0; speciesIndex < speciesCount; ++speciesIndex) {
-                                const int selectedCount = speciesComputationMeta[speciesIndex].selectedCellCount;
-                                if (selectedCount <= 0) {
-                                    continue;
-                                }
-                                for (int geneOffset = 0; geneOffset < job.size; ++geneOffset) {
-                                    speciesSelectedMeans[speciesIndex][job.start + geneOffset] =
-                                        static_cast<float>(speciesChunkSums[speciesIndex][geneOffset] / static_cast<double>(selectedCount));
-                                }
-                            }
                             });
+                        const SpeciesGeneSums& speciesSums = stage1.sums;
 
+                        std::vector<std::vector<float>> speciesSelectedMeans(speciesCount, std::vector<float>(totalGeneCount, 0.0f));
+                        for (int speciesIndex = 0; speciesIndex < speciesCount; ++speciesIndex) {
+                            const int selectedCount = speciesComputationMeta[speciesIndex].selectedCellCount;
+                            if (selectedCount <= 0) {
+                                continue;
+                            }
+                            for (int geneOffset = 0; geneOffset < totalGeneCount; ++geneOffset) {
+                                speciesSelectedMeans[speciesIndex][geneOffset] =
+                                    static_cast<float>(speciesSums[speciesIndex][geneOffset] / static_cast<double>(selectedCount));
+                            }
+                        }
+
+                        XSC_LOG("stage 1: done");
                         // ---- Stage 2 (parallel over species): build the per-gene statistics maps ----
                         // The outer map entries already exist (created above), so every worker only touches its own inner map.
                         struct SpeciesStatsJob { int speciesIndex; std::map<QString, Stats>* target; };
@@ -1113,6 +1123,7 @@ void SettingsAction::updateButtonTriggered()
 
 void SettingsAction::updateClusterInfoStatusBar()
 {
+    XSC_TRACE("SettingsAction::updateClusterInfoStatusBar");
     QLayoutItem* layoutItem;
     while ((layoutItem = _selectedCellClusterInfoStatusBar->takeAt(0)) != nullptr) {
         delete layoutItem->widget();
@@ -1392,6 +1403,7 @@ void SettingsAction::updateClusterInfoStatusBar()
 
 void SettingsAction::setModifiedTriggeredData(QVariant geneListTable)
 {
+    XSC_TRACE("SettingsAction::setModifiedTriggeredData");
     if (!geneListTable.isNull())
     {
         ////startCodeTimer("Part15");
@@ -1407,6 +1419,7 @@ void SettingsAction::setModifiedTriggeredData(QVariant geneListTable)
 }
 
 void createTreeInitial(QJsonObject& node, const std::map<QString, InitialStatistics>& utilityMap) {
+    XSC_TRACE("createTreeInitial");
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -1454,6 +1467,7 @@ void createTreeInitial(QJsonObject& node, const std::map<QString, InitialStatist
 
 void SettingsAction::precomputeTreesFromHierarchy()
 {
+    XSC_TRACE("SettingsAction::precomputeTreesFromHierarchy");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -1499,7 +1513,7 @@ void SettingsAction::precomputeTreesFromHierarchy()
 
 
         auto mainPointDimensionNames = mainPointsDataset->getDimensionNames();
-        std::vector<int> allGeneIndices(mainPointDimensionNames.size());
+        std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(mainPointDimensionNames.size(), mainPointsDataset->getNumDimensions()));
         std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
         QVector<Cluster> topClusters = topClusterNamesDataset->getClusters();
@@ -1738,6 +1752,7 @@ void SettingsAction::precomputeTreesFromHierarchy()
 
 void SettingsAction::computeGeneMeanExpressionMap()
 {
+    XSC_TRACE("SettingsAction::computeGeneMeanExpressionMap");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -1755,7 +1770,7 @@ void SettingsAction::computeGeneMeanExpressionMap()
         if (speciesClusterDatasetFull.isValid() && mainPointDatasetFull.isValid()) {
             auto speciesclusters = speciesClusterDatasetFull->getClusters();
             auto mainPointDimensionNames = mainPointDatasetFull->getDimensionNames();
-            std::vector<int> allGeneIndices(mainPointDimensionNames.size());
+            std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(mainPointDimensionNames.size(), mainPointDatasetFull->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
             QMutex mapMutex;
 
@@ -1767,7 +1782,7 @@ void SettingsAction::computeGeneMeanExpressionMap()
             QThreadPool meanMapPool;
             meanMapPool.setMaxThreadCount(parallelWorkers(largestSpecies));
 
-            QtConcurrent::blockingMap(&meanMapPool, speciesclusters, [&](const auto& species) {
+            QtConcurrent::blockingMap(&meanMapPool, speciesclusters, [&](const auto& species) { XSC_LOG("species job:", species.getName());
                 const auto& speciesIndices = species.getIndices();
                 auto speciesName = species.getName();
                 std::unordered_map<QString, std::pair<int, float>> localGeneMeans;
@@ -1797,6 +1812,7 @@ void SettingsAction::computeGeneMeanExpressionMap()
 
 void SettingsAction::computeHierarchyAppearanceVector()
 {
+    XSC_TRACE("SettingsAction::computeHierarchyAppearanceVector");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -1850,6 +1866,7 @@ void SettingsAction::computeHierarchyAppearanceVector()
 
 void SettingsAction::computeFrequencyMapForHierarchyItemsChange(QString hierarchyType)
 {
+    XSC_TRACE("SettingsAction::computeFrequencyMapForHierarchyItemsChange");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked() || hierarchyType.isEmpty())
     {
         return;
@@ -1936,6 +1953,7 @@ void SettingsAction::computeFrequencyMapForHierarchyItemsChange(QString hierarch
 /*
 void SettingsAction::computeGeneMeanExpressionMapForHierarchyItemsChangeExperimental(QString hierarchyType)
 {
+    XSC_TRACE("SettingsAction::computeGeneMeanExpressionMapForHierarchyItemsChangeExperimental");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -2019,6 +2037,8 @@ void SettingsAction::computeGeneMeanExpressionMapForHierarchyItemsChangeExperime
         {
             auto speciesclusters = speciesClusterDatasetFull->getClusters();
             auto mainPointDimensionNames = mainPointDatasetFull->getDimensionNames();
+            std::vector<int> geneColumnsSpeciesSummary(mainPointDimensionNames.size());
+            std::iota(geneColumnsSpeciesSummary.begin(), geneColumnsSpeciesSummary.end(), 0);
             for (auto species : speciesclusters) {
                 auto speciesIndices = species.getIndices();
                 auto speciesName = species.getName();
@@ -2033,15 +2053,12 @@ void SettingsAction::computeGeneMeanExpressionMapForHierarchyItemsChangeExperime
 
                 }
 
+                const auto speciesAggregates = PointStreaming::aggregateColumns(mainPointDatasetFull.get(), indices, geneColumnsSpeciesSummary);
                 for (int i = 0; i < mainPointDimensionNames.size(); i++) {
                     auto& geneName = mainPointDimensionNames[i];
-                    auto geneIndex = { i };
-
-
-
-                    std::vector<float> resultContainer(indices.size());
-                    mainPointDatasetFull->populateDataForDimensions(resultContainer, geneIndex, indices);
-                    float topMean = calculateMean(resultContainer);
+                    const float topMean = speciesAggregates.rows > 0
+                        ? static_cast<float>(speciesAggregates.sums[i] / static_cast<double>(speciesAggregates.rows))
+                        : 0.0f;
 
                     if (hierarchyType == "top")
                     {
@@ -2069,6 +2086,7 @@ void SettingsAction::computeGeneMeanExpressionMapForHierarchyItemsChangeExperime
 }
 void SettingsAction::computeGeneMeanExpressionMapExperimental()
 {
+    XSC_TRACE("SettingsAction::computeGeneMeanExpressionMapExperimental");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         return;
@@ -2129,8 +2147,12 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
             auto speciesclusters = speciesClusterDatasetFull->getClusters();
             auto mainPointDimensionNames = mainPointDatasetFull->getDimensionNames();
 
-            // Parallel processing of species clusters
-            QtConcurrent::blockingMap(speciesclusters, [&](const auto& species) {
+            // Parallel processing of species clusters. Each species streams its cells once per cell group and derives
+            // the mean of every gene from that single pass (instead of one pass per gene and cell group).
+            std::vector<int> geneColumnsCellGroups(mainPointDimensionNames.size());
+            std::iota(geneColumnsCellGroups.begin(), geneColumnsCellGroups.end(), 0);
+
+            QtConcurrent::blockingMap(speciesclusters, [&](const auto& species) { XSC_LOG("species job:", species.getName());
                 auto speciesIndices = species.getIndices();
                 auto speciesName = species.getName();
 
@@ -2151,31 +2173,22 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
                     }
                 }
 
-                // Parallel processing of gene expressions within each species
-                QtConcurrent::blockingMap(mainPointDimensionNames, [&](const auto& geneName) {
-                    // Manually find the index of the geneName
-                    int geneIndex = std::distance(mainPointDimensionNames.begin(),
-                    std::find(mainPointDimensionNames.begin(), mainPointDimensionNames.end(), geneName));
-
-                if (geneIndex == mainPointDimensionNames.size()) {
-                    // Handle case where geneName is not found if necessary
-                    return; // Skip processing if the index is invalid
-                }
-
-                auto processCells = [&](const std::vector<uint32_t>& indices, const QString& cellType) {
-                    std::vector<float> resultContainer(indices.size());
-                    mainPointDatasetFull->populateDataForDimensions(resultContainer, std::vector<int>{geneIndex}, indices);
-                    float mean = calculateMean(resultContainer);
+                auto storeMeans = [&](const std::vector<uint32_t>& indices, const QString& cellType) {
+                    const auto aggregates = PointStreaming::aggregateColumns(mainPointDatasetFull.get(), indices, geneColumnsCellGroups);
                     QMutexLocker locker(&mapMutex);
-                    _clusterGeneMeanExpressionMap[speciesName][geneName][cellType] = std::make_pair(indices.size(), mean);
-                    };
+                    for (std::size_t g = 0; g < geneColumnsCellGroups.size(); ++g) {
+                        const float mean = aggregates.rows > 0
+                            ? static_cast<float>(aggregates.sums[g] / static_cast<double>(aggregates.rows))
+                            : 0.0f;
+                        _clusterGeneMeanExpressionMap[speciesName][mainPointDimensionNames[g]][cellType] = std::make_pair(indices.size(), mean);
+                    }
+                };
 
-                processCells(speciesIndices, "allCells");
-                processCells(topIndices, "topCells");
-                processCells(middleIndices, "middleCells");
-                processCells(bottomIndices, "bottomCells");
-                    });
-                });
+                storeMeans(speciesIndices, "allCells");
+                storeMeans(topIndices, "topCells");
+                storeMeans(middleIndices, "middleCells");
+                storeMeans(bottomIndices, "bottomCells");
+            });
 
             _meanMapComputed = true;
         }
@@ -2219,6 +2232,7 @@ void SettingsAction::computeGeneMeanExpressionMapExperimental()
  */
 static int appendPicNodes(const QJsonObject& node, const std::map<QString, int>& speciesIndex, std::vector<PicNode>& nodes)
 {
+    XSC_TRACE("appendPicNodes");
     const int index = static_cast<int>(nodes.size());
     nodes.emplace_back();
     nodes[index].branchLength = node.value("branchLength").toDouble(0.0);
@@ -2241,6 +2255,7 @@ static int appendPicNodes(const QJsonObject& node, const std::map<QString, int>&
 
 void SettingsAction::applyClusterLabelSelectionStyles()
 {
+    XSC_TRACE("SettingsAction::applyClusterLabelSelectionStyles");
     for (auto it = _clusterLabelsByName.constBegin(); it != _clusterLabelsByName.constEnd(); ++it)
     {
         ClickableLabel* label = it.value().data();
@@ -2255,6 +2270,7 @@ void SettingsAction::applyClusterLabelSelectionStyles()
 
 void SettingsAction::updateTraitReverseSearchFeature()
 {
+    XSC_TRACE("SettingsAction::updateTraitReverseSearchFeature");
     // Many events request a refresh within the same event-loop burst (species selection, trait change, cell type click,
     // gene click, new model, ...). The single-shot timer coalesces them into one computation.
     if (_traitCorrelationTimer) {
@@ -2267,6 +2283,7 @@ void SettingsAction::updateTraitReverseSearchFeature()
 
 void SettingsAction::onTraitJobsFinished()
 {
+    XSC_TRACE("SettingsAction::onTraitJobsFinished");
     QGuiApplication::restoreOverrideCursor();
     if (_traitJobs) {
         for (auto& job : *_traitJobs) {
@@ -2283,6 +2300,7 @@ void SettingsAction::onTraitJobsFinished()
 
 void SettingsAction::computeTraitCorrelation()
 {
+    XSC_TRACE("SettingsAction::computeTraitCorrelation");
     // The expression data is read in the background (see below); until that is finished a new request only has to be remembered,
     // because the cache the background job fills must not be touched.
     if (_traitJobRunning) {
@@ -2329,7 +2347,8 @@ void SettingsAction::computeTraitCorrelation()
     std::vector<int> geneDims;
     std::vector<QString> geneNames;
     quint64 geneSignature = 1469598103934665603ull; // identifies the gene set (part of the cache key)
-    for (size_t g = 0; g < allGeneNames.size(); ++g) {
+    const size_t usableGenes = PointStreaming::usableGeneCount(allGeneNames.size(), mainPointsDataset->getNumDimensions());
+    for (size_t g = 0; g < usableGenes; ++g) {
         if (allGenes || _uniqueReturnGeneList.contains(allGeneNames[g]) || allGeneNames[g] == selectedGeneName) {
             geneDims.push_back(static_cast<int>(g));
             geneNames.push_back(allGeneNames[g]);
@@ -2811,6 +2830,7 @@ void SettingsAction::computeTraitCorrelation()
 
 void SettingsAction::publishTraitCorrelationToModel()
 {
+    XSC_TRACE("SettingsAction::publishTraitCorrelationToModel");
     QVariant variant = _listModel.getVariant();
     auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
     if (!model || model->columnCount() <= kTraitCorrelationColumn || model->rowCount() == 0) {
@@ -2851,6 +2871,7 @@ void SettingsAction::publishTraitCorrelationToModel()
 
 
 void SettingsAction::findTopNGenesPerCluster() {
+    XSC_TRACE("SettingsAction::findTopNGenesPerCluster");
 
     int n = _topNGenesFilter.getValue();
 
@@ -3251,6 +3272,7 @@ void SettingsAction::findTopNGenesPerCluster() {
 /** Leaf names of a species tree in the order of the tree (related species end up next to each other). */
 static void collectLeafNamesInOrder(const QJsonObject& node, QStringList& names)
 {
+    XSC_TRACE("collectLeafNamesInOrder");
     const QJsonArray children = node.value("children").toArray();
     if (children.isEmpty()) {
         const QString name = node.value("name").toString();
@@ -3266,6 +3288,7 @@ static void collectLeafNamesInOrder(const QJsonObject& node, QStringList& names)
 
 void SettingsAction::setSpeciesDeActive(bool active)
 {
+    XSC_TRACE("SettingsAction::setSpeciesDeActive");
     _deActive = active;
     if (active) {
         requestSpeciesDifferentialExpression();
@@ -3274,6 +3297,7 @@ void SettingsAction::setSpeciesDeActive(bool active)
 
 void SettingsAction::requestSpeciesDifferentialExpression()
 {
+    XSC_TRACE("SettingsAction::requestSpeciesDifferentialExpression");
     if (!_deActive) {
         return;
     }
@@ -3287,6 +3311,7 @@ void SettingsAction::requestSpeciesDifferentialExpression()
 
 void SettingsAction::onSpeciesDeJobsFinished()
 {
+    XSC_TRACE("SettingsAction::onSpeciesDeJobsFinished");
     QGuiApplication::restoreOverrideCursor();
     if (_deJobs) {
         for (auto& job : *_deJobs) {
@@ -3303,6 +3328,7 @@ void SettingsAction::onSpeciesDeJobsFinished()
 
 void SettingsAction::computeSpeciesDifferentialExpression()
 {
+    XSC_TRACE("SettingsAction::computeSpeciesDifferentialExpression");
     if (!_deActive) {
         return;
     }
@@ -3433,7 +3459,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             const auto jobs = _deJobs;
             const Dataset<Points>* datasetHandle = &_deJobDataset;
             const int workers = parallelWorkers(largestPointSet);
-            std::vector<int> allGeneIndices(geneCount);
+            std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(geneCount, mainPointsDataset->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
             _deJobWatcher.setFuture(QtConcurrent::run([jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices]() {
@@ -3655,6 +3681,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
 
 SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
 {
+    XSC_TRACE("SettingsAction::computeSpeciesDeDetail");
     SpeciesDeDetail detail;
     const auto it = std::find(_deState.species.begin(), _deState.species.end(), species);
     if (it == _deState.species.end() || _deState.species.size() < 3) {

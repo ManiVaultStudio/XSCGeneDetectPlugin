@@ -1,5 +1,6 @@
 void SettingsAction::clearTemporaryDatasetHandles()
 {
+    XSC_TRACE("SettingsAction::clearTemporaryDatasetHandles");
     _selectedPointsTSNEDataset = Dataset<Points>();
     _selectedPointsDataset = Dataset<Points>();
     _selectedPointsEmbeddingDataset = Dataset<Points>();
@@ -16,12 +17,14 @@ void SettingsAction::clearTemporaryDatasetHandles()
 
 int SettingsAction::speciesGeneListLength(const QString& species) const
 {
+    XSC_TRACE("SettingsAction::speciesGeneListLength");
     const auto it = _clusterNameToGeneNameToExpressionValue.find(species);
     return it != _clusterNameToGeneNameToExpressionValue.end() ? static_cast<int>(it->second.size()) : 0;
 }
 
 void SettingsAction::clearUpdateDatasetHandles()
 {
+    XSC_TRACE("SettingsAction::clearUpdateDatasetHandles");
     // The datasets that every update replaces (group 10): selection subset, embedding, expression colors, species and cluster colors.
     // (The handles of the filtered UMAP datasets, the gene similarity datasets and the gene table t-SNE dataset are NOT reset here.)
     _selectedPointsDataset = Dataset<Points>();
@@ -34,6 +37,7 @@ void SettingsAction::clearUpdateDatasetHandles()
 
 void SettingsAction::removeTemporaryDatasets()
 {
+    XSC_TRACE("SettingsAction::removeTemporaryDatasets");
     // Group 10 (selection subset, embeddings, colors) is replaced by every update: the handles are reset and the datasets removed.
     clearUpdateDatasetHandles();
     removeDatasets(10);
@@ -48,6 +52,7 @@ void SettingsAction::removeTemporaryDatasets()
 
 void SettingsAction::removeDatasets(int groupId)
 {
+    XSC_TRACE("SettingsAction::removeDatasets");
     auto allDatasets = mv::data().getAllDatasets();
 
     // id -> dataset pointer (NO COPYING)
@@ -119,6 +124,7 @@ void SettingsAction::removeDatasets(int groupId)
     }
 }
 QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap, const int& n) {
+    XSC_TRACE("SettingsAction::createModelFromData");
 
     if (map.empty() || _totalGeneList.empty()) {
         return QVariant();
@@ -362,9 +368,11 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
 
 void SettingsAction::createClusterPositionMap()
 {
+    XSC_TRACE("SettingsAction::createClusterPositionMap");
     _clusterPositionMap;
 }
 QStringList SettingsAction::getSystemModeColor() {
+    XSC_TRACE("SettingsAction::getSystemModeColor");
     // Get the application palette
     QPalette palette = QApplication::palette();
 
@@ -547,11 +555,13 @@ namespace {
 
 bool SettingsAction::traitColumnsAvailable(const QAbstractItemModel* model) const
 {
+    XSC_TRACE("SettingsAction::traitColumnsAvailable");
     return model && model->columnCount() > kTraitCorrelationColumn && _traitSampleSize > 0;
 }
 
 QStringList SettingsAction::traitExportHeaders() const
 {
+    XSC_TRACE("SettingsAction::traitExportHeaders");
     // p-value, FDR and confidence interval always describe the correlation across the compared species
     const QString suffix = _traitContributionShown ? " (overall correlation)" : "";
 
@@ -576,6 +586,7 @@ QStringList SettingsAction::traitExportHeaders() const
 
 QStringList SettingsAction::traitExportValues(const QAbstractItemModel* model, int row) const
 {
+    XSC_TRACE("SettingsAction::traitExportValues");
     const QModelIndex index = model->index(row, kTraitCorrelationColumn);
     const QVariantList stats = index.data(kTraitStatsRole).toList();
 
@@ -621,6 +632,7 @@ QStringList SettingsAction::traitExportValues(const QAbstractItemModel* model, i
 
 QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle, int rowCount, bool withTraitColumns, int significantRows)
 {
+    XSC_TRACE("SettingsAction::buildExportParameterLines");
     QStringList lines;
     lines << "XSC Gene Detect - " + tableTitle;
     lines << "Created: " + QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -669,6 +681,7 @@ QStringList SettingsAction::buildExportParameterLines(const QString& tableTitle,
 }
 
 void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
+    XSC_TRACE("SettingsAction::exportTableViewToCSVForGenes");
     if (!tableView || !tableView->model()) {
         qWarning() << "No table to export.";
         return;
@@ -750,6 +763,7 @@ void SettingsAction::exportTableViewToCSVForGenes(QTableView* tableView) {
 }
 
 void SettingsAction::exportTraitMatrixToCSV(QTableView* tableView) {
+    XSC_TRACE("SettingsAction::exportTraitMatrixToCSV");
     if (!tableView || !tableView->model()) {
         qWarning() << "No table to export.";
         return;
@@ -814,6 +828,7 @@ void SettingsAction::exportTraitMatrixToCSV(QTableView* tableView) {
 }
 
 void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
+    XSC_TRACE("SettingsAction::exportTableViewToCSVPerGene");
     if (!tableView || !tableView->model()) {
         qWarning() << "No table to export.";
         return;
@@ -913,6 +928,7 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
 
 void SettingsAction::populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames)
 {
+    XSC_TRACE("SettingsAction::populatePointDataConcurrently");
     (void)QtConcurrent::run([this, datasetId, pointVector, numPoints, numDimensions, dimensionNames]() {
         auto pointDataset = mv::data().getDataset<Points>(datasetId);
 
@@ -929,6 +945,7 @@ void SettingsAction::populatePointDataConcurrently(QString datasetId, const std:
 }
 void SettingsAction::enableActions()
 {
+    XSC_TRACE("SettingsAction::enableActions");
     //_startComputationTriggerAction.setDisabled(false);
     _topNGenesFilter.setDisabled(false);
     _typeofTopNGenes.setDisabled(false);
@@ -978,6 +995,7 @@ void SettingsAction::enableActions()
 }
 void SettingsAction::disableActions()
 {
+    XSC_TRACE("SettingsAction::disableActions");
     _statusColorAction.setString("R");
     _clearRightClickedCluster.trigger();
     _startComputationTriggerAction.setDisabled(true);
@@ -1021,6 +1039,7 @@ void SettingsAction::disableActions()
 
 void SettingsAction::enableDisableButtonsAutomatically()
 {
+    XSC_TRACE("SettingsAction::enableDisableButtonsAutomatically");
 
     bool optionsActionHasOptions = !_speciesExplorerInMap.getOptions().isEmpty();
     bool stringActionHasOptions = !_selectedSpeciesVals.getString().isEmpty();
@@ -1082,6 +1101,7 @@ void SettingsAction::enableDisableButtonsAutomatically()
 
 void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames)
 {
+    XSC_TRACE("SettingsAction::populatePointData");
     auto pointDataset = mv::data().getDataset<Points>(datasetId);
 
     if (pointDataset.isValid())
@@ -1097,6 +1117,7 @@ void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& p
 }
 void SettingsAction::populateClusterData(QString& datasetId, std::map<QString, std::pair<QColor, std::vector<int>>>& clusterMap)
 {
+    XSC_TRACE("SettingsAction::populateClusterData");
 
     auto colorDataset = mv::data().getDataset<Clusters>(datasetId);
     if (colorDataset.isValid())
@@ -1126,6 +1147,7 @@ void SettingsAction::populateClusterData(QString& datasetId, std::map<QString, s
 }
 
 void SettingsAction::clearTableSelection(QTableView* tableView) {
+    XSC_TRACE("SettingsAction::clearTableSelection");
     if (tableView && tableView->selectionModel()) {
         // Clear the current selection
         tableView->clearSelection();
@@ -1154,6 +1176,7 @@ void SettingsAction::clearTableSelection(QTableView* tableView) {
 
 void SettingsAction::setSpeciesExplorerSelection(const QStringList& species)
 {
+    XSC_TRACE("SettingsAction::setSpeciesExplorerSelection");
     QStringList current = _speciesExplorerInMap.getSelectedOptions();
     QStringList wanted = species;
     current.sort();
@@ -1166,6 +1189,7 @@ void SettingsAction::setSpeciesExplorerSelection(const QStringList& species)
 
 QStringList SettingsAction::resolveExplorerSelectionForGene(const QStringList& geneSpecies)
 {
+    XSC_TRACE("SettingsAction::resolveExplorerSelectionForGene");
     // Clicking a gene always selects the species in which that gene appears (empty entries come from genes without species).
     QStringList species = geneSpecies;
     species.removeAll(QString());
@@ -1174,6 +1198,7 @@ QStringList SettingsAction::resolveExplorerSelectionForGene(const QStringList& g
 
 void SettingsAction::removeSelectionTableRows(QStringList* selectedLeaves)
 {
+    XSC_TRACE("SettingsAction::removeSelectionTableRows");
     //check if _selectionDetailsTable is valid
     if (_selectionDetailsTable == nullptr || selectedLeaves == nullptr) {
         return;

@@ -1,3 +1,4 @@
+#include "StreamedPointData.h"
 #include "XSCGeneDetectPlugin.h"
 
 #include <util/Serialization.h>
@@ -56,6 +57,7 @@ using namespace mv;
 
 
 void applyLogTransformation(std::vector<float>& values) {
+    XSC_TRACE("applyLogTransformation");
 
 
 #ifdef _WIN32
@@ -68,6 +70,7 @@ void applyLogTransformation(std::vector<float>& values) {
 
 }
 float getNormalizedSizeRank(float value, float min, float max) {
+    XSC_TRACE("getNormalizedSizeRank");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -80,6 +83,7 @@ float getNormalizedSizeRank(float value, float min, float max) {
     return normalizedValue * 100.0f; // Return size as a percentage
 }
 float getNormalizedSizePosNeg(float value, float min, float max) {
+    XSC_TRACE("getNormalizedSizePosNeg");
     // Calculate the maximum absolute value of min and max
     float maxAbs = std::max(std::abs(min), std::abs(max));
     if (maxAbs <= 0.0f) {
@@ -101,6 +105,7 @@ float getNormalizedSizePosNeg(float value, float min, float max) {
 
 
 float getNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getNormalizedSize");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -112,6 +117,7 @@ float getNormalizedSize(float value, float min, float max) {
 }
 
 float getPowNormalizedSize(float value, float min, float max, float alpha) {
+    XSC_TRACE("getPowNormalizedSize");
     // Scale down the range to avoid precision issues
     const float scale = 1e6f; // Adjust the scale as needed
     float scaledMin = min / scale;
@@ -127,6 +133,7 @@ float getPowNormalizedSize(float value, float min, float max, float alpha) {
 
 
 float getLogNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getLogNormalizedSize");
     // Avoid precision issues and ensure the range does not include zero (since log(0) is undefined)
     const float scale = 1e6f;
     float scaledMin = min / scale;
@@ -146,6 +153,7 @@ float getLogNormalizedSize(float value, float min, float max) {
     return normalizedValue * 100.0f; // Return as percentage
 }
 float getRelativeNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getRelativeNormalizedSize");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -159,6 +167,7 @@ float getRelativeNormalizedSize(float value, float min, float max) {
     return normalizedValue * 100.0f;
 }
 float getSegmentedNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getSegmentedNormalizedSize");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -176,6 +185,7 @@ float getSegmentedNormalizedSize(float value, float min, float max) {
     return normalizedValue * 100.0f;
 }
 float getShiftedNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getShiftedNormalizedSize");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -188,6 +198,7 @@ float getShiftedNormalizedSize(float value, float min, float max) {
     return normalizedValue * 100.0f;
 }
 float getFixedPointNormalizedSize(float value, float min, float max) {
+    XSC_TRACE("getFixedPointNormalizedSize");
     int scaleFactor = 1e6;  // Scale to an integer level that fits in `int`
     int intValue = static_cast<int>(value * scaleFactor);
     int intMin = static_cast<int>(min * scaleFactor);
@@ -202,6 +213,7 @@ float getFixedPointNormalizedSize(float value, float min, float max) {
     return normalizedValue * 100.0f;
 }
 std::pair<QColor, QColor> getColorMAp(float value, float min, float max, const QString& colorMap) {
+    XSC_TRACE("getColorMAp");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -237,6 +249,7 @@ std::pair<QColor, QColor> getColorMAp(float value, float min, float max, const Q
 }
 
 std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& formattedStatistics) {
+    XSC_TRACE("convertToStatisticsMap");
     std::map<QString, SpeciesDetailsStats> statisticsMap;
 
     QStringList speciesStatsList = formattedStatistics.split(";", Qt::SkipEmptyParts); // Qt 5.14 and later
@@ -271,6 +284,7 @@ std::map<QString, SpeciesDetailsStats> convertToStatisticsMap(const QString& for
  */
 static QString geneTableCellTooltip(SettingsAction& settings, const QModelIndex& index)
 {
+    XSC_TRACE("geneTableCellTooltip");
     const int column = index.column();
     const bool supported = column == 0 || column == 1 || column == 2 || column == 3 || (column >= kBestPositionColumn && column <= kMeanExpressionColumn);
     if (!index.isValid() || !supported) {
@@ -461,6 +475,7 @@ static QString geneTableCellTooltip(SettingsAction& settings, const QModelIndex&
 // 165 px, which only fits the first two columns, so the Trait Correlation column was cut off.
 static void fitGeneTableWidth(QTableView* view)
 {
+    XSC_TRACE("fitGeneTableWidth");
     if (!view || !view->model()) {
         return;
     }
@@ -478,6 +493,7 @@ static void fitGeneTableWidth(QTableView* view)
 // Replace the model of the (proxy-less) selection details table and free the previous one.
 static void setSelectionDetailsModel(QTableView* view, QStandardItemModel* newModel)
 {
+    XSC_TRACE("setSelectionDetailsModel");
     QAbstractItemModel* oldModel = view->model();
     view->setModel(newModel);
     // Only delete models we created: QTableView hands out a static empty model when none is set.
@@ -490,11 +506,13 @@ XSCGeneDetectPlugin::XSCGeneDetectPlugin(const PluginFactory* factory) :
     ViewPlugin(factory),
     _settingsAction(*this)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::XSCGeneDetectPlugin");
 
 }
 
 void XSCGeneDetectPlugin::init()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::init");
     auto& shortcuts = getShortcuts();
 
     shortcuts.add({ QKeySequence(Qt::MouseButton::LeftButton), "Update Info", "Click update button to update outdated table. Current cells need to be selected in the scatterplot" });
@@ -1285,6 +1303,7 @@ void XSCGeneDetectPlugin::init()
 
 bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const QStringList& finalsettingSpeciesNamesArray)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::showGeneInSpeciesEmbedding");
     std::vector<std::seed_seq::result_type> selectedSpeciesIndices;
     auto speciesDataset = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
     auto umapDataset = _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset();
@@ -1340,18 +1359,13 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
 
 
-            std::vector<float> resultContainerSpeciesColors(selectedSpeciesIndices.size());
-            std::vector<int> selectedGeneIndex;
+            std::vector<float> resultContainerSpeciesColors(selectedSpeciesIndices.size(), 0.0f);
 
             auto dimensionNames = fullMainPointsDataset->getDimensionNames();
             auto it = std::find(dimensionNames.begin(), dimensionNames.end(), gene);
             if (it != dimensionNames.end()) {
-                selectedGeneIndex.push_back(std::distance(dimensionNames.begin(), it));
-            }
-
-
-            if (!selectedGeneIndex.empty()) {
-                fullMainPointsDataset->populateDataForDimensions(resultContainerSpeciesColors, selectedGeneIndex, selectedSpeciesIndices);
+                const int selectedGeneIndex = static_cast<int>(std::distance(dimensionNames.begin(), it));
+                resultContainerSpeciesColors = PointStreaming::fetchColumnValues(fullMainPointsDataset.get(), selectedGeneIndex, selectedSpeciesIndices);
             }
             else {
                 qDebug() << "Gene" << gene << "was not found in the main dataset";
@@ -1462,6 +1476,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
 void XSCGeneDetectPlugin::geneExplorer()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::geneExplorer");
     const QString gene = _settingsAction.getSelectedGeneAction().getString();
     const QStringList speciesNames = _settingsAction.getSpeciesExplorerInMap().getSelectedOptions();
 
@@ -1480,6 +1495,7 @@ void XSCGeneDetectPlugin::geneExplorer()
 
 void XSCGeneDetectPlugin::geneExplorer(QString selectedSpecies)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::geneExplorer");
     const QString gene = _settingsAction.getSelectedGeneAction().getString();
 
     if (gene.isEmpty())
@@ -1496,6 +1512,7 @@ void XSCGeneDetectPlugin::geneExplorer(QString selectedSpecies)
 }
 
 void XSCGeneDetectPlugin::adjustTableWidths(const QString& value) {
+    XSC_TRACE("XSCGeneDetectPlugin::adjustTableWidths");
     /*
      // Assuming _settingsAction.getHorizontalLayout() returns your QHBoxLayout
      QHBoxLayout* layout = _settingsAction.getTableSplitter();
@@ -1536,6 +1553,7 @@ void XSCGeneDetectPlugin::adjustTableWidths(const QString& value) {
 
 
 QColor getColorFromValue(int value, int min, int max) {
+    XSC_TRACE("getColorFromValue");
     if (value < min) value = min;
     if (value > max) value = max;
 
@@ -3278,6 +3296,7 @@ private:
 
 void XSCGeneDetectPlugin::modifyListData()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::modifyListData");
     try {
         auto variant = _settingsAction.getListModelAction().getVariant();
         QStandardItemModel* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
@@ -3316,6 +3335,7 @@ void XSCGeneDetectPlugin::modifyListData()
 
 void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::installGeneTableModel");
     QTableView* geneTableView = _settingsAction.getGeneTableView();
     CustomLineEdit* searchBox = _settingsAction.getSearchBox();
 
@@ -3450,6 +3470,7 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
 
 bool XSCGeneDetectPlugin::selectGeneInGeneTable(const QString& gene)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::selectGeneInGeneTable");
     auto* view = _settingsAction.getGeneTableView();
     if (!view || !view->model() || gene.isEmpty())
         return false;
@@ -3468,6 +3489,7 @@ bool XSCGeneDetectPlugin::selectGeneInGeneTable(const QString& gene)
 
 void XSCGeneDetectPlugin::showSpeciesDe()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::showSpeciesDe");
     if (!_speciesDeDialog) {
         auto* dialog = new SpeciesDeDialog(&getWidget());
         dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -3525,6 +3547,7 @@ void XSCGeneDetectPlugin::showSpeciesDe()
 
 void XSCGeneDetectPlugin::refreshSpeciesDe()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::refreshSpeciesDe");
     if (!_speciesDeDialog)
         return;
     auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
@@ -3543,6 +3566,7 @@ void XSCGeneDetectPlugin::refreshSpeciesDe()
 
 void XSCGeneDetectPlugin::refreshSpeciesDeDetail(const QString& species)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::refreshSpeciesDeDetail");
     if (!_speciesDeDialog)
         return;
     auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
@@ -3551,6 +3575,7 @@ void XSCGeneDetectPlugin::refreshSpeciesDeDetail(const QString& species)
 
 void XSCGeneDetectPlugin::refreshSpeciesDeHighlights()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::refreshSpeciesDeHighlights");
     if (!_speciesDeDialog || !_speciesDeDialog->isVisible())
         return;
     auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
@@ -3574,6 +3599,7 @@ void XSCGeneDetectPlugin::refreshSpeciesDeHighlights()
 
 void XSCGeneDetectPlugin::showTraitPlot()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::showTraitPlot");
     if (!_traitPlotDialog) {
         auto* dialog = new TraitPlotDialog(&getWidget());
         dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -3619,6 +3645,7 @@ void XSCGeneDetectPlugin::showTraitPlot()
 
 void XSCGeneDetectPlugin::refreshTraitPlot()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::refreshTraitPlot");
     if (!_traitPlotDialog || !_traitPlotDialog->isVisible()) {
         return;
     }
@@ -3742,6 +3769,7 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
 
 void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::onGeneRowChanged");
     if (!current.isValid()) return;
 
     QString gene = current.siblingAtColumn(0).data().toString();
@@ -4029,6 +4057,7 @@ namespace {
 
 void XSCGeneDetectPlugin::applyDetailsColumnVisibility()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::applyDetailsColumnVisibility");
     QTableView* view = _settingsAction.getSelectionDetailsTable();
     QAbstractItemModel* model = view ? view->model() : nullptr;
     if (!model) {
@@ -4053,6 +4082,7 @@ void XSCGeneDetectPlugin::applyDetailsColumnVisibility()
 
 void XSCGeneDetectPlugin::showDetailsColumnMenu(const QPoint& globalPosition)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::showDetailsColumnMenu");
     QTableView* view = _settingsAction.getSelectionDetailsTable();
     QAbstractItemModel* model = view ? view->model() : nullptr;
     if (!model || model->columnCount() < 2) {
@@ -4091,6 +4121,7 @@ void XSCGeneDetectPlugin::showDetailsColumnMenu(const QPoint& globalPosition)
 
 void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::selectedCellCountStatusBarAdd");
     const auto& speciesCountMap = _settingsAction.getSelectedSpeciesCellCountMap();
     QTableView* detailsTable = _settingsAction.getSelectionDetailsTable();
 
@@ -4197,6 +4228,7 @@ void XSCGeneDetectPlugin::selectedCellCountStatusBarAdd()
 
 void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, SpeciesDetailsStats> statisticsValues, QStringList selectedSpecies)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd");
     const auto& speciesCountMap = _settingsAction.getSelectedSpeciesCellCountMap();
     QTableView* detailsTable = _settingsAction.getSelectionDetailsTable();
 
@@ -4464,6 +4496,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarAdd(std::map<QString, S
 
 void XSCGeneDetectPlugin::updatePhylogeneticTree()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::updatePhylogeneticTree");
     if (_settingsAction.getGeneTableView())
     {
         QString treeData = "";// = _settingsAction.getGeneTableView()->model()->index(0, 2).data().toString();
@@ -4511,14 +4544,17 @@ void XSCGeneDetectPlugin::updatePhylogeneticTree()
 
 void XSCGeneDetectPlugin::selectedCellCountStatusBarRemove()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::selectedCellCountStatusBarRemove");
     setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), new QStandardItemModel());
 }
 
 void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove()
 {
+    XSC_TRACE("XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove");
     setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), new QStandardItemModel());
 }
 void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
+    XSC_TRACE("XSCGeneDetectPlugin::updateSpeciesData");
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -4614,6 +4650,7 @@ void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QS
 }
 
 void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
+    XSC_TRACE("XSCGeneDetectPlugin::updateTreeData");
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
         QString nodeName = node["name"].toString();
@@ -4708,6 +4745,7 @@ void XSCGeneDetectPlugin::updateTreeData(QJsonObject& node, const std::map<QStri
 /*
 void XSCGeneDetectPlugin::onDataEvent(mv::DatasetEvent* dataEvent)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::onDataEvent");
     // Get smart pointer to dataset that changed
     const auto changedDataSet = dataEvent->getDataset();
 
@@ -4776,6 +4814,7 @@ void XSCGeneDetectPlugin::onDataEvent(mv::DatasetEvent* dataEvent)
 
 void XSCGeneDetectPlugin::fromVariantMap(const QVariantMap& variantMap)
 {
+    XSC_TRACE("XSCGeneDetectPlugin::fromVariantMap");
     ViewPlugin::fromVariantMap(variantMap);
 
     mv::util::variantMapMustContain(variantMap, "CSCGDV:XSC Gene Detect Plugin Settings");
@@ -4787,6 +4826,7 @@ void XSCGeneDetectPlugin::fromVariantMap(const QVariantMap& variantMap)
 
 QVariantMap XSCGeneDetectPlugin::toVariantMap() const
 {
+    XSC_TRACE("XSCGeneDetectPlugin::toVariantMap");
     QVariantMap variantMap = ViewPlugin::toVariantMap();
 
     _settingsAction.insertIntoVariantMap(variantMap);
@@ -4795,11 +4835,13 @@ QVariantMap XSCGeneDetectPlugin::toVariantMap() const
 }
 ViewPlugin* XSCGeneDetectPluginFactory::produce()
 {
+    XSC_TRACE("XSCGeneDetectPluginFactory::produce");
     return new XSCGeneDetectPlugin(this);
 }
 
 mv::DataTypes XSCGeneDetectPluginFactory::supportedDataTypes() const
 {
+    XSC_TRACE("XSCGeneDetectPluginFactory::supportedDataTypes");
     DataTypes supportedTypes;
 
     // This example analysis plugin is compatible with points datasets
@@ -4810,6 +4852,7 @@ mv::DataTypes XSCGeneDetectPluginFactory::supportedDataTypes() const
 
 mv::gui::PluginTriggerActions XSCGeneDetectPluginFactory::getPluginTriggerActions(const mv::Datasets& datasets) const
 {
+    XSC_TRACE("XSCGeneDetectPluginFactory::getPluginTriggerActions");
     PluginTriggerActions pluginTriggerActions;
     /*
     const auto getPluginInstance = [this]() -> XSCGeneDetectPlugin* {

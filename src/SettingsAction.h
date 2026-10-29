@@ -1,4 +1,6 @@
 #pragma once
+
+#include "XSCDebug.h"
 #include <actions/WidgetAction.h>
 #include <actions/IntegralAction.h>
 #include <actions/OptionAction.h>

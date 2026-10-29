@@ -1,15 +1,18 @@
 int SettingsAction::parallelWorkers(size_t pointsPerWorker) const
 {
+    XSC_TRACE("SettingsAction::parallelWorkers");
     return memorySafeThreadCount(pointsPerWorker, _memoryBudgetMb.getValue(), _maxWorkerThreads.getValue());
 }
 
 QString SettingsAction::currentMeanMapSignature() const
 {
+    XSC_TRACE("SettingsAction::currentMeanMapSignature");
     return _mainPointsDataset.getCurrentDataset().getDatasetId() + QLatin1Char('|') + _speciesNamesDataset.getCurrentDataset().getDatasetId();
 }
 
 SettingsAction::~SettingsAction()
 {
+    XSC_TRACE("SettingsAction::~SettingsAction");
     _deJobWatcher.waitForFinished(); // (same reason as for the trait job)
     _traitJobWatcher.waitForFinished(); // the background job reads datasets that must not disappear under it
     // The two message boxes are never added to a layout, so nobody else owns them.
@@ -94,6 +97,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _deMinCells(this, "Min. cells per species"),
     _showSpeciesDe(this, "Species Differential Expression...")
 {
+    XSC_TRACE("SettingsAction::SettingsAction");
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(true);
     setSerializationName("CSCGDV:XSC Gene Detect Plugin Settings");
     _statusBarActionWidget = new QStatusBar();
@@ -1213,9 +1217,19 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
              //_startComputationTriggerAction.trigger();
 
-             //QFuture<void> future = QtConcurrent::run([this]() { computeFrequencyMapForHierarchyItemsChange("top"); });
-            QFuture<void> future1 = QtConcurrent::run([this]() { computeGeneMeanExpressionMap(); });
-            QFuture<void> future2 = QtConcurrent::run([this]() { computeHierarchyAppearanceVector(); });
+             //QFuture<void> future = QtConcurrent::run([this]() { XSC_TRACE("background job"); computeFrequencyMapForHierarchyItemsChange("top"); });
+            QFuture<void> future1 = QtConcurrent::run([this]() { XSC_TRACE("background job");
+                try {
+                    computeGeneMeanExpressionMap();
+                }
+                catch (const std::exception& e) {
+                    qWarning() << "Gene mean expression map failed:" << e.what();
+                }
+                catch (...) {
+                    qWarning() << "Gene mean expression map failed: unknown error";
+                }
+            });
+            QFuture<void> future2 = QtConcurrent::run([this]() { XSC_TRACE("background job"); computeHierarchyAppearanceVector(); });
 
             //future.waitForFinished();
 
@@ -1228,8 +1242,18 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _popupMessageInit->show();
             QApplication::processEvents();
             try {
-                QFuture<void> future1 = QtConcurrent::run([this]() { computeGeneMeanExpressionMap(); });
-                QFuture<void> future2 = QtConcurrent::run([this]() { computeFrequencyMapForHierarchyItemsChange("top"); });
+                QFuture<void> future1 = QtConcurrent::run([this]() { XSC_TRACE("background job");
+                try {
+                    computeGeneMeanExpressionMap();
+                }
+                catch (const std::exception& e) {
+                    qWarning() << "Gene mean expression map failed:" << e.what();
+                }
+                catch (...) {
+                    qWarning() << "Gene mean expression map failed: unknown error";
+                }
+            });
+                QFuture<void> future2 = QtConcurrent::run([this]() { XSC_TRACE("background job"); computeFrequencyMapForHierarchyItemsChange("top"); });
                 future1.waitForFinished();
                 future2.waitForFinished();
             }
@@ -1241,8 +1265,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             }
 
             try {
-                QFuture<void> future3 = QtConcurrent::run([this]() { precomputeTreesFromHierarchy(); });
-                QFuture<void> future4 = QtConcurrent::run([this]() { _startComputationTriggerAction.trigger(); });
+                QFuture<void> future3 = QtConcurrent::run([this]() { XSC_TRACE("background job"); precomputeTreesFromHierarchy(); });
+                QFuture<void> future4 = QtConcurrent::run([this]() { XSC_TRACE("background job"); _startComputationTriggerAction.trigger(); });
                 //future3.waitForFinished();
                 future4.waitForFinished();
             }
