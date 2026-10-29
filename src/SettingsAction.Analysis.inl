@@ -875,7 +875,7 @@ void SettingsAction::updateButtonTriggered()
                         const std::size_t stage1TableBytes = static_cast<std::size_t>(speciesCount) * static_cast<std::size_t>(totalGeneCount) * sizeof(double);
                         const std::size_t stage1BudgetBytes = std::size_t{ 256 } << 20;
                         XSC_LOG("stage 1: selected cells", _selectedIndicesFromStorage.size(), "species", speciesCount, "genes", totalGeneCount);
-                        const int stage1Threads = std::max(1, std::min({ 8,
+                        const int stage1Threads = std::max(1, std::min({ 64,
                             static_cast<int>(std::thread::hardware_concurrency()),
                             static_cast<int>(stage1BudgetBytes / std::max<std::size_t>(stage1TableBytes, 1)) }));
                         struct Stage1State {

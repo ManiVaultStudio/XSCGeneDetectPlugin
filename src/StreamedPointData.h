@@ -1,19 +1,28 @@
 #pragma once
 
-#include "XSCDebug.h"
+// ============================================================================
+//  Streaming access to the main (cell x gene) point dataset.
+//
+//  Semantics (point-data implementation and PointsViewWidget::displayQuery):
+//   - valueAt() indexes a view relative to the view.
+//   - a request can arrive as several views per row batch (column segments, e.g. tiles).
+//     The segments of one row batch arrive in column order; the column offset of a segment
+//     is the sum of the widths of the segments before it in that batch.
+//   - a view does not carry its absolute column position, so the offset is tracked here.
+//
+//  Access paths for a block of rows (rows are sorted, duplicates allowed):
+//   - span:     one Range2D read over the block's row span, unselected rows are skipped
+//   - runs:     one Range2D read per contiguous run of rows
+//   - row list: one RowList read (sparse blocks)
+//  Column requests that cover at least a quarter of their range are read as full rows;
+//  sparse column requests read only the requested column runs (ColumnsForRows).
+//
+//  Parallelism: blocks are assigned to workers statically (worker w takes blocks w, w+W, ...),
+//  each worker owns one reduction state, states are merged in worker order. The result is
+//  deterministic for a fixed number of workers.
+// ============================================================================
 
-// Streaming access to the main (cell x gene) point dataset.
-//
-// Semantics (from the point-data implementation and PointsViewWidget::displayQuery):
-//  - valueAt() indexes a view relative to the view.
-//  - a request can be delivered as several views per row block (column segments, e.g. tiles). The views of one row block
-//    arrive in column order; the column offset of a view is the sum of the widths of the views before it in that block.
-//  - a view does not carry its absolute column position, so the offset is tracked here, as the widget does.
-//
-// Access patterns:
-//  - reduceRows / aggregateColumns: rows are read in ascending order, in blocks; contiguous runs use FetchMode::Range2D,
-//    scattered rows use FetchMode::RowList. No buffer for the whole selection is allocated.
-//  - fetchColumnValues: one column for a set of rows, FetchMode::ColumnsForRows.
+#include "XSCDebug.h"
 
 #include <PointData/PointData.h>
 #include <biovault_bfloat16/biovault_bfloat16.h>
@@ -27,41 +36,31 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 class Points;
 using PointDataAccessVisitor = std::function<void(const PointDataAccessView&)>;
 
-/**
- * Value at (row, column) of a view delivered by the point-data API.
- * row and column are relative to the view. Same element decoding as PointsViewWidget.cpp.
- */
+/** Value at (row, column) of a view delivered by the point-data API. Row and column are relative to the view. */
 inline float valueAt(const PointDataAccessView& view, const std::uint64_t row, const std::uint64_t column)
 {
     const auto* bytes = view.rowData(row) + column * view.elementSizeBytes;
 
     switch (view.elementTypeIndex)
     {
-        case 0:
-            return *reinterpret_cast<const float*>(bytes);
-        case 1:
-            return static_cast<float>(*reinterpret_cast<const biovault::bfloat16_t*>(bytes));
-        case 2:
-            return static_cast<float>(*reinterpret_cast<const std::int32_t*>(bytes));
-        case 3:
-            return static_cast<float>(*reinterpret_cast<const std::uint32_t*>(bytes));
-        case 4:
-            return static_cast<float>(*reinterpret_cast<const std::int16_t*>(bytes));
-        case 5:
-            return static_cast<float>(*reinterpret_cast<const std::uint16_t*>(bytes));
-        case 6:
-            return static_cast<float>(*reinterpret_cast<const std::int8_t*>(bytes));
-        case 7:
-            return static_cast<float>(*reinterpret_cast<const std::uint8_t*>(bytes));
-        default:
-            return 0.0f;
+        case 0: return *reinterpret_cast<const float*>(bytes);
+        case 1: return static_cast<float>(*reinterpret_cast<const biovault::bfloat16_t*>(bytes));
+        case 2: return static_cast<float>(*reinterpret_cast<const std::int32_t*>(bytes));
+        case 3: return static_cast<float>(*reinterpret_cast<const std::uint32_t*>(bytes));
+        case 4: return static_cast<float>(*reinterpret_cast<const std::int16_t*>(bytes));
+        case 5: return static_cast<float>(*reinterpret_cast<const std::uint16_t*>(bytes));
+        case 6: return static_cast<float>(*reinterpret_cast<const std::int8_t*>(bytes));
+        case 7: return static_cast<float>(*reinterpret_cast<const std::uint8_t*>(bytes));
+        default: return 0.0f;
     }
 }
 
@@ -94,76 +93,73 @@ inline void fetchPointData(
 
     switch (mode)
     {
-        case FetchMode::SingleRow:
-            visitor(points->getRow(rowId));
-            break;
-        case FetchMode::RowRange:
-            points->visitRows(firstRow, rowCount, visitor);
-            break;
-        case FetchMode::RowList:
-            points->visitRows(rowIds, visitor);
-            break;
-        case FetchMode::SingleColumn:
-            points->visitColumns(columnId, 1, visitor);
-            break;
-        case FetchMode::ColumnRange:
-            points->visitColumns(firstColumn, columnCount, visitor);
-            break;
-        case FetchMode::ColumnList:
-            points->visitColumns(columnIds, visitor);
-            break;
-        case FetchMode::ColumnsForRows:
-            points->visitColumns(firstColumn, columnCount, rowIds, visitor);
-            break;
-        case FetchMode::Range2D:
-            points->visitRange(firstRow, rowCount, firstColumn, columnCount, visitor);
-            break;
+        case FetchMode::SingleRow:       visitor(points->getRow(rowId)); break;
+        case FetchMode::RowRange:        points->visitRows(firstRow, rowCount, visitor); break;
+        case FetchMode::RowList:         points->visitRows(rowIds, visitor); break;
+        case FetchMode::SingleColumn:    points->visitColumns(columnId, 1, visitor); break;
+        case FetchMode::ColumnRange:     points->visitColumns(firstColumn, columnCount, visitor); break;
+        case FetchMode::ColumnList:      points->visitColumns(columnIds, visitor); break;
+        case FetchMode::ColumnsForRows:  points->visitColumns(firstColumn, columnCount, rowIds, visitor); break;
+        case FetchMode::Range2D:         points->visitRange(firstRow, rowCount, firstColumn, columnCount, visitor); break;
     }
 }
 
 namespace PointStreaming {
 
-/** Rows per block. Smaller selections are read by fewer threads, because thread start-up would dominate. */
-inline constexpr std::size_t kMinRowsPerBlock = 4096;
+/** Target size of one row-block read (bytes, at 4 bytes per value). */
+inline constexpr std::size_t kTargetReadBytes = 64ULL * 1024 * 1024;
 
-/** A block is read as one span (Range2D) when the span is at most this many times the number of selected rows. */
+/** Every worker gets at least this many blocks, so the work is shared even for moderate selections. */
+inline constexpr std::size_t kBlocksPerWorker = 4;
+
+/** Smallest block, in rows. */
+inline constexpr std::size_t kMinRowsPerBlock = 256;
+
+/** A block is read as one span when the span is at most this many times the number of selected rows. */
 inline constexpr std::size_t kMaxSpanFactor = 2;
 
 /** Average run length from which contiguous runs are read with Range2D instead of a row list. */
 inline constexpr std::size_t kMinRowsPerRun = 32;
 
-/**
- * Number of genes that can be read: the smaller of the gene names and the data width.
- * Gene lists must never index past the columns of the dataset.
- */
+/** Number of genes that can be read: the smaller of the gene names and the data width. */
 inline std::size_t usableGeneCount(std::size_t namedGenes, std::uint64_t dataDimensions)
 {
     return std::min<std::size_t>(namedGenes, static_cast<std::size_t>(dataDimensions));
 }
 
-/** Splits ascending row ids into contiguous runs: each run is {first row, number of rows}. */
-inline std::vector<std::pair<std::uint64_t, std::uint64_t>> contiguousRuns(const std::vector<std::uint64_t>& ascendingRows)
+/** Splits ascending values into maximal runs of consecutive ids: {first, count}. */
+inline std::vector<std::pair<std::uint64_t, std::uint64_t>> contiguousRuns(const std::vector<std::uint64_t>& ascending)
 {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;
-    for (std::size_t k = 0; k < ascendingRows.size();) {
+
+    for (std::size_t k = 0; k < ascending.size();) {
         std::size_t end = k + 1;
-        while (end < ascendingRows.size() && ascendingRows[end] == ascendingRows[end - 1] + 1)
+
+        while (end < ascending.size() && ascending[end] == ascending[end - 1] + 1)
             ++end;
-        runs.emplace_back(ascendingRows[k], static_cast<std::uint64_t>(end - k));
+
+        runs.emplace_back(ascending[k], static_cast<std::uint64_t>(end - k));
         k = end;
     }
+
     return runs;
 }
 
 /**
- * The requested columns that fall inside one column segment (a view), with their index inside the view.
- * Cached while the segment does not change, so the mapping is computed once per segment layout, not per row.
+ * The requested columns that lie in one column segment (a view), with their index inside the view.
+ * Recomputed only when the segment layout changes.
  */
 struct SegmentColumns {
     std::uint64_t start = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t width = 0;
+
     std::vector<std::uint64_t> relative; /** column index inside the view */
-    std::vector<std::size_t>   slot;     /** index of the column in the requested column list */
+    std::vector<std::size_t>   slot;     /** index of the column in the requested list */
+
+    /** True when relative[k] = firstRelative + k and slot[k] = firstSlot + k (one straight run). */
+    bool          contiguous    = false;
+    std::uint64_t firstRelative = 0;
+    std::size_t   firstSlot     = 0;
 
     void update(const std::vector<std::uint64_t>& columns, const std::uint64_t segmentStart, const std::uint64_t segmentWidth)
     {
@@ -181,6 +177,16 @@ struct SegmentColumns {
                 slot.push_back(k);
             }
         }
+
+        contiguous = !relative.empty();
+
+        for (std::size_t k = 1; contiguous && k < relative.size(); ++k) {
+            if (relative[k] != relative[0] + k || slot[k] != slot[0] + k)
+                contiguous = false;
+        }
+
+        firstRelative = relative.empty() ? 0 : relative[0];
+        firstSlot     = slot.empty() ? 0 : slot[0];
     }
 };
 
@@ -193,12 +199,41 @@ template <typename T>
 inline void accumulateTypedSegment(const std::uint8_t* bytes, const std::uint32_t elementSizeBytes, const SegmentColumns& segment, double* sums, std::uint64_t* nonZero)
 {
     const std::size_t count = segment.relative.size();
+
+    if (segment.contiguous) {
+        // Straight run: stride sizeof(T), no index arrays, no branch in the value loop.
+        const std::uint8_t* base = bytes + segment.firstRelative * sizeof(T);
+        double* s = sums + segment.firstSlot;
+
+        if (nonZero) {
+            std::uint64_t* z = nonZero + segment.firstSlot;
+
+            for (std::size_t k = 0; k < count; ++k) {
+                T raw;
+                std::memcpy(&raw, base + k * sizeof(T), sizeof(T));
+                const float value = toFloat(raw);
+                s[k] += value;
+                z[k] += (value != 0.0f) ? 1u : 0u;
+            }
+        }
+        else {
+            for (std::size_t k = 0; k < count; ++k) {
+                T raw;
+                std::memcpy(&raw, base + k * sizeof(T), sizeof(T));
+                s[k] += toFloat(raw);
+            }
+        }
+
+        return;
+    }
+
     for (std::size_t k = 0; k < count; ++k) {
         T raw;
         std::memcpy(&raw, bytes + segment.relative[k] * elementSizeBytes, sizeof(T));
         const float value = toFloat(raw);
         const std::size_t s = segment.slot[k];
         sums[s] += value;
+
         if (nonZero && value != 0.0f)
             nonZero[s] += 1;
     }
@@ -206,17 +241,14 @@ inline void accumulateTypedSegment(const std::uint8_t* bytes, const std::uint32_
 
 } // namespace detail
 
-/**
- * Adds the values of the requested columns that lie in the view's segment to \p sums (indexed by requested column),
- * and counts non-zero values in \p nonZero when it is not null. The element type is decoded once per row.
- */
+/** Adds the requested columns of one row of a segment to \p sums (by requested slot) and counts non-zeros when given. */
 inline void accumulateSegment(const PointDataAccessView& view, const std::uint64_t row, const SegmentColumns& segment, double* sums, std::uint64_t* nonZero)
 {
     if (segment.relative.empty())
         return;
 
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(view.rowData(row));
-    const auto size = view.elementSizeBytes;
+    const auto size   = view.elementSizeBytes;
 
     switch (view.elementTypeIndex)
     {
@@ -233,28 +265,66 @@ inline void accumulateSegment(const PointDataAccessView& view, const std::uint64
 }
 
 /**
- * Reads the rows in \p rowIds in parallel blocks and reduces them into one state.
+ * Runs body(block, state) for every block 0..blockCount-1. Worker w (one state per worker) handles the blocks
+ * w, w + W, w + 2W, ... Worker 0 runs on the calling thread. Exceptions are rethrown after all workers finished.
+ */
+template <typename State, typename Body>
+inline void forEachBlockParallel(std::vector<State>& states, const std::size_t blockCount, Body&& body)
+{
+    const std::size_t workers = states.size();
+    std::vector<std::exception_ptr> errors(workers);
+
+    auto work = [&](const std::size_t w) {
+        try {
+            for (std::size_t b = w; b < blockCount; b += workers)
+                body(b, states[w]);
+        }
+        catch (...) {
+            errors[w] = std::current_exception();
+        }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(workers > 0 ? workers - 1 : 0);
+
+    try {
+        for (std::size_t w = 1; w < workers; ++w)
+            pool.emplace_back(work, w);
+    }
+    catch (const std::system_error&) {
+        // Thread creation failed: finish the threads that exist, then report the failure.
+        for (auto& thread : pool)
+            thread.join();
+        throw;
+    }
+
+    work(0);
+
+    for (auto& thread : pool)
+        thread.join();
+
+    for (const auto& error : errors) {
+        if (error)
+            std::rethrow_exception(error);
+    }
+}
+
+/**
+ * Reads the rows in \p rowIds in blocks and reduces them into one state per worker.
  *
- * - columnCount                                    number of columns requested, starting at column 0
- * - make()                                         creates an empty state (one per block)
- * - visit(state, rowPosition, view, row, offset)   called for every row of every column segment. rowPosition indexes
- *                                                  rowIds, row indexes the view, offset is the absolute column
- *                                                  position of the view's first column.
- * - merge(into, from)                              combines two states
+ *  - columnCount                           number of columns requested, starting at column 0
+ *  - make()                                creates an empty state
+ *  - visit(state, rowPosition, view, row, offset)
+ *                                          called for every row of every column segment. rowPosition indexes
+ *                                          rowIds, row indexes the view, offset is the absolute column position of
+ *                                          the view's first column.
+ *  - merge(into, from)                     combines two states
  *
- * Rows are read in ascending order (sequential access), visit() still receives the position in rowIds.
- * Blocks are merged in block order, so the result is deterministic for a fixed thread count.
  * Throws std::out_of_range / std::runtime_error when the delivered views do not match the request.
  */
 template <typename RowContainer, typename Make, typename Visit, typename Merge>
-inline auto reduceRows(
-    Points* points,
-    const RowContainer& rowIds,
-    int threads,
-    std::uint64_t columnCount,
-    Make&& make,
-    Visit&& visit,
-    Merge&& merge)
+inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, std::uint64_t columnCount,
+                       Make&& make, Visit&& visit, Merge&& merge)
     -> decltype(make())
 {
     using State = decltype(make());
@@ -266,432 +336,208 @@ inline auto reduceRows(
 
     const std::uint64_t dimensions = points->getNumDimensions();
 
-    if (columnCount > dimensions) {
-        throw std::out_of_range(
-            "PointStreaming: requested columns exceed the number "
-            "of dimensions of the dataset");
-    }
+    if (columnCount > dimensions)
+        throw std::out_of_range("PointStreaming: requested columns exceed the number of dimensions of the dataset");
 
-    // Target the logical size of each 2D row block.
-    // Four bytes per element is a conservative estimate for the
-    // supported numeric types. The actual element size is available
-    // in each delivered view.
-    constexpr std::size_t kTargetReadBytes = 128ULL * 1024 * 1024;
-    constexpr std::size_t kEstimatedElementBytes = 4;
-
-    const std::size_t rowCount = rowIds.size();
-
-    const std::size_t columns =
-        static_cast<std::size_t>(columnCount);
-
-    const std::size_t bytesPerRow =
-        columns > std::numeric_limits<std::size_t>::max()
-        / kEstimatedElementBytes
-        ? std::numeric_limits<std::size_t>::max()
-        : std::max<std::size_t>(
-            1,
-            columns * kEstimatedElementBytes);
-
-    const std::size_t rowsPerBlock =
-        std::max<std::size_t>(
-            1,
-            kTargetReadBytes / bytesPerRow);
-
-    // Use enough blocks to keep each Range2D request close to the
-    // target size. The worker count is limited separately below.
-    const std::size_t blockCount =
-        rowCount / rowsPerBlock +
-        (rowCount % rowsPerBlock != 0 ? 1 : 0);
-
-    const std::size_t workerCount =
-        std::min<std::size_t>(
-            blockCount,
-            static_cast<std::size_t>(std::max(1, threads)));
-
-    XSC_LOG(
-        "reduceRows: rows",
-        rowCount,
-        "columns",
-        columnCount,
-        "dataset dimensions",
-        dimensions,
-        "target bytes",
-        kTargetReadBytes,
-        "estimated bytes per row",
-        bytesPerRow,
-        "rows per block",
-        rowsPerBlock,
-        "blocks",
-        blockCount,
-        "workers",
-        workerCount);
-
-    // Preserve the original position of every row ID, including
-    // duplicates, so visit() receives the same rowPosition as before.
-    std::vector<std::uint64_t> requested(
-        rowIds.begin(), rowIds.end());
-
-    std::vector<std::size_t> order(rowCount);
-    std::iota(order.begin(), order.end(), std::size_t{ 0 });
-
+    // Sort the row IDs; order maps a sorted position back to the position in rowIds (empty when already sorted).
+    std::vector<std::uint64_t> requested(rowIds.begin(), rowIds.end());
+    std::vector<std::size_t>   order;
     std::vector<std::uint64_t> rows;
 
     if (std::is_sorted(requested.begin(), requested.end())) {
         rows = std::move(requested);
     }
     else {
-        std::sort(
-            order.begin(),
-            order.end(),
-            [&requested](std::size_t a, std::size_t b) {
-                return requested[a] < requested[b];
-            });
+        order.resize(requested.size());
+        std::iota(order.begin(), order.end(), std::size_t{ 0 });
+        std::sort(order.begin(), order.end(), [&requested](std::size_t a, std::size_t b) { return requested[a] < requested[b]; });
 
-        rows.resize(rowCount);
-
-        for (std::size_t i = 0; i < rowCount; ++i)
+        rows.resize(order.size());
+        for (std::size_t i = 0; i < order.size(); ++i)
             rows[i] = requested[order[i]];
     }
 
-    // One independent reduction state per block. Blocks can execute
-    // concurrently, and states are merged in ascending block order.
-    std::vector<State> states;
-    states.reserve(blockCount);
+    const std::size_t rowCount = rows.size();
 
-    for (std::size_t b = 0; b < blockCount; ++b)
+    // Workers and blocks. Every worker gets several blocks, so small selections still use all workers.
+    const std::size_t workers = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max(1, std::min(threads, 256))),
+        std::max<std::size_t>(1, rowCount / kMinRowsPerBlock));
+
+    const std::size_t bytesPerRow = static_cast<std::size_t>(columnCount) * sizeof(float);
+    std::size_t rowsPerBlock = std::max<std::size_t>(1, kTargetReadBytes / std::max<std::size_t>(1, bytesPerRow));
+    rowsPerBlock = std::min(rowsPerBlock, std::max<std::size_t>(kMinRowsPerBlock, (rowCount + workers * kBlocksPerWorker - 1) / (workers * kBlocksPerWorker)));
+    const std::size_t blockCount = (rowCount + rowsPerBlock - 1) / rowsPerBlock;
+
+    XSC_LOG("reduceRows: rows", rowCount, "columns", columnCount, "dimensions", dimensions,
+            "workers", workers, "blocks", blockCount, "rows per block", rowsPerBlock);
+
+    std::vector<State> states;
+    states.reserve(workers);
+
+    for (std::size_t w = 0; w < workers; ++w)
         states.push_back(make());
 
-    std::vector<std::exception_ptr> errors(blockCount);
+    auto readBlock = [&](const std::size_t b, State& state) {
+        const std::size_t begin = b * rowsPerBlock;
+        const std::size_t end   = std::min(rowCount, begin + rowsPerBlock);
 
-    auto readBlock = [&](std::size_t b) {
-        try {
-            const std::size_t begin = b * rowsPerBlock;
+        // Distinct rows of the block with the positions (in rows) that refer to each of them.
+        struct RowGroup { std::uint64_t row; std::size_t first; std::size_t last; };
+        std::vector<RowGroup> groups;
 
-            const std::size_t end =
-                begin + std::min(rowsPerBlock, rowCount - begin);
+        for (std::size_t i = begin; i < end;) {
+            std::size_t j = i + 1;
+            while (j < end && rows[j] == rows[i])
+                ++j;
+            groups.push_back({ rows[i], i, j });
+            i = j;
+        }
 
-            const std::vector<std::uint64_t> block(
-                rows.begin() + begin,
-                rows.begin() + end);
+        const std::uint64_t spanFirst = groups.front().row;
+        const std::uint64_t spanCount = groups.back().row - spanFirst + 1;
 
-            if (block.empty())
-                return;
+        XSC_TRACE("PointStreaming::read block");
 
-            XSC_TRACE("PointStreaming::read block");
+        // Cursor over one fetch: the first absolute row of the current row batch and the column offset of the next view.
+        // A row batch is complete when its last column segment arrives (offset == totalWidth).
+        auto deliverFor = [&](const bool rowList, std::size_t& batchGroup, std::uint64_t& batchFirst, std::uint64_t& offset, const std::uint64_t totalWidth) {
+            return PointDataAccessVisitor([&, rowList, totalWidth](const PointDataAccessView& view) {
+                if (view.columns == 0)
+                    return;
 
-            auto deliverWith =
-                [&](std::size_t& rowBase,
-                    std::uint64_t& offset,
-                    const std::uint64_t totalWidth) {
-                        return PointDataAccessVisitor(
-                            [&, totalWidth](
-                                const PointDataAccessView& view) {
-                                    if (view.columns == 0)
-                                        return;
+                if (offset + view.columns > totalWidth)
+                    throw std::out_of_range("PointStreaming: a delivered view exceeds the requested column range");
 
-                                    if (offset + view.columns > totalWidth) {
-                                        throw std::out_of_range(
-                                            "PointStreaming: a delivered view "
-                                            "exceeds the requested column range");
-                                    }
+                const bool lastSegment = offset + view.columns == totalWidth;
 
-                                    for (std::uint64_t row = 0;
-                                        row < view.rows;
-                                        ++row) {
-                                        const std::size_t sorted =
-                                            rowBase +
-                                            static_cast<std::size_t>(row);
+                if (rowList) {
+                    // One row per batch: the batch is the group at batchGroup.
+                    for (std::uint64_t r = 0; r < view.rows; ++r) {
+                        if (batchGroup + r >= groups.size())
+                            throw std::out_of_range("PointStreaming: more rows delivered than requested");
 
-                                        if (sorted >= end) {
-                                            throw std::out_of_range(
-                                                "PointStreaming: more rows "
-                                                "delivered than requested");
-                                        }
+                        const RowGroup& g = groups[batchGroup + r];
 
-                                        visit(
-                                            states[b],
-                                            order[sorted],
-                                            view,
-                                            row,
-                                            offset);
-                                    }
-
-                                    offset += view.columns;
-
-                                    // A complete column range finishes this
-                                    // row batch. The next view batch begins
-                                    // at column zero.
-                                    if (offset == totalWidth) {
-                                        offset = 0;
-                                        rowBase +=
-                                            static_cast<std::size_t>(view.rows);
-                                    }
-                            });
-                };
-
-            const std::uint64_t spanFirst = block.front();
-
-            const std::uint64_t spanCount =
-                block.back() - spanFirst + 1;
-
-            const auto runs = contiguousRuns(block);
-
-            // Strategy 1: one compact contiguous row span.
-            if (spanCount <= kMaxSpanFactor * block.size()) {
-                XSC_LOG(
-                    "block",
-                    b,
-                    "path: span",
-                    "rows",
-                    block.size(),
-                    "span",
-                    spanCount,
-                    "first",
-                    spanFirst);
-
-                const std::size_t spanSize =
-                    static_cast<std::size_t>(spanCount);
-
-                // Map each row in the requested span to its positions
-                // in this block. This also handles duplicate row IDs.
-                std::vector<std::size_t> rowOffsets(
-                    spanSize + 1, 0);
-
-                for (std::size_t i = 0; i < block.size(); ++i) {
-                    const std::size_t relative =
-                        static_cast<std::size_t>(
-                            block[i] - spanFirst);
-
-                    ++rowOffsets[relative + 1];
-                }
-
-                for (std::size_t i = 1;
-                    i < rowOffsets.size();
-                    ++i) {
-                    rowOffsets[i] += rowOffsets[i - 1];
-                }
-
-                std::size_t blockPtr = begin;
-                std::uint64_t blockFirst = spanFirst;
-                std::uint64_t offset = 0;
-
-                fetchPointData(
-                    points,
-                    FetchMode::Range2D,
-                    PointDataAccessVisitor(
-                        [&](const PointDataAccessView& view) {
-                            if (view.columns == 0)
-                                return;
-
-                            if (offset + view.columns > columnCount) {
-                                throw std::out_of_range(
-                                    "PointStreaming: a delivered view "
-                                    "exceeds the requested column range");
-                            }
-
-                            const bool lastSegment =
-                                offset + view.columns == columnCount;
-
-                            if (blockFirst < spanFirst) {
-                                throw std::runtime_error(
-                                    "PointStreaming: invalid span row offset");
-                            }
-
-                            const std::uint64_t baseOffset =
-                                blockFirst - spanFirst;
-
-                            if (baseOffset > spanCount ||
-                                view.rows > spanCount - baseOffset) {
-                                throw std::out_of_range(
-                                    "PointStreaming: delivered rows exceed "
-                                    "the requested span");
-                            }
-
-                            for (std::uint64_t r = 0;
-                                r < view.rows;
-                                ++r) {
-                                const std::size_t relative =
-                                    static_cast<std::size_t>(
-                                        baseOffset + r);
-
-                                const std::size_t first =
-                                    rowOffsets[relative];
-
-                                const std::size_t last =
-                                    rowOffsets[relative + 1];
-
-                                for (std::size_t q = first;
-                                    q < last;
-                                    ++q) {
-                                    visit(
-                                        states[b],
-                                        order[begin + q],
-                                        view,
-                                        r,
-                                        offset);
-                                }
-                            }
-
-                            if (lastSegment) {
-                                const std::uint64_t next =
-                                    blockFirst + view.rows;
-
-                                while (blockPtr < end &&
-                                    rows[blockPtr] < next) {
-                                    ++blockPtr;
-                                }
-
-                                blockFirst = next;
-                                offset = 0;
-                            }
-                            else {
-                                offset += view.columns;
-                            }
-                        }),
-                    0,
-                    spanFirst,
-                    spanCount,
-                    {},
-                    0,
-                    0,
-                    columnCount);
-
-                if (offset != 0 || blockPtr != end) {
-                    throw std::runtime_error(
-                        "PointStreaming: streamed views do not "
-                        "cover the requested rows");
-                }
-            }
-
-            // Strategy 2: sufficiently long contiguous runs.
-            else if (
-                !runs.empty() &&
-                block.size() / runs.size() >= kMinRowsPerRun) {
-                XSC_LOG(
-                    "block",
-                    b,
-                    "path: runs",
-                    "rows",
-                    block.size(),
-                    "runs",
-                    runs.size());
-
-                std::size_t cursor = begin;
-
-                for (const auto& run : runs) {
-                    std::size_t rowBase = cursor;
-                    std::uint64_t offset = 0;
-
-                    fetchPointData(
-                        points,
-                        FetchMode::Range2D,
-                        deliverWith(rowBase, offset, columnCount),
-                        0,
-                        run.first,
-                        run.second,
-                        {},
-                        0,
-                        0,
-                        columnCount);
-
-                    if (offset != 0 ||
-                        rowBase != cursor + run.second) {
-                        throw std::runtime_error(
-                            "PointStreaming: streamed views do not "
-                            "cover the requested rows");
+                        for (std::size_t q = g.first; q < g.last; ++q)
+                            visit(state, order.empty() ? q : order[q], view, r, offset);
                     }
 
-                    cursor +=
-                        static_cast<std::size_t>(run.second);
+                    if (lastSegment) {
+                        batchGroup += static_cast<std::size_t>(view.rows);
+                        offset = 0;
+                    }
+                    else {
+                        offset += view.columns;
+                    }
+
+                    return;
                 }
-            }
 
-            // Strategy 3: scattered rows.
-            else {
-                XSC_LOG(
-                    "block",
-                    b,
-                    "path: row list",
-                    "rows",
-                    block.size(),
-                    "span",
-                    spanCount);
+                // Span or run: the absolute row of view row r is batchFirst + r. Every segment of the batch looks up
+                // its rows from the start of the batch; the batch pointer advances only when the batch is complete.
+                std::size_t g = batchGroup;
 
-                std::size_t rowBase = begin;
+                for (std::uint64_t r = 0; r < view.rows; ++r) {
+                    const std::uint64_t absolute = batchFirst + r;
+
+                    while (g < groups.size() && groups[g].row < absolute)
+                        ++g;
+
+                    if (g < groups.size() && groups[g].row == absolute) {
+                        const RowGroup& rg = groups[g];
+
+                        for (std::size_t q = rg.first; q < rg.last; ++q)
+                            visit(state, order.empty() ? q : order[q], view, r, offset);
+                    }
+                }
+
+                if (lastSegment) {
+                    const std::uint64_t next = batchFirst + view.rows;
+
+                    while (batchGroup < groups.size() && groups[batchGroup].row < next)
+                        ++batchGroup;
+
+                    batchFirst = next;
+                    offset = 0;
+                }
+                else {
+                    offset += view.columns;
+                }
+            });
+        };
+
+        // Runs are built from the distinct rows: a duplicated row must not split a run and be read twice.
+        std::vector<std::uint64_t> distinctRows;
+        distinctRows.reserve(groups.size());
+        for (const auto& g : groups)
+            distinctRows.push_back(g.row);
+
+        const auto runs = contiguousRuns(distinctRows);
+
+        if (spanCount <= kMaxSpanFactor * (end - begin)) {
+            // Span: one Range2D read over the whole row span of the block.
+            XSC_LOG("block", b, "path: span", "rows", end - begin, "span", spanCount, "first", spanFirst);
+
+            std::size_t groupIndex = 0;
+            std::uint64_t batchFirst = spanFirst;
+            std::uint64_t offset = 0;
+
+            fetchPointData(points, FetchMode::Range2D, deliverFor(false, groupIndex, batchFirst, offset, columnCount),
+                           0, spanFirst, spanCount, {}, 0, 0, columnCount);
+
+            if (offset != 0 || batchFirst != spanFirst + spanCount)
+                throw std::runtime_error("PointStreaming: streamed views do not cover the requested rows");
+        }
+        else if (!runs.empty() && groups.size() / runs.size() >= kMinRowsPerRun) {
+            // Long runs: one Range2D read per run. Groups of a run are consecutive in the block.
+            XSC_LOG("block", b, "path: runs", "rows", end - begin, "runs", runs.size());
+
+            std::size_t groupIndex = 0;
+
+            for (const auto& run : runs) {
+                while (groupIndex < groups.size() && groups[groupIndex].row < run.first)
+                    ++groupIndex;
+
+                std::uint64_t batchFirst = run.first;
                 std::uint64_t offset = 0;
 
-                fetchPointData(
-                    points,
-                    FetchMode::RowList,
-                    deliverWith(rowBase, offset, dimensions),
-                    0,
-                    0,
-                    0,
-                    block,
-                    0,
-                    0,
-                    0);
+                fetchPointData(points, FetchMode::Range2D, deliverFor(false, groupIndex, batchFirst, offset, columnCount),
+                               0, run.first, run.second, {}, 0, 0, columnCount);
 
-                if (offset != 0 || rowBase != end) {
-                    throw std::runtime_error(
-                        "PointStreaming: streamed views do not "
-                        "cover the requested rows");
-                }
+                if (offset != 0 || batchFirst != run.first + run.second)
+                    throw std::runtime_error("PointStreaming: streamed views do not cover the requested rows");
             }
         }
-        catch (...) {
-            errors[b] = std::current_exception();
+        else {
+            // Sparse: one row-list read for the block; each row is delivered in full width.
+            XSC_LOG("block", b, "path: row list", "rows", end - begin, "groups", groups.size());
+
+            std::size_t groupIndex = 0;
+            std::uint64_t batchFirst = 0;
+            std::uint64_t offset = 0;
+            const std::vector<std::uint64_t> distinct = [&] {
+                std::vector<std::uint64_t> ids;
+                ids.reserve(groups.size());
+                for (const auto& g : groups)
+                    ids.push_back(g.row);
+                return ids;
+            }();
+
+            fetchPointData(points, FetchMode::RowList, deliverFor(true, groupIndex, batchFirst, offset, dimensions),
+                           0, 0, 0, distinct, 0, 0, 0);
+
+            if (offset != 0 || groupIndex != groups.size())
+                throw std::runtime_error("PointStreaming: streamed views do not cover the requested rows");
         }
-        };
+    };
 
-    // Schedule blocks dynamically, but never run more than workerCount
-    // blocks concurrently. This avoids creating one thread per block.
-    std::atomic<std::size_t> nextBlock{ 0 };
+    forEachBlockParallel(states, blockCount, [&](const std::size_t b, State& state) {
+        readBlock(b, state);
+    });
 
-    auto worker = [&]() {
-        while (true) {
-            const std::size_t b =
-                nextBlock.fetch_add(1, std::memory_order_relaxed);
-
-            if (b >= blockCount)
-                break;
-
-            readBlock(b);
-        }
-        };
-
-    std::vector<std::thread> workers;
-    workers.reserve(workerCount > 0 ? workerCount - 1 : 0);
-
-    try {
-        for (std::size_t i = 1; i < workerCount; ++i)
-            workers.emplace_back(worker);
-    }
-    catch (...) {
-        // Ensure already-created threads finish before propagating
-        // a thread creation error.
-        worker();
-
-        for (auto& thread : workers) {
-            if (thread.joinable())
-                thread.join();
-        }
-
-        throw;
-    }
-
-    worker();
-
-    for (auto& thread : workers)
-        thread.join();
-
-    for (const auto& error : errors) {
-        if (error)
-            std::rethrow_exception(error);
-    }
-
-    for (std::size_t b = 1; b < blockCount; ++b)
-        merge(states[0], states[b]);
+    for (std::size_t w = 1; w < workers; ++w)
+        merge(states[0], states[w]);
 
     XSC_LOG("reduceRows: finished");
 
@@ -705,14 +551,9 @@ struct ColumnAggregates {
     std::uint64_t              rows = 0; /** number of rows that were read */
 };
 
-
-/** Per-column aggregates over selected rows, accumulated in double precision. */
+/** Sums, detection counts and row count of \p columns over \p rowIds, in one streamed pass. */
 template <typename RowContainer>
-inline ColumnAggregates aggregateColumns(
-    Points* points,
-    const RowContainer& rowIds,
-    const std::vector<int>& columns,
-    int threads = 1)
+inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& rowIds, const std::vector<int>& columns, int threads = 1)
 {
     XSC_TRACE("PointStreaming::aggregateColumns");
 
@@ -725,128 +566,124 @@ inline ColumnAggregates aggregateColumns(
 
     const std::uint64_t dimensions = points->getNumDimensions();
 
-    // Validate before converting signed column IDs to unsigned IDs.
     for (const int column : columns) {
-        if (column < 0 ||
-            static_cast<std::uint64_t>(column) >= dimensions) {
-            throw std::out_of_range(
-                "PointStreaming: requested column is out of range");
-        }
+        if (column < 0 || static_cast<std::uint64_t>(column) >= dimensions)
+            throw std::out_of_range("PointStreaming: requested column is out of range");
     }
 
-    const std::vector<std::uint64_t> rows(
-        rowIds.begin(), rowIds.end());
+    const std::vector<std::uint64_t> columnIds(columns.begin(), columns.end());
 
-    const std::vector<std::uint64_t> columnIds(
-        columns.begin(), columns.end());
-
-    // Build sorted unique column IDs. Keep columnIds unchanged so
-    // SegmentColumns can preserve original output positions and duplicates.
     std::vector<std::uint64_t> uniqueColumns = columnIds;
-
     std::sort(uniqueColumns.begin(), uniqueColumns.end());
+    uniqueColumns.erase(std::unique(uniqueColumns.begin(), uniqueColumns.end()), uniqueColumns.end());
 
-    uniqueColumns.erase(
-        std::unique(uniqueColumns.begin(), uniqueColumns.end()),
-        uniqueColumns.end());
+    const std::uint64_t spanWidth = uniqueColumns.back() + 1;
 
-    // Split only at gaps between requested columns. No tile dimensions
-    // or assumptions about the storage layout are required.
-    const auto runs = contiguousRuns(uniqueColumns);
-
-    struct SegmentState {
-        SegmentColumns columns;
+    struct State {
+        ColumnAggregates aggregates;
+        SegmentColumns   segment;
     };
 
-    SegmentState segmentState;
+    auto makeState = [&]() {
+        State state;
+        state.aggregates.sums.assign(columns.size(), 0.0);
+        state.aggregates.nonZero.assign(columns.size(), 0);
+        return state;
+    };
 
-    // Fetch only the selected rows and the requested column ranges.
-    for (const auto& run : runs) {
-        const std::uint64_t runStart = run.first;
-        const std::uint64_t runWidth = run.second;
-
-        std::size_t rowBase = 0;
-        std::uint64_t offset = 0;
-
-        fetchPointData(
-            points,
-            FetchMode::ColumnsForRows,
-            PointDataAccessVisitor(
-                [&](const PointDataAccessView& view) {
-                    if (view.columns == 0)
-                        return;
-
-                    if (offset + view.columns > runWidth) {
-                        throw std::out_of_range(
-                            "PointStreaming: delivered view exceeds "
-                            "the requested column run");
-                    }
-
-                    // Convert the view's run-relative offset to an
-                    // absolute dataset column position.
-                    const std::uint64_t absoluteStart =
-                        runStart + offset;
-
-                    segmentState.columns.update(
-                        columnIds,
-                        absoluteStart,
-                        view.columns);
-
-                    // The API is expected to deliver rows in the order
-                    // supplied in rows, as fetchColumnValues assumes.
-                    for (std::uint64_t row = 0;
-                        row < view.rows;
-                        ++row) {
-                        if (rowBase + row >= rows.size()) {
-                            throw std::out_of_range(
-                                "PointStreaming: more rows delivered "
-                                "than requested");
-                        }
-
-                        accumulateSegment(
-                            view,
-                            row,
-                            segmentState.columns,
-                            result.sums.data(),
-                            result.nonZero.data());
-                    }
-
-                    offset += view.columns;
-
-                    // The next row block starts at the beginning of
-                    // this column run again.
-                    if (offset == runWidth) {
-                        offset = 0;
-                        rowBase += view.rows;
-                    }
-                }),
-            0,              // rowId
-            0,              // firstRow
-            0,              // rowCount
-            rows,           // selected rows
-            0,              // columnId
-            runStart,       // firstColumn
-            runWidth);      // columnCount
-
-        if (offset != 0 || rowBase != rows.size()) {
-            throw std::runtime_error(
-                "PointStreaming: streamed views do not cover "
-                "the requested rows and columns");
+    auto mergeState = [](State& into, State& from) {
+        for (std::size_t k = 0; k < into.aggregates.sums.size(); ++k) {
+            into.aggregates.sums[k] += from.aggregates.sums[k];
+            into.aggregates.nonZero[k] += from.aggregates.nonZero[k];
         }
+        into.aggregates.rows += from.aggregates.rows;
+    };
+
+    // Dense request: full rows, parallel blocks.
+    if (uniqueColumns.size() * 4 >= spanWidth) {
+        State state = reduceRows(points, rowIds, threads, spanWidth, makeState,
+            [&](State& s, std::size_t, const PointDataAccessView& view, std::uint64_t row, std::uint64_t offset) {
+                s.segment.update(columnIds, offset, view.columns);
+                accumulateSegment(view, row, s.segment, s.aggregates.sums.data(), s.aggregates.nonZero.data());
+                if (offset == 0)
+                    ++s.aggregates.rows; // count each row once, on its first column segment
+            },
+            mergeState);
+
+        return std::move(state.aggregates);
     }
 
-    result.rows = rows.size();
+    // Sparse request: read only the requested column runs, for blocks of rows in parallel.
+    const std::vector<std::uint64_t> rows(rowIds.begin(), rowIds.end());
+    const auto runs = contiguousRuns(uniqueColumns);
 
-    return result;
+    const std::size_t workers = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max(1, std::min(threads, 256))),
+        std::max<std::size_t>(1, rows.size() / kMinRowsPerBlock));
+    const std::size_t rowsPerBlock = std::max<std::size_t>(kMinRowsPerBlock,
+        (rows.size() + workers * kBlocksPerWorker - 1) / (workers * kBlocksPerWorker));
+    const std::size_t blockCount = (rows.size() + rowsPerBlock - 1) / rowsPerBlock;
+
+    std::vector<State> states;
+    states.reserve(workers);
+    for (std::size_t w = 0; w < workers; ++w)
+        states.push_back(makeState());
+
+    forEachBlockParallel(states, blockCount, [&](const std::size_t b, State& state) {
+        const std::size_t begin = b * rowsPerBlock;
+        const std::size_t end   = std::min(rows.size(), begin + rowsPerBlock);
+        const std::vector<std::uint64_t> block(rows.begin() + begin, rows.begin() + end);
+
+        for (const auto& run : runs) {
+            std::size_t rowPosition = 0; // index of the row batch within the block
+            std::uint64_t offset = 0;
+
+            fetchPointData(points, FetchMode::ColumnsForRows, [&](const PointDataAccessView& view) {
+                if (view.columns == 0)
+                    return;
+
+                if (offset + view.columns > run.second)
+                    throw std::out_of_range("PointStreaming: delivered view exceeds the requested column run");
+
+                const std::uint64_t absoluteStart = run.first + offset;
+                state.segment.update(columnIds, absoluteStart, view.columns);
+
+                for (std::uint64_t r = 0; r < view.rows; ++r) {
+                    if (rowPosition + r >= block.size())
+                        throw std::out_of_range("PointStreaming: more rows delivered than requested");
+
+                    accumulateSegment(view, r, state.segment, state.aggregates.sums.data(), state.aggregates.nonZero.data());
+                }
+
+                offset += view.columns;
+
+                if (offset == run.second) {
+                    offset = 0;
+                    rowPosition += view.rows;
+                }
+            }, 0, 0, 0, block, 0, run.first, run.second);
+
+            if (offset != 0 || rowPosition != block.size())
+                throw std::runtime_error("PointStreaming: streamed views do not cover the requested rows and columns");
+        }
+
+        state.aggregates.rows += block.size();
+    });
+
+    for (std::size_t w = 1; w < workers; ++w)
+        mergeState(states[0], states[w]);
+
+    return std::move(states[0].aggregates);
 }
-
 
 /** Values of one column for \p rowIds, in the order of \p rowIds. Uses the column path of the API. */
 template <typename RowContainer>
 inline std::vector<float> fetchColumnValues(Points* points, int column, const RowContainer& rowIds)
 {
     XSC_TRACE("PointStreaming::fetchColumnValues");
+
     std::vector<float> values(rowIds.size(), 0.0f);
+
     if (!points || values.empty())
         return values;
 
@@ -857,7 +694,7 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
     fetchPointData(points, FetchMode::ColumnsForRows, [&](const PointDataAccessView& view) {
         for (std::uint64_t row = 0; row < view.rows; ++row, ++position) {
             if (position < values.size())
-                values[position] = valueAt(view, row, 0); // the view holds only this column: index 0
+                values[position] = valueAt(view, row, 0); // the view holds only this column
         }
     }, 0, 0, 0, rows, 0, columnId, 1);
 
