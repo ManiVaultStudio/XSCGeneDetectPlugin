@@ -190,6 +190,52 @@ struct SegmentColumns {
     }
 };
 
+/**
+ * Determines the number of workers.
+ *
+ * threads == 0: automatically detect hardware concurrency.
+ * threads > 0: use the requested number, subject to workload limits.
+ */
+inline std::size_t workerCount(
+    const int threads,
+    const std::size_t rowCount)
+{
+    const unsigned int hardwareThreads =
+        std::thread::hardware_concurrency();
+
+    // hardware_concurrency() can return 0.
+    const std::size_t availableThreads =
+        hardwareThreads > 0 ? hardwareThreads : 1;
+
+    const std::size_t requestedThreads =
+        threads > 0
+        ? static_cast<std::size_t>(threads)
+        : availableThreads;
+
+    // Avoid creating workers that have too little work.
+    const std::size_t usefulThreads =
+        std::max<std::size_t>(
+            1, (rowCount + kMinRowsPerBlock * kBlocksPerWorker - 1) /
+            (kMinRowsPerBlock * kBlocksPerWorker));
+
+    XSC_LOG(
+        "PointStreaming: hardware threads",
+        hardwareThreads,
+        "requested threads",
+        threads,
+        "rows",
+        rowCount,
+        "selected workers",
+        std::min<std::size_t>(
+            256,
+            std::min(requestedThreads, usefulThreads)));
+
+    // Keep the existing safety limit.
+    return std::min<std::size_t>(
+        256,
+        std::min(requestedThreads, usefulThreads));
+}
+
 namespace detail {
 
 template <typename T>
@@ -360,9 +406,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     const std::size_t rowCount = rows.size();
 
     // Workers and blocks. Every worker gets several blocks, so small selections still use all workers.
-    const std::size_t workers = std::min<std::size_t>(
-        static_cast<std::size_t>(std::max(1, std::min(threads, 256))),
-        std::max<std::size_t>(1, rowCount / kMinRowsPerBlock));
+    const std::size_t workers = workerCount(threads, rowCount);
 
     const std::size_t bytesPerRow = static_cast<std::size_t>(columnCount) * sizeof(float);
     std::size_t rowsPerBlock = std::max<std::size_t>(1, kTargetReadBytes / std::max<std::size_t>(1, bytesPerRow));
@@ -553,7 +597,7 @@ struct ColumnAggregates {
 
 /** Sums, detection counts and row count of \p columns over \p rowIds, in one streamed pass. */
 template <typename RowContainer>
-inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& rowIds, const std::vector<int>& columns, int threads = 1)
+inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& rowIds, const std::vector<int>& columns, int threads = 0)
 {
     XSC_TRACE("PointStreaming::aggregateColumns");
 
@@ -617,9 +661,7 @@ inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& row
     const std::vector<std::uint64_t> rows(rowIds.begin(), rowIds.end());
     const auto runs = contiguousRuns(uniqueColumns);
 
-    const std::size_t workers = std::min<std::size_t>(
-        static_cast<std::size_t>(std::max(1, std::min(threads, 256))),
-        std::max<std::size_t>(1, rows.size() / kMinRowsPerBlock));
+    const std::size_t workers = workerCount(threads, rows.size());
     const std::size_t rowsPerBlock = std::max<std::size_t>(kMinRowsPerBlock,
         (rows.size() + workers * kBlocksPerWorker - 1) / (workers * kBlocksPerWorker));
     const std::size_t blockCount = (rows.size() + rowsPerBlock - 1) / rowsPerBlock;
