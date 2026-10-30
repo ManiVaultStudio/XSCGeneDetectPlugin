@@ -40,6 +40,12 @@
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QToolTip>
+#include <QToolButton>
+#include <QMenu>
+#include <QWidgetAction>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QSizePolicy>
 #include <QMenu>
 #include <QVBoxLayout>
 #include <QDialog>
@@ -1581,6 +1587,14 @@ QColor getColorFromValue(int value, int min, int max) {
  *    anywhere is left out; zoom in to see more)
  * (No Q_OBJECT: the widget has no signals or slots of its own; the owner is informed through callbacks.)
  */
+/** Default window size that never exceeds 90% of the available screen area, so that the windows fit the screen. */
+inline QSize fittingWindowSize(int width, int height)
+{
+    const QScreen* screen = QGuiApplication::primaryScreen();
+    const QRect available = screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
+    return QSize(std::min(width, available.width() * 9 / 10), std::min(height, available.height() * 9 / 10));
+}
+
 class ZoomablePlotWidget : public QWidget
 {
 public:
@@ -1601,7 +1615,9 @@ public:
 
     explicit ZoomablePlotWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
-        setMinimumSize(420, 320);
+        setMinimumSize(200, 160);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        updateMargins();
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
     }
@@ -1679,7 +1695,29 @@ public:
     }
 
 protected:
-    QRect plotRect() const { return QRect(72, 16, std::max(10, width() - 72 - 16), std::max(10, height() - 16 - 52)); }
+    /**
+     * Margins from the font: room for the tick labels and the axis titles, so that nothing is cut off whatever the font
+     * size or the widget size. (Cached: plotRect() is called for every point when the mouse moves.)
+     */
+    void updateMargins()
+    {
+        const QFontMetrics metrics(font());
+        const int line = metrics.height();
+        const int tickWidth = metrics.horizontalAdvance(QStringLiteral("-1.2345e-05"));
+        _leftMargin = 6 + line + 6 + tickWidth + 10;
+        _bottomMargin = 6 + line + 6 + line + 6;
+    }
+
+    void changeEvent(QEvent* event) override
+    {
+        if (event->type() == QEvent::FontChange) {
+            updateMargins();
+            update();
+        }
+        QWidget::changeEvent(event);
+    }
+
+    QRect plotRect() const { return QRect(_leftMargin, 16, std::max(10, width() - _leftMargin - 16), std::max(10, height() - 16 - _bottomMargin)); }
 
     QPointF toPixel(double x, double y) const
     {
@@ -1819,6 +1857,7 @@ protected:
 
         const QColor textColor = palette().color(QPalette::Text);
         const QColor gridColor = palette().color(QPalette::Midlight);
+        updateMargins();
         const QRect plot = plotRect();
         if (_points.isEmpty() || !_viewValid || _maxX <= _minX || _maxY <= _minY) {
             painter.setPen(textColor);
@@ -1826,11 +1865,15 @@ protected:
             return;
         }
 
-        // ---- grid, ticks and tick labels ----
+        // ---- grid, ticks and tick labels (sized from the font, see updateMargins) ----
+        const QFontMetrics metrics(font());
         const double stepX = niceStep(_maxX - _minX, 6);
         const double stepY = niceStep(_maxY - _minY, 5);
         painter.setFont(font());
+        const int yLabelBox = _leftMargin - metrics.height() - 16; // room for the numbers between the axis title and the plot
+        // Labels that would overlap the previous one are skipped (their tick marks stay), so the numbers never collide.
         int tickGuard = 0; // (a runaway loop is impossible even for extreme zoom levels)
+        double previousEnd = -1.0e9;
         for (double x = std::ceil(_minX / stepX) * stepX; x <= _maxX && tickGuard++ < 200; x += stepX) {
             const QPointF pixel = toPixel(x, _minY);
             if (_showGrid) {
@@ -1839,9 +1882,15 @@ protected:
             }
             painter.setPen(textColor);
             painter.drawLine(QPointF(pixel.x(), plot.bottom()), QPointF(pixel.x(), plot.bottom() + 4));
-            painter.drawText(QRectF(pixel.x() - 34, plot.bottom() + 6, 68, 16), Qt::AlignHCenter | Qt::AlignTop, QString::number(x, 'g', 4));
+            const QString text = QString::number(x, 'g', 4);
+            const double half = metrics.horizontalAdvance(text) / 2.0;
+            if (pixel.x() - half >= previousEnd + 6.0) {
+                painter.drawText(QRectF(pixel.x() - 40, plot.bottom() + 6, 80, metrics.height()), Qt::AlignHCenter | Qt::AlignTop, text);
+                previousEnd = pixel.x() + half;
+            }
         }
         tickGuard = 0;
+        double previousTop = 1.0e9;
         for (double y = std::ceil(_minY / stepY) * stepY; y <= _maxY && tickGuard++ < 200; y += stepY) {
             const QPointF pixel = toPixel(_minX, y);
             if (_showGrid) {
@@ -1850,18 +1899,23 @@ protected:
             }
             painter.setPen(textColor);
             painter.drawLine(QPointF(plot.left() - 4, pixel.y()), QPointF(plot.left(), pixel.y()));
-            painter.drawText(QRectF(plot.left() - 68, pixel.y() - 8, 62, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
+            if (pixel.y() + metrics.height() / 2.0 <= previousTop - 2.0) {
+                painter.drawText(QRectF(plot.left() - 6 - yLabelBox, pixel.y() - metrics.height() / 2.0, yLabelBox, metrics.height()), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
+                previousTop = pixel.y() - metrics.height() / 2.0;
+            }
         }
 
-        // frame and axis titles
+        // frame and axis titles (elided to the space they have)
         painter.setPen(palette().color(QPalette::Mid));
         painter.drawRect(plot);
         painter.setPen(textColor);
-        painter.drawText(QRect(plot.left(), height() - 24, plot.width(), 18), Qt::AlignCenter, _xTitle);
+        painter.drawText(QRect(plot.left(), height() - metrics.height() - 6, plot.width(), metrics.height()), Qt::AlignCenter,
+            metrics.elidedText(_xTitle, Qt::ElideRight, plot.width()));
         painter.save();
-        painter.translate(14, plot.center().y());
+        painter.translate(4 + metrics.height() / 2.0, plot.center().y());
         painter.rotate(-90);
-        painter.drawText(QRect(-plot.height() / 2, -8, plot.height(), 16), Qt::AlignCenter, _yTitle);
+        painter.drawText(QRectF(-plot.height() / 2.0, -metrics.height() / 2.0, plot.height(), metrics.height()), Qt::AlignCenter,
+            metrics.elidedText(_yTitle, Qt::ElideRight, plot.height()));
         painter.restore();
 
         // ---- everything inside the plot is clipped to it (zoomed-in content must not leak into the margins) ----
@@ -1994,6 +2048,8 @@ private:
     int _pointSize = 10;
     bool _showTrend = true;
     bool _showGrid = true;
+    int _leftMargin = 72;      /** see updateMargins() */
+    int _bottomMargin = 52;
     int _hovered = -1;
     bool _dragging = false;
     bool _dragMoved = false;
@@ -2109,7 +2165,7 @@ public:
             if (onTabChanged)
                 onTabChanged();
             });
-        resize(980, 640);
+        resize(fittingWindowSize(980, 640));
     }
 
     int currentTab() const { return _tabs->currentIndex(); }
@@ -2275,7 +2331,9 @@ class HeatmapWidget : public QWidget
 public:
     explicit HeatmapWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
-        setMinimumSize(560, 380);
+        setMinimumSize(240, 180);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        updateLabelMetrics();
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
     }
@@ -2286,12 +2344,22 @@ public:
         _columnLabels = columnLabels;
         _values = values;
         _columnGroup = columnGroup;
+        updateLabelMetrics();
+        _rowHasValues = QVector<bool>(_rowLabels.size(), false);
+        for (int row = 0; row < _values.size() && row < _rowHasValues.size(); ++row) {
+            for (const float value : _values[row]) {
+                if (!std::isnan(value)) {
+                    _rowHasValues[row] = true;
+                    break;
+                }
+            }
+        }
 
         // colour scale: the 98th percentile of the absolute values, so that a few extreme genes do not wash out the rest
         QVector<float> magnitudes;
         for (const QVector<float>& row : _values) {
             for (const float value : row) {
-                if (value != 0.0f)
+                if (value != 0.0f && !std::isnan(value))
                     magnitudes.push_back(std::abs(value));
             }
         }
@@ -2325,21 +2393,52 @@ public:
     void zoomBy(double factor) { zoomAround(QPointF(plotRect().center()), factor, false, false); }
 
 protected:
-    int leftMargin() const
+    // Margins follow the labels, so the labels fit; long names take at most 40% of the width / height and are elided.
+    void updateLabelMetrics()
     {
         const QFontMetrics metrics(font());
-        int width = 0;
-        for (const QString& label : _rowLabels)
-            width = std::max(width, metrics.horizontalAdvance(label));
-        return std::min(220, width + 14);
+        _lineHeight = metrics.height();
+        _rowLabelWidth = 0;
+        for (const QString& label : _rowLabels) // (the selected species are drawn in bold: leave room for that)
+            _rowLabelWidth = std::max(_rowLabelWidth, metrics.horizontalAdvance(label) + metrics.horizontalAdvance(QLatin1Char('M')));
+        _columnLabelWidth = 0;
+        for (const QString& label : _columnLabels)
+            _columnLabelWidth = std::max(_columnLabelWidth, metrics.horizontalAdvance(label));
     }
-    int bottomMargin() const { return _columnLabels.isEmpty() ? 20 : 120; }
+
+    void changeEvent(QEvent* event) override
+    {
+        if (event->type() == QEvent::FontChange) {
+            updateLabelMetrics();
+            update();
+        }
+        QWidget::changeEvent(event);
+    }
+
+    int leftMargin() const { return std::max(40, std::min(_rowLabelWidth + 14, width() * 2 / 5)); }
+    int bottomMargin() const { return _columnLabels.isEmpty() ? 20 : 14 + std::max(40, std::min(_columnLabelWidth + 8, height() * 2 / 5)); }
     QRect plotRect() const { return QRect(leftMargin(), 34, std::max(10, width() - leftMargin() - 16), std::max(10, height() - 34 - bottomMargin())); }
+
+    /** Every how many rows a label is drawn: 1 when every row has room for its label (the labels never overlap). */
+    int rowLabelStep() const
+    {
+        const double rowHeight = cellHeight();
+        return rowHeight >= _lineHeight * 0.5 ? 1 : static_cast<int>(std::ceil(_lineHeight * 0.5 / std::max(rowHeight, 1e-3)));
+    }
+    /** Every how many columns a (rotated) label is drawn. */
+    int columnLabelStep() const
+    {
+        const double columnWidth = cellWidth();
+        return columnWidth >= _lineHeight ? 1 : static_cast<int>(std::ceil(_lineHeight / std::max(columnWidth, 1e-3)));
+    }
+
     double cellWidth() const { return plotRect().width() / (_col1 - _col0); }
     double cellHeight() const { return plotRect().height() / (_row1 - _row0); }
 
     QColor colorFor(float value) const
     {
+        if (std::isnan(value))
+            return QColor(226, 226, 226); // no value (too few cells): grey
         const double t = std::max(-1.0, std::min(1.0, static_cast<double>(value) / _scale));
         // dark grey for higher, orange for lower than the other species (both already used in the tables); blue is reserved for the selection
         const QColor positive(64, 64, 64);
@@ -2525,6 +2624,11 @@ protected:
             }
         }
 
+        // selected species: a light blue band over the whole row, so that the selection is visible from a distance
+        for (const int row : _highlightRows) {
+            if (row >= firstRow && row <= lastRow)
+                painter.fillRect(QRectF(plot.left(), plot.top() + (row - _row0) * ch, plot.width(), ch), QColor(0, 162, 237, 60));
+        }
         // selected species (rows) and gene (columns): outlined in blue
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(selectionBlue, 2));
@@ -2545,26 +2649,37 @@ protected:
         painter.setPen(palette().color(QPalette::Mid));
         painter.drawRect(plot);
 
-        // ---- row labels (species) ----
+        // ---- row labels (species): every label that has room; the selected and the hovered one always ----
         QFont boldFont = font();
         boldFont.setBold(true);
+        const int rowStep = rowLabelStep();
+        const int columnStep = columnLabelStep();
+        // species rows shrink their font before any label is dropped: every species keeps its label while it can be read
+        QFont rowFont = font();
+        const double rowScale = std::max(0.5, std::min(1.0, cellHeight() / std::max(1.0, static_cast<double>(_lineHeight))));
+        if (rowScale < 1.0 && rowFont.pointSizeF() > 0.0)
+            rowFont.setPointSizeF(rowFont.pointSizeF() * rowScale);
+        const QFontMetrics rowMetrics(rowFont);
+        QFont rowBold = rowFont;
+        rowBold.setBold(true);
         for (int row = firstRow; row <= lastRow; ++row) {
             const bool selected = _highlightRows.contains(row);
-            if (!selected && ch < metrics.height())
-                continue; // too small to read: only selected species are labelled
-            painter.setFont(selected ? boldFont : font());
-            painter.setPen(selected ? selectionBlue : textColor);
-            const QRectF area(4, plot.top() + (row - _row0) * ch, plot.left() - 8, ch);
-            painter.drawText(area, Qt::AlignRight | Qt::AlignVCenter, _rowLabels[row]);
+            if (!selected && row != _hovered.y() && row % rowStep != 0)
+                continue;
+            const bool hasValues = row < _rowHasValues.size() && _rowHasValues[row];
+            painter.setFont(selected ? rowBold : rowFont);
+            painter.setPen(selected ? selectionBlue : (hasValues ? textColor : palette().color(QPalette::Mid)));
+            const double centerY = plot.top() + (row + 0.5 - _row0) * ch;
+            const QRectF area(4, centerY - rowMetrics.height() / 2.0, plot.left() - 8, rowMetrics.height());
+            painter.drawText(area, Qt::AlignRight | Qt::AlignVCenter, rowMetrics.elidedText(_rowLabels[row], Qt::ElideRight, static_cast<int>(area.width())));
         }
         painter.setFont(font());
 
-        // ---- column labels (genes), rotated: all of them when there is room, otherwise the selected and the hovered one ----
+        // ---- column labels (genes), rotated: every label that has room; the selected and the hovered one always ----
         const int labelLength = bottomMargin() - 14;
         for (int column = firstColumn; column <= lastColumn; ++column) {
             const bool selected = _highlightColumns.contains(column);
-            const bool hovered = column == _hovered.x();
-            if (!selected && !hovered && cw < metrics.height() * 0.9)
+            if (!selected && column != _hovered.x() && column % columnStep != 0)
                 continue;
             painter.save();
             painter.setFont(selected ? boldFont : font());
@@ -2576,7 +2691,7 @@ protected:
         }
 
         // ---- colour legend ----
-        const int legendWidth = 180;
+        const int legendWidth = std::max(60, std::min(180, plot.width() / 2));
         const int legendLeft = std::max(plot.left(), plot.right() - legendWidth);
         for (int x = 0; x < legendWidth; ++x) {
             const double value = (static_cast<double>(x) / (legendWidth - 1) * 2.0 - 1.0) * _scale;
@@ -2587,7 +2702,12 @@ protected:
         painter.drawRect(legendLeft, 6, legendWidth - 1, 10);
         painter.drawText(QRect(legendLeft - 50, 4, 46, 14), Qt::AlignRight | Qt::AlignVCenter, QString::number(-_scale, 'g', 3));
         painter.drawText(QRect(legendLeft + legendWidth + 4, 4, 60, 14), Qt::AlignLeft | Qt::AlignVCenter, QString::number(_scale, 'g', 3));
-        painter.drawText(QRect(plot.left(), 4, 200, 14), Qt::AlignLeft | Qt::AlignVCenter, "lower  <  difference  >  higher");
+        const int captionWidth = std::max(10, legendLeft - 60 - plot.left());
+        const QString caption = (rowStep > 1 || columnStep > 1)
+            ? QStringLiteral("lower  <  difference  >  higher   (labels thinned out: zoom in to read every one)")
+            : QStringLiteral("lower  <  difference  >  higher");
+        if (captionWidth >= 140) // (too narrow for the caption: the colour legend alone)
+            painter.drawText(QRect(plot.left(), 4, captionWidth, 14), Qt::AlignLeft | Qt::AlignVCenter, metrics.elidedText(caption, Qt::ElideRight, captionWidth));
     }
 
 private:
@@ -2595,6 +2715,10 @@ private:
     QStringList _columnLabels;
     QVector<QVector<float>> _values;
     QVector<int> _columnGroup;
+    QVector<bool> _rowHasValues; /** per row: at least one value (rows without values are labelled grey) */
+    int _rowLabelWidth = 0;      /** widest row label (see updateLabelMetrics) */
+    int _columnLabelWidth = 0;   /** widest column label */
+    int _lineHeight = 14;
     QSet<int> _highlightRows;
     QSet<int> _highlightColumns;
     double _scale = 1.0;
@@ -2746,6 +2870,7 @@ public:
         splitter->addWidget(_table);
         splitter->setStretchFactor(0, 3);
         splitter->setStretchFactor(1, 2);
+        splitter->setChildrenCollapsible(false);
         detailLayout->addWidget(splitter, 1);
         _detailInfo = new QLabel(detailPage);
         _detailInfo->setWordWrap(true);
@@ -2781,7 +2906,7 @@ public:
                 onGeneClicked(item->text(), _detail.species);
             });
 
-        resize(1100, 700);
+        resize(fittingWindowSize(1100, 700));
     }
 
     /** Show the current settings in the controls (without triggering a change). */
@@ -2808,15 +2933,20 @@ public:
             rows << prettyName(species);
         _heatmap->setData(rows, _result.heatmapGenes, _result.heatmapDelta, _result.heatmapOwner);
         _info->setText(_result.message);
-        setStatus(_result.valid ? QString("%1 species, %2 genes").arg(_result.species.size()).arg(_result.heatmapGenes.size()) : QString());
+        int comparedCount = 0;
+        for (int row = 0; row < _result.species.size(); ++row)
+            comparedCount += (row >= _result.included.size() || _result.included[row]) ? 1 : 0;
+        setStatus(_result.valid ? QString("%1 species compared, %2 genes").arg(comparedCount).arg(_result.heatmapGenes.size()) : QString());
 
         // species of the details tab: keep the chosen one when it is still there
         const QString previous = currentSpecies();
         {
             const QSignalBlocker blocker(_speciesCombo);
             _speciesCombo->clear();
-            for (const QString& species : _result.species)
-                _speciesCombo->addItem(prettyName(species), species);
+            for (int row = 0; row < _result.species.size(); ++row) {
+                if (row >= _result.included.size() || _result.included[row]) // (species with too few cells cannot be the focus)
+                    _speciesCombo->addItem(prettyName(_result.species[row]), _result.species[row]);
+            }
             const int keep = _speciesCombo->findData(previous);
             _speciesCombo->setCurrentIndex(keep >= 0 ? keep : (_speciesCombo->count() > 0 ? 0 : -1));
         }
@@ -2844,9 +2974,9 @@ public:
         _detail = detail;
         _level = significanceLevel;
         _detailInfo->setText(detail.valid
-            ? QString("%1 against the other %2 species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
-                "Wheel: zoom, drag: move, double click: reset.").arg(prettyName(detail.species)).arg(_result.species.size() - 1).arg(detail.genes.size()).arg(detail.top.size())
-            : QString("No data."));
+            ? QString("%1 against %2 other species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
+                "Wheel: zoom, drag: move, double click: reset.").arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size())
+            : (detail.message.isEmpty() ? QString("No data.") : detail.message));
         rebuildVolcano(_labelAll);
         rebuildTable();
     }
@@ -2876,6 +3006,8 @@ private:
     {
         if (row < 0 || column < 0 || row >= _result.species.size() || column >= _result.heatmapGenes.size())
             return QString();
+        if (std::isnan(static_cast<double>(_result.heatmapDelta[row][column])))
+            return QString("<b>%1</b>: too few cells of the selected cell type(s) for a comparison").arg(prettyName(_result.species[row]).toHtmlEscaped());
         const QString gene = _result.heatmapGenes[column].toHtmlEscaped();
         const QString species = prettyName(_result.species[row]).toHtmlEscaped();
         QString text = QString("<b>%1</b> in <b>%2</b><br>Difference to the other species: %3").arg(gene, species).arg(static_cast<double>(_result.heatmapDelta[row][column]), 0, 'f', 3);
@@ -3001,6 +3133,7 @@ private:
     ZoomablePlotWidget* _volcano = nullptr;
     QTableWidget* _table = nullptr;
     QLabel* _detailInfo = nullptr;
+
 };
 
 // ============================================================================================================

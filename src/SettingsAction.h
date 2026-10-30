@@ -19,6 +19,7 @@
 #include <AnalysisPlugin.h>
 #include <QGuiApplication>
 #include <memory>
+#include <atomic>
 #include <functional>
 #include <algorithm>    
 #include <QDebug>
@@ -254,7 +255,8 @@ struct SpeciesDeResult {
     bool valid = false;
     QString message;                         /** why there is no result, or what was computed */
     QStringList cellTypes;
-    QStringList species;                     /** species in the order of the species tree (related species next to each other) */
+    QStringList species;                     /** every species (one row each), in the order of the species tree (related species next to each other) */
+    QVector<bool> included;                  /** per row: the species has enough cells and takes part in the comparison (false: grey row) */
     QVector<SpeciesDeComparison> comparisons;/** same order as \p species */
     QStringList heatmapGenes;                /** union of the top genes, grouped by the species they are top genes of */
     QVector<int> heatmapOwner;               /** index (into species) of the species a heatmap gene belongs to */
@@ -264,7 +266,9 @@ struct SpeciesDeResult {
 /** All genes of one species-versus-rest comparison (for the volcano plot). */
 struct SpeciesDeDetail {
     bool valid = false;
+    QString message;                         /** why there is no comparison (when not valid) */
     QString species;
+    QStringList comparison;                  /** the species the focus species is compared with */
     QStringList genes;
     QVector<float> delta, restMean, restSd, t, pValue, fdr, detection, restDetection;
     QVector<int> top;                        /** indices of the top genes, best first */
@@ -332,6 +336,8 @@ struct GeneTraitExtras {
     float phyloFdr = std::numeric_limits<float>::quiet_NaN();
     float significanceFdr = 1.0f;                            /** FDR that decides significance: phylogenetic when available, else the chosen method's */
 };
+
+struct DeStatisticsCacheImpl; // defined in SettingsAction.cpp
 
 class SettingsAction : public WidgetAction
 {
@@ -432,6 +438,10 @@ public: // Action getters
     /** Recompute when something relevant changed (debounced; does nothing while the window is closed). */
     void requestSpeciesDifferentialExpression();
     const SpeciesDeResult& getSpeciesDeResult() const { return _deResult; }
+
+    /** Species compared in the species differential expression (empty: every species of the cell type). */
+    /** Status bar message with a background colour (blue: working, green: finished, red: error). Main thread only. */
+    void showStatusMessage(const QString& text, const QString& backgroundColor);
     /** All genes of the comparison of \p species with the others (fast: derived from the cached species means). */
     SpeciesDeDetail computeSpeciesDeDetail(const QString& species);
     /** Called (on the interface thread) whenever a new result is available. */
@@ -601,7 +611,8 @@ private:
         /** Mean expression of one cell type in one species. */
         struct Entry {
             int cellCount = 0;               /** cells of the cell type in the species (0 -> means stays empty) */
-            std::vector<float> means;        /** mean expression of every gene over those cells */
+            std::vector<float> means;        /** mean expression of every usable gene over those cells (valid where known) */
+            std::vector<char> known;         /** per gene: 1 when its mean has been read (genes are read once, see computeTraitCorrelation) */
         };
 
         QString key;                                                        /** ids of the datasets the cache was built from */
@@ -611,11 +622,18 @@ private:
         std::unordered_map<QString, Entry> entries;                         /** "species\x1fcellType" -> mean expression */
     };
 
+    /** Cluster sizes per species of the top-hierarchy clusters: they do not depend on the selection (see the main update). */
+    struct AbundanceCache {
+        QString key;                                  /** hierarchy generation, species dataset and included clusters */
+        std::vector<std::vector<int>> clusterSizes;   /** [species][included cluster] cells of the species in the cluster */
+    };
+
     /** One (species, cell type) pair whose mean expression still has to be read. */
     struct TraitEntryJob {
         QString key;
         const std::vector<int>* speciesPoints = nullptr;
         const std::vector<int>* cellTypePoints = nullptr;
+        std::vector<int> genes;          /** genes that have to be read for this entry */
         TraitCache::Entry entry;
     };
 
@@ -796,6 +814,14 @@ protected:
     IntegralAction            _deMinCells;            /** species with fewer cells are left out */
     TriggerAction             _showSpeciesDe;         /** open the species differential expression window */
     std::map<QString, std::vector<bool>> _topHierarchyClusterMap;
+    int _topHierarchyGeneration = 0;              /** raised whenever _topHierarchyClusterMap is rebuilt */
+    AbundanceCache _abundanceCache;
+    /** Species means of the selected cells (stage 1 of the expression statistics) and the key they were computed for. */
+    struct SelectedMeansCache {
+        QString key;
+        std::vector<std::vector<float>> means;   // [species][gene]
+    };
+    SelectedMeansCache _selectedMeansCache;
     TriggerAction                 _saveGeneTable;
     TriggerAction                 _saveSpeciesTable;
     ToggleAction                  _saveIncludeParameters; /** CSV export: add the analysis parameters on top */
@@ -815,6 +841,7 @@ protected:
     QPointer<mv::plugin::AnalysisPlugin> _geneTsneAnalysisPlugin;     /** t-SNE of the gene similarity points */
     DeCache     _deCache;
     DeState     _deState;
+    std::shared_ptr<DeStatisticsCacheImpl> _deStats; /** species statistics of the last comparison (see the .cpp) */
     SpeciesDeResult _deResult;
     std::shared_ptr<std::vector<DeEntryJob>> _deJobs;
     QFutureWatcher<void> _deJobWatcher;

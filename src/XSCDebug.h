@@ -8,7 +8,7 @@
 //
 //  Change the value below to switch the whole plugin on or off.
 // ============================================================================
-#define XSC_DEBUG 1
+#define XSC_DEBUG 0
 
 #if XSC_DEBUG
 

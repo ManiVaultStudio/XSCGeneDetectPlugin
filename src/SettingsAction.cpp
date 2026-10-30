@@ -990,6 +990,26 @@ namespace {
         // number of species that really enter the statistics (the tree may lack some species)
         const size_t effectiveCount = (context.method == TraitMethod::Phylogenetic) ? context.plans[0].speciesInPlan : speciesCount;
 
+        // Pearson leave-one-species-out in closed form: the correlation without species k follows from the running sums of the
+        // gene and the trait (O(species) per gene instead of recomputing every correlation: O(species^2)). The trait is centred once.
+        const bool closedFormLoo = (context.method == TraitMethod::Pearson) && speciesCount >= 4 && context.subsetTrait[0].size() == speciesCount;
+        std::vector<double> traitCentered;
+        double traitSum = 0.0, traitSumSq = 0.0;
+        if (closedFormLoo) {
+            const std::vector<double>& fullTrait = context.subsetTrait[0];
+            double traitMeanValue = 0.0;
+            for (const double value : fullTrait) {
+                traitMeanValue += value;
+            }
+            traitMeanValue /= static_cast<double>(speciesCount);
+            traitCentered.resize(speciesCount);
+            for (size_t i = 0; i < speciesCount; ++i) {
+                traitCentered[i] = fullTrait[i] - traitMeanValue;
+                traitSum += traitCentered[i];
+                traitSumSq += traitCentered[i] * traitCentered[i];
+            }
+        }
+
         for (size_t gene = range.begin; gene < range.end; ++gene) {
             for (size_t species = 0; species < speciesCount; ++species) {
                 geneValues[species] = static_cast<double>((*speciesGeneMeans[species])[gene]);
@@ -1041,7 +1061,38 @@ namespace {
             if (effectiveCount >= 4) {
                 double minimum = std::numeric_limits<double>::max();
                 double maximum = std::numeric_limits<double>::lowest();
-                for (size_t omit = 1; omit <= speciesCount; ++omit) {
+                if (closedFormLoo && !constantGene) {
+                    // sums over all species of the centred gene values x and of x * trait; removing species k subtracts its terms
+                    double geneMeanValue = 0.0;
+                    for (size_t i = 0; i < speciesCount; ++i) {
+                        geneMeanValue += geneValues[i];
+                    }
+                    geneMeanValue /= static_cast<double>(speciesCount);
+                    double sumX = 0.0, sumXX = 0.0, sumXT = 0.0;
+                    for (size_t i = 0; i < speciesCount; ++i) {
+                        const double x = geneValues[i] - geneMeanValue;
+                        sumX += x;
+                        sumXX += x * x;
+                        sumXT += x * traitCentered[i];
+                    }
+                    const double n = static_cast<double>(speciesCount) - 1.0; // species left in each leave-one-out subset
+                    for (size_t omit = 0; omit < speciesCount; ++omit) {
+                        const double x = geneValues[omit] - geneMeanValue;
+                        const double tc = traitCentered[omit];
+                        const double sx = sumX - x, sxx = sumXX - x * x, sxt = sumXT - x * tc;
+                        const double st = traitSum - tc, stt = traitSumSq - tc * tc;
+                        const double varX = n * sxx - sx * sx;
+                        const double varT = n * stt - st * st;
+                        // no variation left (also up to rounding): the correlation is 0, as in pearsonOfVectors()
+                        double looR = 0.0;
+                        if (varX > 1.0e-12 * std::max(1.0, n * sumXX) && varT > 1.0e-12 * std::max(1.0, n * traitSumSq)) {
+                            looR = std::max(-1.0, std::min(1.0, (n * sxt - sx * st) / std::sqrt(varX * varT)));
+                        }
+                        minimum = std::min(minimum, looR);
+                        maximum = std::max(maximum, looR);
+                    }
+                }
+                else for (size_t omit = 1; omit <= speciesCount; ++omit) {
                     if (context.method == TraitMethod::Phylogenetic && context.plans[omit].speciesInPlan == effectiveCount) {
                         continue; // the left-out species is not in the tree: nothing changes
                     }
@@ -1202,6 +1253,89 @@ namespace {
     }
 
     /**
+     * One species (\p focus) against a group of species (\p group, at least one of them): a moderated t-test of the difference
+     * between the focus mean and the mean of the group. The variance of the group is shrunk towards a prior: the median gene
+     * variance across ALL species. A group of one has no variance of its own, so the prior alone is used: 1 against 1 is tested too.
+     * @param speciesMeans mean expression per species and gene
+     */
+    inline DeSpeciesStatistics focusAgainstGroup(const std::vector<const std::vector<float>*>& speciesMeans, size_t focus,
+        const std::vector<size_t>& group, double priorDf = 4.0) {
+        DeSpeciesStatistics out;
+        const size_t speciesCount = speciesMeans.size();
+        if (speciesCount < 2 || group.empty() || focus >= speciesCount) {
+            return out;
+        }
+        const size_t geneCount = speciesMeans[focus]->size();
+        const double groupCount = static_cast<double>(group.size());
+        const double groupDf = groupCount - 1.0;
+
+        // 1. prior variance: median over the genes of the variance across all species
+        std::vector<double> positive;
+        positive.reserve(geneCount);
+        for (size_t g = 0; g < geneCount; ++g) {
+            double mean = 0.0;
+            for (size_t s = 0; s < speciesCount; ++s) {
+                mean += static_cast<double>((*speciesMeans[s])[g]);
+            }
+            mean /= static_cast<double>(speciesCount);
+            double sumSq = 0.0;
+            for (size_t s = 0; s < speciesCount; ++s) {
+                const double d = static_cast<double>((*speciesMeans[s])[g]) - mean;
+                sumSq += d * d;
+            }
+            const double variance = sumSq / static_cast<double>(speciesCount - 1);
+            if (variance > 0.0) {
+                positive.push_back(variance);
+            }
+        }
+        if (!positive.empty()) {
+            const size_t middle = positive.size() / 2;
+            std::nth_element(positive.begin(), positive.begin() + static_cast<std::ptrdiff_t>(middle), positive.end());
+            out.priorVariance = positive[middle];
+        }
+
+        // 2. per gene: the group mean and variance, the difference, the moderated t and its p-value
+        out.delta.assign(geneCount, 0.0f);
+        out.restMean.assign(geneCount, 0.0f);
+        out.restSd.assign(geneCount, 0.0f);
+        out.t.assign(geneCount, 0.0f);
+        out.pValue.assign(geneCount, 1.0f);
+        const double df = groupDf + priorDf;
+        for (size_t g = 0; g < geneCount; ++g) {
+            double restSum = 0.0;
+            for (const size_t c : group) {
+                restSum += static_cast<double>((*speciesMeans[c])[g]);
+            }
+            const double restMean = restSum / groupCount;
+            double restVariance = 0.0;
+            if (group.size() >= 2) {
+                double sumSq = 0.0;
+                for (const size_t c : group) {
+                    const double d = static_cast<double>((*speciesMeans[c])[g]) - restMean;
+                    sumSq += d * d;
+                }
+                restVariance = sumSq / groupDf;
+            }
+            const double moderated = (priorDf * out.priorVariance + groupDf * restVariance) / (priorDf + groupDf);
+            const double standardError = std::sqrt(moderated * (1.0 + 1.0 / groupCount));
+            const double delta = static_cast<double>((*speciesMeans[focus])[g]) - restMean;
+            out.delta[g] = static_cast<float>(delta);
+            out.restMean[g] = static_cast<float>(restMean);
+            out.restSd[g] = static_cast<float>(std::sqrt(restVariance));
+            if (standardError > 0.0) {
+                const double tValue = delta / standardError;
+                out.t[g] = static_cast<float>(tValue);
+                out.pValue[g] = static_cast<float>(std::max(0.0, std::min(1.0, regularizedIncompleteBeta(df / 2.0, 0.5, df / (df + tValue * tValue)))));
+            }
+            else if (delta != 0.0) {
+                out.t[g] = delta > 0.0 ? 1.0e6f : -1.0e6f;
+                out.pValue[g] = 0.0f;
+            }
+        }
+        return out;
+    }
+
+    /**
      * The genes to report for one species: significant (FDR below \p fdrLevel), detected in at least \p minDetection of the cells of
      * the group that has the higher expression, in the wanted direction; the best \p count by the chosen rank.
      * @param detection      per gene: fraction of cells of the species with the gene detected
@@ -1240,6 +1374,42 @@ namespace {
     }
 
 } // namespace
+
+/**
+ * Statistics of every species against all the others. They depend on the expression means and on the compared species only,
+ * NOT on the top-N, the direction, the rank or the minimum detection: those only select genes from these statistics.
+ * Kept between computations (see SettingsAction::computeSpeciesDifferentialExpression).
+ */
+struct DeStatisticsCacheImpl {
+    QString key;                                    /** what the statistics were computed for (cells, cell types, compared species) */
+    std::vector<DeSpeciesStatistics> statistics;    /** [species] */
+    std::vector<std::vector<float>> fdr;            /** [species][gene] Benjamini-Hochberg q-values */
+    std::vector<std::vector<float>> restDetection;  /** [species][gene] detection averaged over the other species */
+};
+
+/** Fills \p out for every species, in parallel over the species. */
+void buildDeStatistics(const std::vector<const std::vector<float>*>& means, const std::vector<std::vector<float>>& detection,
+    const std::vector<double>& totalSum, const std::vector<double>& totalSumSq, const std::vector<double>& totalDetection,
+    DeStatisticsCacheImpl& out)
+{
+    const size_t speciesCount = means.size();
+    const size_t geneCount = totalSum.size();
+    out.statistics.assign(speciesCount, DeSpeciesStatistics());
+    out.fdr.assign(speciesCount, std::vector<float>());
+    out.restDetection.assign(speciesCount, std::vector<float>());
+
+    std::vector<size_t> speciesIndices(speciesCount);
+    std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
+    QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
+        out.statistics[s] = speciesAgainstRest(means, s, totalSum, totalSumSq);
+        out.fdr[s] = benjaminiHochberg(out.statistics[s].pValue);
+        std::vector<float>& rest = out.restDetection[s];
+        rest.resize(geneCount);
+        for (size_t g = 0; g < geneCount; ++g) {
+            rest[g] = static_cast<float>((totalDetection[g] - static_cast<double>(detection[s][g])) / static_cast<double>(speciesCount - 1));
+        }
+    });
+}
 
 // Split implementation by responsibility to keep navigation manageable while
 // preserving the original SettingsAction behavior and method signatures.
