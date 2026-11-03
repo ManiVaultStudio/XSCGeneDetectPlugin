@@ -291,7 +291,7 @@ namespace {
         }
 
         // One streamed pass over the cells gives the sums of every gene; the callback then receives the means chunk by chunk.
-        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices);
+        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices, 1);
         const double inversePointCount = 1.0 / static_cast<double>(aggregates.rows);
 
         std::vector<int> geneChunkIndices;
@@ -321,7 +321,7 @@ namespace {
             return;
         }
 
-        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices);
+        const auto aggregates = PointStreaming::aggregateColumns(pointDataset.get(), pointIndices, allGeneIndices, 1);
         const double inversePointCount = 1.0 / static_cast<double>(aggregates.rows);
 
         std::vector<int> geneChunkIndices;
@@ -353,7 +353,8 @@ namespace {
      */
     inline int memorySafeThreadCount(size_t pointsPerWorker, int budgetMegabytes = 1024, int maxThreads = 0) {
         const double budgetBytes = static_cast<double>(std::max(64, budgetMegabytes)) * 1024.0 * 1024.0; // scratch buffers of all workers together
-        const double bytesPerWorker = static_cast<double>(std::max<size_t>(pointsPerWorker, 1)) * kGeneChunkSize * sizeof(float);
+        const double bytesPerWorker = static_cast<double>(PointStreaming::kTargetReadBytes) + 4.0 * 1024.0 * 1024.0; // bounded read plus reduction vectors
+        (void)pointsPerWorker;
         const int availableThreads = maxThreads > 0 ? maxThreads : std::max(1, QThread::idealThreadCount());
         const int budgetThreads = static_cast<int>(std::max(1.0, budgetBytes / bytesPerWorker));
         return std::max(1, std::min(availableThreads, budgetThreads));
@@ -962,6 +963,8 @@ namespace {
         // gene are pure rounding noise and would give an arbitrary correlation.)
         bool constantGene = false;
 
+        double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumYY = 0.0, sumXY = 0.0;
+        double originX = 0.0, originY = 0.0;
         // correlation of the current gene when species `omit - 1` is left out (omit == 0: nobody)
         const auto correlationFor = [&](size_t omit) -> double {
             if (constantGene) {
@@ -974,6 +977,18 @@ namespace {
                 }
                 computePicContrasts(plan, geneValues, scratch, contrasts);
                 return correlationThroughOrigin(contrasts, context.traitContrasts[omit]);
+            }
+            if (context.method == TraitMethod::Pearson) {
+                double sx = sumX, sy = sumY, xx = sumXX, yy = sumYY, xy = sumXY;
+                const double count = static_cast<double>(speciesCount - (omit > 0 ? 1 : 0));
+                if (omit > 0) {
+                    const double x = geneValues[omit - 1] - originX;
+                    const double y = context.subsetTrait[0][omit - 1] - originY;
+                    sx -= x; sy -= y; xx -= x*x; yy -= y*y; xy -= x*y;
+                }
+                const double vx = xx - sx*sx/count, vy = yy - sy*sy/count;
+                if (vx <= 0.0 || vy <= 0.0) return 0.0;
+                return std::clamp((xy - sx*sy/count) / std::sqrt(vx*vy), -1.0, 1.0);
             }
             subset.clear();
             for (size_t i = 0; i < speciesCount; ++i) {
@@ -1018,6 +1033,14 @@ namespace {
             const auto [lowest, highest] = std::minmax_element(geneValues.begin(), geneValues.end());
             constantGene = (*highest - *lowest) <= 1.0e-9 * (1.0 + std::fabs(*highest));
 
+            if (context.method == TraitMethod::Pearson) {
+                sumX = sumY = sumXX = sumYY = sumXY = 0.0;
+                originX = geneValues[0]; originY = context.subsetTrait[0][0];
+                for (size_t i = 0; i < speciesCount; ++i) {
+                    const double x = geneValues[i] - originX, y = context.subsetTrait[0][i] - originY;
+                    sumX += x; sumY += y; sumXX += x*x; sumYY += y*y; sumXY += x*y;
+                }
+            }
             GeneTraitStatistics& result = out[gene];
             const double r = correlationFor(0);
             result.correlation = static_cast<float>(r);
@@ -1341,6 +1364,37 @@ namespace {
      * @param detection      per gene: fraction of cells of the species with the gene detected
      * @param restDetection  per gene: mean over the other species of that fraction
      */
+    inline DeSpeciesStatistics groupsAgainstGroups(const std::vector<const std::vector<float>*>& means,
+        const std::vector<size_t>& a, const std::vector<size_t>& b) {
+        DeSpeciesStatistics out;
+        const size_t genes = means[a.front()]->size();
+        out.delta.resize(genes); out.restMean.resize(genes); out.restSd.resize(genes);
+        out.t.assign(genes, 0.0f); out.pValue.assign(genes, 1.0f);
+        std::vector<double> variances(genes), positive;
+        const double df = static_cast<double>(a.size() + b.size()) - 2.0;
+        const auto moments = [&](const std::vector<size_t>& group, size_t gene) {
+            double mean = 0.0, ss = 0.0; size_t n = 0;
+            for (size_t species : group) { double value = (*means[species])[gene], delta = value - mean; mean += delta / ++n; ss += delta * (value - mean); }
+            return std::pair<double,double>(mean, ss);
+        };
+        for (size_t g=0; g<genes; ++g) {
+            const auto ma=moments(a,g), mb=moments(b,g);
+            out.delta[g]=static_cast<float>(ma.first-mb.first); out.restMean[g]=static_cast<float>(mb.first);
+            out.restSd[g]=b.size()>1?static_cast<float>(std::sqrt(mb.second/(b.size()-1))):0.0f;
+            variances[g]=df>0?(ma.second+mb.second)/df:0.0;
+            if(variances[g]>0) positive.push_back(variances[g]);
+        }
+        if(!positive.empty()) { auto middle=positive.begin()+positive.size()/2; std::nth_element(positive.begin(),middle,positive.end()); out.priorVariance=*middle; }
+        if(df<=0) return out; // One species per group: effect sizes without a significance claim.
+        constexpr double priorDf=4.0;
+        for(size_t g=0;g<genes;++g) {
+            const double variance=(priorDf*out.priorVariance+df*variances[g])/(priorDf+df);
+            const double se=std::sqrt(variance*(1.0/a.size()+1.0/b.size()));
+            if(se>0) { const double t=out.delta[g]/se, degrees=df+priorDf; out.t[g]=static_cast<float>(t); out.pValue[g]=static_cast<float>(std::clamp(regularizedIncompleteBeta(degrees/2,0.5,degrees/(degrees+t*t)),0.0,1.0)); }
+        }
+        return out;
+    }
+
     inline std::vector<size_t> selectTopDeGenes(const DeSpeciesStatistics& statistics, const std::vector<float>& fdr,
         const std::vector<float>& detection, const std::vector<float>& restDetection,
         double fdrLevel, double minDetection, DeDirection direction, DeRank rank, size_t count) {
@@ -1381,6 +1435,9 @@ namespace {
  * Kept between computations (see SettingsAction::computeSpeciesDifferentialExpression).
  */
 struct DeStatisticsCacheImpl {
+    std::vector<DeSpeciesStatistics> detailStatistics;
+    std::vector<std::vector<float>> detailFdr;
+    std::vector<char> detailBuilt;
     QString key;                                    /** what the statistics were computed for (cells, cell types, compared species) */
     std::vector<DeSpeciesStatistics> statistics;    /** [species] */
     std::vector<std::vector<float>> fdr;            /** [species][gene] Benjamini-Hochberg q-values */
@@ -1410,6 +1467,20 @@ void buildDeStatistics(const std::vector<const std::vector<float>*>& means, cons
         }
     });
 }
+
+// Preserve the existing statistics text interface for exports and linked views,
+// while constructing it only for genes that are actually inspected.
+class LazyStatisticsItem : public QStandardItem {
+public:
+    explicit LazyStatisticsItem(std::function<QString()> formatter) : _formatter(std::move(formatter)) {}
+    QVariant data(int role = Qt::UserRole + 1) const override {
+        if (role == Qt::DisplayRole || role == Qt::EditRole) return _formatter();
+        return QStandardItem::data(role);
+    }
+    QStandardItem* clone() const override { return new LazyStatisticsItem(_formatter); }
+private:
+    std::function<QString()> _formatter;
+};
 
 // Split implementation by responsibility to keep navigation manageable while
 // preserving the original SettingsAction behavior and method signatures.

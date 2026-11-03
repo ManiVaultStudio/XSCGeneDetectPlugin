@@ -181,7 +181,7 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     // Formatting ~20k genes x species strings is the most expensive part of building the model. The lookup tables
     // are only read here, and every worker writes distinct elements of statisticsText -> no locking required.
     // The text format is parsed again by convertToStatisticsMap() in the plugin - keep both in sync.
-    std::vector<QString> statisticsText(static_cast<size_t>(geneCount));
+
 
     // Weighted appearance and rank consistency (computed in the same pass). Rank, as stored by findTopNGenesPerCluster, counts
     // from the other end for the "Negative" type, so the position inside the species' top-N ordering is derived from it.
@@ -259,30 +259,17 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             }
             bestPositionsText[row] = best.join(", ");
 
-            QString formattedStatistics;
-            formattedStatistics.reserve(statsIt->size() * 96);
-            for (const auto& speciesStats : *statsIt) {
-                const auto& species = speciesStats.first;
-                const auto& stats = speciesStats.second;
-                const int rank = (rankIt != geneToSpeciesRank.constEnd()) ? rankIt->value(species) : 0;
 
-                formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
-                    .arg(species)
-                    .arg(rank)
-                    .arg(stats.abundanceTop)
-                    .arg(stats.abundanceMiddle)
-                    .arg(stats.countAbundanceNumerator)
-                    .arg(stats.meanSelected, 0, 'f', 4)
-                    .arg(stats.countSelected)
-                    .arg(stats.meanNonSelected, 0, 'f', 4)
-                    .arg(stats.countNonSelected);
-            }
-            statisticsText[row] = std::move(formattedStatistics);
         }
         });
 
     // FDR of the rank consistency over all genes
     const std::vector<float> rankConsistencyFdr = benjaminiHochberg(rankConsistencyP);
+
+    // Immutable snapshots keep lazy cells valid until the previous model is deleted.
+    // Formatting every gene/species string upfront dominated update time and memory.
+    const auto statisticsSnapshot = std::make_shared<const decltype(geneToSpeciesStats)>(std::move(geneToSpeciesStats));
+    const auto rankSnapshot = std::make_shared<const decltype(geneToSpeciesRank)>(std::move(geneToSpeciesRank));
 
     // ---- 4. Fill the model (serial: QStandardItemModel is not thread safe) -----------------------------------
     for (int rowIndex = 0; rowIndex < geneCount; ++rowIndex) {
@@ -311,7 +298,31 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         model->setItem(rowIndex, 2, new QStandardItem(speciesGeneAppearancesComb));
 
         // Column 3: per-species statistics text (see step 3)
-        model->setItem(rowIndex, 3, new QStandardItem(statisticsText[static_cast<size_t>(rowIndex)]));
+        model->setItem(rowIndex, 3, new LazyStatisticsItem([statisticsSnapshot, rankSnapshot, gene]() {
+            const auto statsIt = statisticsSnapshot->constFind(gene);
+            if (statsIt == statisticsSnapshot->constEnd()) return QString();
+            const auto rankIt = rankSnapshot->constFind(gene);
+            QString formattedStatistics;
+            formattedStatistics.reserve(statsIt->size() * 96);
+            for (const auto& speciesStats : *statsIt) {
+                const auto& species = speciesStats.first;
+                const auto& stats = speciesStats.second;
+                const int rank = (rankIt != rankSnapshot->constEnd()) ? rankIt->value(species) : 0;
+
+                formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
+                    .arg(species)
+                    .arg(rank)
+                    .arg(stats.abundanceTop)
+                    .arg(stats.abundanceMiddle)
+                    .arg(stats.countAbundanceNumerator)
+                    .arg(stats.meanSelected, 0, 'f', 4)
+                    .arg(stats.countSelected)
+                    .arg(stats.meanNonSelected, 0, 'f', 4)
+                    .arg(stats.countNonSelected);
+            }
+
+            return formattedStatistics;
+        }));
 
         // Column 4: trait correlation. A numeric DisplayRole keeps sorting numeric; the bar delegate formats the text
         // and draws the bar. (Values arrive/refresh later through publishTraitCorrelationToModel().)

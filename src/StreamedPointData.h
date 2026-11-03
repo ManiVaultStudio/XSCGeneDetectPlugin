@@ -554,25 +554,22 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             }
         }
         else {
-            // Sparse: one row-list read for the block; each row is delivered in full width.
-            XSC_LOG("block", b, "path: row list", "rows", end - begin, "groups", groups.size());
-
+            // Coalesce nearby sparse rows into bounded ranges. A row-list
+            // backend otherwise reopens/decompresses the same tiles per cell.
+            const std::uint64_t maxSpan = std::max<std::uint64_t>(1,
+                kTargetReadBytes / (std::max<std::uint64_t>(1, columnCount) * sizeof(float)));
             std::size_t groupIndex = 0;
-            std::uint64_t batchFirst = 0;
-            std::uint64_t offset = 0;
-            const std::vector<std::uint64_t> distinct = [&] {
-                std::vector<std::uint64_t> ids;
-                ids.reserve(groups.size());
-                for (const auto& g : groups)
-                    ids.push_back(g.row);
-                return ids;
-            }();
-
-            fetchPointData(points, FetchMode::RowList, deliverFor(true, groupIndex, batchFirst, offset, dimensions),
-                           0, 0, 0, distinct, 0, 0, 0);
-
-            if (offset != 0 || groupIndex != groups.size())
-                throw std::runtime_error("PointStreaming: streamed views do not cover the requested rows");
+            while (groupIndex < groups.size()) {
+                const std::uint64_t first = groups[groupIndex].row;
+                std::size_t next = groupIndex + 1;
+                while (next < groups.size() && groups[next].row - first < maxSpan) ++next;
+                const std::uint64_t count = groups[next-1].row - first + 1;
+                std::uint64_t batchFirst = first, offset = 0;
+                fetchPointData(points, FetchMode::Range2D, deliverFor(false, groupIndex, batchFirst, offset, columnCount),
+                    0, first, count, {}, 0, 0, columnCount);
+                if (offset != 0 || batchFirst != first + count || groupIndex != next)
+                    throw std::runtime_error("PointStreaming: streamed range does not cover the requested rows");
+            }
         }
     };
 
@@ -644,7 +641,7 @@ inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& row
     };
 
     // Dense request: full rows, parallel blocks.
-    if (uniqueColumns.size() * 4 >= spanWidth) {
+    if (uniqueColumns.size() >= 32 || uniqueColumns.size() * 4 >= spanWidth) {
         State state = reduceRows(points, rowIds, threads, spanWidth, makeState,
             [&](State& s, std::size_t, const PointDataAccessView& view, std::uint64_t row, std::uint64_t offset) {
                 s.segment.update(columnIds, offset, view.columns);
@@ -716,6 +713,57 @@ inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& row
         mergeState(states[0], states[w]);
 
     return std::move(states[0].aggregates);
+}
+
+/** Per-group sums from one shared scan; overlapping and duplicate memberships are retained. */
+struct GroupAggregates {
+    std::vector<std::vector<double>> sums;
+    std::vector<std::uint64_t> counts;
+};
+inline GroupAggregates aggregateGroupedColumns(Points* points,
+    const std::vector<std::vector<std::uint64_t>>& groups, const std::vector<int>& columns,
+    int threads, std::size_t budgetBytes) {
+    GroupAggregates empty;
+    empty.sums.assign(groups.size(), std::vector<double>(columns.size(), 0.0));
+    empty.counts.assign(groups.size(), 0);
+    if (!points || columns.empty()) return empty;
+    std::size_t span = 0, membershipsCount = 0;
+    for (const auto& group : groups) for (auto row : group) { span = std::max(span, static_cast<std::size_t>(row)+1); ++membershipsCount; }
+    if (span == 0) return empty;
+    std::vector<std::size_t> counts(span, 0), offsets(span+1, 0);
+    for (const auto& group : groups) for (auto row : group) ++counts[row];
+    for (std::size_t row=0; row<span; ++row) offsets[row+1]=offsets[row]+counts[row];
+    std::vector<std::size_t> members(membershipsCount);
+    for (std::size_t group=0; group<groups.size(); ++group)
+        for (auto row:groups[group]) members[offsets[row]+--counts[row]]=group;
+    std::vector<std::uint64_t> rows;
+    rows.reserve(std::min(span,membershipsCount));
+    for (std::size_t row=0; row<span; ++row) if (offsets[row]!=offsets[row+1]) rows.push_back(row);
+    counts.clear(); counts.shrink_to_fit();
+    const std::vector<std::uint64_t> columnIds(columns.begin(),columns.end());
+    for (int column:columns) if(column<0 || static_cast<std::uint64_t>(column)>=points->getNumDimensions()) throw std::out_of_range("PointStreaming: grouped column out of range");
+    const std::uint64_t width=*std::max_element(columnIds.begin(),columnIds.end())+1;
+    const std::size_t mappingBytes=offsets.size()*sizeof(std::size_t)+members.size()*sizeof(std::size_t)+rows.size()*sizeof(std::uint64_t);
+    const std::size_t stateBytes=groups.size()*columns.size()*sizeof(double)+kTargetReadBytes;
+    const std::size_t available=budgetBytes>mappingBytes?budgetBytes-mappingBytes:0;
+    threads=std::max(1,std::min(threads,static_cast<int>(available/std::max<std::size_t>(1,stateBytes))));
+    struct State { GroupAggregates result; SegmentColumns segment; };
+    auto result=reduceRows(points,rows,threads,width,[&](){return State{empty,{}};},
+        [&](State& state,std::size_t position,const PointDataAccessView& view,std::uint64_t row,std::uint64_t offset) {
+            state.segment.update(columnIds,offset,view.columns);
+            const std::size_t global=static_cast<std::size_t>(rows[position]);
+            for(std::size_t m=offsets[global];m<offsets[global+1];++m) {
+                const std::size_t group=members[m];
+                accumulateSegment(view,row,state.segment,state.result.sums[group].data(),nullptr);
+                if(offset==0) ++state.result.counts[group];
+            }
+        },[](State& into,State& from){
+            for(std::size_t group=0;group<into.result.sums.size();++group){
+                into.result.counts[group]+=from.result.counts[group];
+                for(std::size_t g=0;g<into.result.sums[group].size();++g)into.result.sums[group][g]+=from.result.sums[group][g];
+            }
+        });
+    return std::move(result.result);
 }
 
 /** Values of one column for \p rowIds, in the order of \p rowIds. Uses the column path of the API. */

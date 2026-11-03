@@ -925,11 +925,11 @@ void SettingsAction::updateButtonTriggered()
                         using SpeciesGeneSums = std::vector<std::vector<double>>;
                         // Each thread holds one species x genes sum table; keep all of them within a fixed memory budget.
                         const std::size_t stage1TableBytes = static_cast<std::size_t>(speciesCount) * static_cast<std::size_t>(totalGeneCount) * sizeof(double);
-                        const std::size_t stage1BudgetBytes = std::size_t{ 256 } << 20;
+                        const std::size_t stage1BudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
                         XSC_LOG("stage 1: selected cells", _selectedIndicesFromStorage.size(), "species", speciesCount, "genes", totalGeneCount);
-                        const int stage1Threads = std::max(1, std::min({ 64,
+                        const int stage1Threads = std::max(1, std::min({ std::max(1, _maxWorkerThreads.getValue()),
                             static_cast<int>(std::thread::hardware_concurrency()),
-                            static_cast<int>(stage1BudgetBytes / std::max<std::size_t>(stage1TableBytes, 1)) }));
+                            static_cast<int>(stage1BudgetBytes / (stage1TableBytes + PointStreaming::kTargetReadBytes)) }));
                         struct Stage1State {
                             SpeciesGeneSums          sums;
                             PointStreaming::SegmentColumns segment;
@@ -1834,32 +1834,21 @@ void SettingsAction::computeGeneMeanExpressionMap()
             auto mainPointDimensionNames = mainPointDatasetFull->getDimensionNames();
             std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(mainPointDimensionNames.size(), mainPointDatasetFull->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
-            QMutex mapMutex;
-
-            // every worker reads (cells of its species) x kGeneChunkSize floats at a time: bound the number of workers
-            size_t largestSpecies = 0;
-            for (const auto& species : std::as_const(speciesclusters)) {
-                largestSpecies = std::max(largestSpecies, species.getIndices().size());
+            // A tiled source must be visited in storage order once. Independent
+            // species scans repeatedly decode the same tiles and compete for cache.
+            std::vector<std::vector<std::uint64_t>> groups;
+            groups.reserve(speciesclusters.size());
+            for (const auto& species : speciesclusters) groups.emplace_back(species.getIndices().begin(), species.getIndices().end());
+            const auto aggregated = PointStreaming::aggregateGroupedColumns(mainPointDatasetFull.get(), groups, allGeneIndices,
+                std::max(1, _maxWorkerThreads.getValue()), static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20);
+            for (size_t species=0; species<groups.size(); ++species) {
+                auto& means = _clusterGeneMeanExpressionMap[speciesclusters[species].getName()];
+                means.reserve(allGeneIndices.size());
+                const auto count = aggregated.counts[species];
+                if (count == 0) continue;
+                for (size_t gene=0; gene<allGeneIndices.size(); ++gene)
+                    means[mainPointDimensionNames[gene]] = { static_cast<int>(count), static_cast<float>(aggregated.sums[species][gene]/count) };
             }
-            QThreadPool meanMapPool;
-            meanMapPool.setMaxThreadCount(parallelWorkers(largestSpecies));
-
-            QtConcurrent::blockingMap(&meanMapPool, speciesclusters, [&](const auto& species) { XSC_LOG("species job:", species.getName());
-                const auto& speciesIndices = species.getIndices();
-                auto speciesName = species.getName();
-                std::unordered_map<QString, std::pair<int, float>> localGeneMeans;
-                localGeneMeans.reserve(mainPointDimensionNames.size());
-
-                computeChunkedGeneMeans(mainPointDatasetFull, allGeneIndices, speciesIndices, [&](int, const std::vector<int>& geneChunkIndices, const std::vector<float>& chunkMeans) {
-                    for (int localGeneIndex = 0; localGeneIndex < static_cast<int>(geneChunkIndices.size()); ++localGeneIndex) {
-                        const int geneIndex = geneChunkIndices[localGeneIndex];
-                        localGeneMeans[mainPointDimensionNames[geneIndex]] = std::make_pair(static_cast<int>(speciesIndices.size()), chunkMeans[localGeneIndex]);
-                    }
-                    });
-
-                QMutexLocker locker(&mapMutex);
-                _clusterGeneMeanExpressionMap[speciesName] = std::move(localGeneMeans);
-                });
 
             _meanMapComputed = true;
             _meanMapSignature = currentMeanMapSignature();
@@ -3849,49 +3838,68 @@ void SettingsAction::computeSpeciesDifferentialExpression()
 
 SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
 {
-    XSC_TRACE("SettingsAction::computeSpeciesDeDetail");
+    QStringList others;
+    for (const auto& name : _deState.species) if (name != species) others << name;
+    return computeSpeciesDeGroups({ species }, others);
+}
+
+SpeciesDeDetail SettingsAction::computeSpeciesDeGroups(const QStringList& groupA, const QStringList& groupB)
+{
     SpeciesDeDetail detail;
-    const auto it = std::find(_deState.species.begin(), _deState.species.end(), species);
-    if (it == _deState.species.end() || _deState.species.size() < 3) {
-        detail.message = QStringLiteral("No comparison: the species differential expression needs at least 3 species with cells of the selected cell type(s).");
-        return detail;
-    }
-    const size_t focus = static_cast<size_t>(std::distance(_deState.species.begin(), it));
-    const size_t speciesCount = _deState.species.size();
+    if (groupA.isEmpty() || groupB.isEmpty()) { detail.message = "Select at least one species in each group."; return detail; }
+    std::vector<size_t> a, group;
+    const auto append = [&](const QStringList& names, std::vector<size_t>& indices) {
+        for (const auto& name : names) {
+            const auto it = std::find(_deState.species.begin(), _deState.species.end(), name);
+            if (it == _deState.species.end()) return false;
+            const size_t index = static_cast<size_t>(it - _deState.species.begin());
+            if (std::find(indices.begin(), indices.end(), index) == indices.end()) indices.push_back(index);
+        }
+        return true;
+    };
+    for (const auto& name : groupA) if (groupB.contains(name)) { detail.message = "Groups must be disjoint; deselect shared species from one group."; return detail; }
+    if (!append(groupA, a) || !append(groupB, group)) { detail.message = "A selected species has insufficient cells. Recompute and select available species."; return detail; }
+    const size_t focus = a.front();
     const size_t geneCount = _deState.geneNames.size();
-
-    // 1 against n-1: the focus species against every other species that takes part in the comparison
-    std::vector<size_t> group;
-    for (size_t i = 0; i < speciesCount; ++i) {
-        if (i != focus) {
-            group.push_back(i);
-            detail.comparison << _deState.species[i];
-        }
-    }
-
+    detail.comparison = groupB;
     std::vector<const std::vector<float>*> meanPointers;
-    for (const auto& row : _deState.means) {
-        meanPointers.push_back(&row);
+    for (const auto& row : _deState.means) meanPointers.push_back(&row);
+    DeSpeciesStatistics computed;
+    std::vector<float> computedFdr, restDetection(geneCount, 0.0f), focusDetection(geneCount, 0.0f);
+    const bool cached = a.size() == 1 && group.size() + 1 == _deState.species.size() && _deStats;
+    if (!cached) {
+        computed = a.size() == 1 && group.size() >= 2 ? focusAgainstGroup(meanPointers, focus, group) : groupsAgainstGroups(meanPointers, a, group);
+        computedFdr = benjaminiHochberg(computed.pValue);
     }
-    const DeSpeciesStatistics statistics = focusAgainstGroup(meanPointers, focus, group);
-    const std::vector<float> fdr = benjaminiHochberg(statistics.pValue);
-    std::vector<float> restDetection(geneCount, 0.0f);
-    for (size_t g = 0; g < geneCount; ++g) {
-        double sum = 0.0;
-        for (const size_t c : group) {
-            sum += static_cast<double>(_deState.detection[c][g]);
+    if (cached) {
+        // The details test uses a prior over ALL species, unlike the overview's
+        // rest-only prior. Keep its historical statistics and cache them separately.
+        const size_t count = _deState.species.size();
+        if (_deStats->detailBuilt.size() != count) {
+            _deStats->detailBuilt.assign(count, 0);
+            _deStats->detailStatistics.resize(count); _deStats->detailFdr.resize(count);
         }
-        restDetection[g] = static_cast<float>(sum / static_cast<double>(group.size()));
+        if (!_deStats->detailBuilt[focus]) {
+            _deStats->detailStatistics[focus] = focusAgainstGroup(meanPointers, focus, group);
+            _deStats->detailFdr[focus] = benjaminiHochberg(_deStats->detailStatistics[focus].pValue);
+            _deStats->detailBuilt[focus] = 1;
+        }
     }
-
+    const DeSpeciesStatistics& statistics = cached ? _deStats->detailStatistics[focus] : computed;
+    const std::vector<float>& fdr = cached ? _deStats->detailFdr[focus] : computedFdr;
+    for (size_t g = 0; g < geneCount; ++g) {
+        for (const size_t c : group) restDetection[g] += _deState.detection[c][g] / static_cast<float>(group.size());
+        for (const size_t c : a) focusDetection[g] += _deState.detection[c][g] / static_cast<float>(a.size());
+    }
     // the same selection rules as in the overview
     const DeDirection direction = _deDirection.getCurrentIndex() == 1 ? DeDirection::Down : (_deDirection.getCurrentIndex() == 2 ? DeDirection::Either : DeDirection::Up);
     const DeRank rank = _deRankBy.getCurrentIndex() == 1 ? DeRank::ModeratedT : DeRank::Effect;
-    const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, _deState.detection[focus], restDetection, significanceLevel(),
+    const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, focusDetection, restDetection, a.size() + group.size() == 2 ? 2.0 : significanceLevel(),
         static_cast<double>(std::max(0, _deMinDetection.getValue())) / 100.0, direction, rank, static_cast<size_t>(std::max(1, _deTopGenes.getValue())));
 
     detail.valid = true;
-    detail.species = species;
+    detail.message = a.size() + group.size() == 2 ? QStringLiteral("One species in each group: effect sizes only; no significance evidence (p and FDR are 1).") : QStringLiteral("Equal species weights; moderated species-level comparison. Species relatedness is not corrected.");
+    detail.species = groupA.join(QStringLiteral(" + "));
     detail.genes.reserve(static_cast<int>(geneCount));
     for (const QString& gene : _deState.geneNames) {
         detail.genes << gene;
@@ -3902,7 +3910,7 @@ SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
     detail.t = QVector<float>(statistics.t.begin(), statistics.t.end());
     detail.pValue = QVector<float>(statistics.pValue.begin(), statistics.pValue.end());
     detail.fdr = QVector<float>(fdr.begin(), fdr.end());
-    detail.detection = QVector<float>(_deState.detection[focus].begin(), _deState.detection[focus].end());
+    detail.detection = QVector<float>(focusDetection.begin(), focusDetection.end());
     detail.restDetection = QVector<float>(restDetection.begin(), restDetection.end());
     for (const size_t g : top) {
         detail.top << static_cast<int>(g);

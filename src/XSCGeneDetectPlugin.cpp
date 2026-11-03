@@ -53,6 +53,10 @@
 #include <QPointer>
 #include <QPainter>
 #include <QApplication>
+#include <QToolButton>
+#include <QWidgetAction>
+#include <QListWidget>
+#include <QScrollArea>
 
 #ifdef _WIN32
 #include <execution>
@@ -1595,6 +1599,15 @@ inline QSize fittingWindowSize(int width, int height)
     return QSize(std::min(width, available.width() * 9 / 10), std::min(height, available.height() * 9 / 10));
 }
 
+static void addResponsiveBar(QVBoxLayout* layout, QHBoxLayout* bar) {
+    auto* content = new QWidget(); content->setLayout(bar);
+    auto* scroll = new QScrollArea(); scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(content); scroll->setWidgetResizable(true);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setFixedHeight(content->sizeHint().height() + scroll->horizontalScrollBar()->sizeHint().height() + 4);
+    layout->addWidget(scroll);
+}
+
 class ZoomablePlotWidget : public QWidget
 {
 public:
@@ -1867,8 +1880,8 @@ protected:
 
         // ---- grid, ticks and tick labels (sized from the font, see updateMargins) ----
         const QFontMetrics metrics(font());
-        const double stepX = niceStep(_maxX - _minX, 6);
-        const double stepY = niceStep(_maxY - _minY, 5);
+        const double stepX = niceStep(_maxX - _minX, std::max(2, plot.width() / 90));
+        const double stepY = niceStep(_maxY - _minY, std::max(2, plot.height() / 45));
         painter.setFont(font());
         const int yLabelBox = _leftMargin - metrics.height() - 16; // room for the numbers between the axis title and the plot
         // Labels that would overlap the previous one are skipped (their tick marks stay), so the numbers never collide.
@@ -2066,6 +2079,53 @@ private:
  *  3. Conservation vs trait: weighted appearance against trait correlation of the listed genes
  * Every plot can be zoomed, panned, labelled and saved as an image.
  */
+// A persistent checklist popup lets users toggle several species without reopening it.
+class SpeciesGroupPicker : public QToolButton {
+public:
+    explicit SpeciesGroupPicker(QWidget* parent) : QToolButton(parent) {
+        setText("Select species"); setPopupMode(QToolButton::InstantPopup);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        auto* menu = new QMenu(this);
+        auto* action = new QWidgetAction(menu);
+        auto* content = new QWidget(menu);
+        auto* layout = new QVBoxLayout(content);
+        _list = new QListWidget(content);
+        _list->setMinimumSize(220, 180);
+        auto* all = new QPushButton("Select all", content);
+        auto* none = new QPushButton("Clear", content);
+        layout->addWidget(all); layout->addWidget(none); layout->addWidget(_list);
+        action->setDefaultWidget(content); menu->addAction(action); setMenu(menu);
+        connect(all, &QPushButton::clicked, this, [this]() { checkAll(Qt::Checked); });
+        connect(none, &QPushButton::clicked, this, [this]() { checkAll(Qt::Unchecked); });
+        connect(_list, &QListWidget::itemChanged, this, [this]() {
+            setText(QString("%1 species selected").arg(selected().size()));
+            setToolTip(selected().join(", "));
+        });
+    }
+    QStringList selected() const {
+        QStringList names;
+        for (int i=0; i<_list->count(); ++i)
+            if (_list->item(i)->checkState()==Qt::Checked) names << _list->item(i)->text();
+        return names;
+    }
+    void setSpecies(const QStringList& names) {
+        QStringList existing;
+        for (int i=0; i<_list->count(); ++i) existing << _list->item(i)->text();
+        if (existing==names) return;
+        const auto picked=selected(); const QSignalBlocker guard(_list);
+        _list->clear();
+        for (const auto& name:names) {
+            auto* item=new QListWidgetItem(name,_list);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(picked.contains(name)?Qt::Checked:Qt::Unchecked);
+        }
+        setText(QString("%1 species selected").arg(selected().size()));
+    }
+private:
+    void checkAll(Qt::CheckState state) { for (int i=0;i<_list->count();++i) _list->item(i)->setCheckState(state); }
+    QListWidget* _list=nullptr;
+};
+
 class TraitPlotDialog : public QDialog
 {
 public:
@@ -2110,10 +2170,11 @@ public:
         _speciesTable->horizontalHeader()->setStretchLastSection(true);
         _speciesTable->setMaximumWidth(380);
 
-        auto* speciesRow = new QHBoxLayout();
-        speciesRow->addWidget(_speciesPlot, 1);
-        speciesRow->addWidget(_speciesTable);
-        speciesLayout->addLayout(speciesRow, 1);
+        auto* speciesSplit = new QSplitter(Qt::Horizontal, speciesPage);
+        speciesSplit->addWidget(_speciesPlot); speciesSplit->addWidget(_speciesTable);
+        speciesSplit->setStretchFactor(0,2); speciesSplit->setStretchFactor(1,1);
+        _speciesTable->setMinimumWidth(0);
+        speciesLayout->addWidget(speciesSplit,1);
         _speciesInfo = new QLabel(speciesPage);
         _speciesInfo->setWordWrap(true);
         _speciesInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -2302,7 +2363,7 @@ private:
                 plot->grab().save(path);
             });
 
-        layout->addLayout(bar);
+        addResponsiveBar(layout, bar);
         Q_UNUSED(layout);
     }
 
@@ -2664,12 +2725,13 @@ protected:
         rowBold.setBold(true);
         for (int row = firstRow; row <= lastRow; ++row) {
             const bool selected = _highlightRows.contains(row);
-            if (!selected && row != _hovered.y() && row % rowStep != 0)
+            if (!selected && row != _hovered.y() && (row - firstRow) % rowStep != 0)
                 continue;
             const bool hasValues = row < _rowHasValues.size() && _rowHasValues[row];
             painter.setFont(selected ? rowBold : rowFont);
             painter.setPen(selected ? selectionBlue : (hasValues ? textColor : palette().color(QPalette::Mid)));
-            const double centerY = plot.top() + (row + 0.5 - _row0) * ch;
+            const double centerY = std::clamp(plot.top() + (row + 0.5 - _row0) * ch,
+                plot.top() + rowMetrics.height()/2.0, plot.bottom() - rowMetrics.height()/2.0);
             const QRectF area(4, centerY - rowMetrics.height() / 2.0, plot.left() - 8, rowMetrics.height());
             painter.drawText(area, Qt::AlignRight | Qt::AlignVCenter, rowMetrics.elidedText(_rowLabels[row], Qt::ElideRight, static_cast<int>(area.width())));
         }
@@ -2679,12 +2741,14 @@ protected:
         const int labelLength = bottomMargin() - 14;
         for (int column = firstColumn; column <= lastColumn; ++column) {
             const bool selected = _highlightColumns.contains(column);
-            if (!selected && column != _hovered.x() && column % columnStep != 0)
+            if (!selected && column != _hovered.x() && (column - firstColumn) % columnStep != 0)
                 continue;
             painter.save();
             painter.setFont(selected ? boldFont : font());
             painter.setPen(selected ? selectionBlue : textColor);
-            painter.translate(plot.left() + (column + 0.5 - _col0) * cw, plot.bottom() + 6);
+            const double centerX = std::clamp(plot.left() + (column + 0.5 - _col0) * cw,
+                plot.left() + metrics.height()/2.0, plot.right() - metrics.height()/2.0);
+            painter.translate(centerX, plot.bottom() + 6);
             painter.rotate(90);
             painter.drawText(QPointF(0, (metrics.ascent() - metrics.descent()) / 2.0), metrics.elidedText(_columnLabels[column], Qt::ElideRight, labelLength));
             painter.restore();
@@ -2701,7 +2765,7 @@ protected:
         painter.setPen(textColor);
         painter.drawRect(legendLeft, 6, legendWidth - 1, 10);
         painter.drawText(QRect(legendLeft - 50, 4, 46, 14), Qt::AlignRight | Qt::AlignVCenter, QString::number(-_scale, 'g', 3));
-        painter.drawText(QRect(legendLeft + legendWidth + 4, 4, 60, 14), Qt::AlignLeft | Qt::AlignVCenter, QString::number(_scale, 'g', 3));
+        painter.drawText(QRect(std::min(width() - 64, legendLeft + legendWidth + 4), 18, 60, 14), Qt::AlignLeft | Qt::AlignVCenter, QString::number(_scale, 'g', 3));
         const int captionWidth = std::max(10, legendLeft - 60 - plot.left());
         const QString caption = (rowStep > 1 || columnStep > 1)
             ? QStringLiteral("lower  <  difference  >  higher   (labels thinned out: zoom in to read every one)")
@@ -2748,6 +2812,7 @@ public:
 
     std::function<void(int direction, int topCount, int rank)> onParametersChanged;
     std::function<void(const QString& species)> onSpeciesChosen;
+    std::function<void(const QStringList&, const QStringList&)> onGroupsChosen;
     std::function<void(const QString& gene, const QString& species)> onGeneClicked;   // species may be empty
     std::function<void(const QString& species, bool additive)> onSpeciesClicked;
 
@@ -2773,7 +2838,7 @@ public:
         bar->addStretch(1);
         _status = new QLabel();
         bar->addWidget(_status);
-        layout->addLayout(bar);
+        addResponsiveBar(layout, bar);
 
         const auto emitParameters = [this]() {
             if (onParametersChanged)
@@ -2811,7 +2876,7 @@ public:
             if (!path.isEmpty())
                 _heatmap->grab().save(path);
             });
-        overviewLayout->addLayout(overviewBar);
+        addResponsiveBar(overviewLayout, overviewBar);
         overviewLayout->addWidget(_heatmap, 1);
         _info = new QLabel(overviewPage);
         _info->setWordWrap(true);
@@ -2839,8 +2904,19 @@ public:
         auto* detailBar = new QHBoxLayout();
         detailBar->addWidget(new QLabel("Species:"));
         _speciesCombo = new QComboBox();
-        _speciesCombo->setMinimumWidth(220);
+        _speciesCombo->setMinimumWidth(0);
         detailBar->addWidget(_speciesCombo);
+        _groupA = new SpeciesGroupPicker(detailPage);
+        _groupB = new SpeciesGroupPicker(detailPage);
+        auto* groupBar = new QHBoxLayout();
+        groupBar->addWidget(new QLabel("Group A:")); groupBar->addWidget(_groupA);
+        groupBar->addWidget(new QLabel("Group B:")); groupBar->addWidget(_groupB);
+        auto* compareGroups = new QPushButton("Compare groups"); groupBar->addWidget(compareGroups);
+        addResponsiveBar(detailLayout, groupBar);
+        connect(compareGroups, &QPushButton::clicked, this, [this]() {
+            _useGroups = true;
+            if (onGroupsChosen) onGroupsChosen(_groupA->selected(), _groupB->selected());
+        });
         detailBar->addWidget(new QLabel("Labels:"));
         auto* labels = new QComboBox();
         labels->addItems({ "On hover only", "Top genes and selected gene", "All genes (no overlaps)" });
@@ -2851,7 +2927,7 @@ public:
         auto* volcanoSave = new QPushButton("Save image...");
         detailBar->addWidget(volcanoReset);
         detailBar->addWidget(volcanoSave);
-        detailLayout->addLayout(detailBar);
+        addResponsiveBar(detailLayout, detailBar);
 
         auto* splitter = new QSplitter(Qt::Vertical, detailPage);
         _volcano = new ZoomablePlotWidget(splitter);
@@ -2875,7 +2951,7 @@ public:
         _detailInfo = new QLabel(detailPage);
         _detailInfo->setWordWrap(true);
         detailLayout->addWidget(_detailInfo);
-        _tabs->addTab(detailPage, "Details (one species against the others)");
+        _tabs->addTab(detailPage, "Details / species groups");
 
         connect(labels, &QComboBox::currentIndexChanged, _volcano, [this](int index) {
             _volcano->setLabelMode(index == 0 ? ZoomablePlotWidget::LabelMode::None : (index == 1 ? ZoomablePlotWidget::LabelMode::Highlighted : ZoomablePlotWidget::LabelMode::All));
@@ -2891,6 +2967,7 @@ public:
                 _volcano->grab().save(path);
             });
         connect(_speciesCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+            _useGroups = false;
             if (index >= 0 && onSpeciesChosen)
                 onSpeciesChosen(_speciesCombo->itemData(index).toString());
             });
@@ -2920,6 +2997,9 @@ public:
 
     void setStatus(const QString& text) { _status->setText(text); }
 
+    bool usesGroups() const { return _useGroups; }
+    QStringList groupA() const { return _groupA->selected(); }
+    QStringList groupB() const { return _groupB->selected(); }
     QString currentSpecies() const { return _speciesCombo->currentIndex() >= 0 ? _speciesCombo->currentData().toString() : QString(); }
 
     void setResult(const SpeciesDeResult& result, const QSet<QString>& selectedSpecies, const QString& focusGene)
@@ -2950,6 +3030,10 @@ public:
             const int keep = _speciesCombo->findData(previous);
             _speciesCombo->setCurrentIndex(keep >= 0 ? keep : (_speciesCombo->count() > 0 ? 0 : -1));
         }
+        QStringList available;
+        for (int row=0; row<_result.species.size(); ++row)
+            if (row >= _result.included.size() || _result.included[row]) available << _result.species[row];
+        _groupA->setSpecies(available); _groupB->setSpecies(available);
         updateHighlights();
     }
 
@@ -2972,11 +3056,15 @@ public:
     void setDetail(const SpeciesDeDetail& detail, double significanceLevel)
     {
         _detail = detail;
+        _table->setHorizontalHeaderLabels(_useGroups
+            ? QStringList{ "Gene", "Difference", "Group A", "Group B", "Group B SD", "Moderated t", "FDR", "Detected in A (%)", "Detected in B (%)" }
+            : QStringList{ "Gene", "Difference", "Species", "Others", "Others SD", "Moderated t", "FDR", "Detected in species (%)", "Detected in others (%)" });
         _level = significanceLevel;
         _detailInfo->setText(detail.valid
             ? QString("%1 against %2 other species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
                 "Wheel: zoom, drag: move, double click: reset.").arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size())
             : (detail.message.isEmpty() ? QString("No data.") : detail.message));
+        if (detail.valid && !detail.message.isEmpty()) _detailInfo->setText(_detailInfo->text() + " " + detail.message);
         rebuildVolcano(_labelAll);
         rebuildTable();
     }
@@ -3076,7 +3164,7 @@ private:
             points.push_back(point);
         }
         _volcano->setGuideLines({ { true, -std::log10(_level), QString("FDR = %1").arg(_level) },{ false, 0.0, QString() } });
-        _volcano->setData(points, "Difference to the other species (higher in the species >)", "-log10 FDR", true);
+        _volcano->setData(points, _useGroups ? "Mean A - mean B (higher in A >)" : "Difference to the other species (higher in the species >)", "-log10 FDR", true);
     }
 
     void rebuildTable()
@@ -3115,6 +3203,9 @@ private:
         _table->resizeColumnsToContents();
     }
 
+    bool _useGroups = false;
+    SpeciesGroupPicker* _groupA = nullptr;
+    SpeciesGroupPicker* _groupB = nullptr;
     SpeciesDeResult _result;
     SpeciesDeDetail _detail;
     QSet<QString> _selectedSpecies;
@@ -3635,6 +3726,11 @@ void XSCGeneDetectPlugin::showSpeciesDe()
             _settingsAction.getDeRankBy().setCurrentIndex(rank);
             };
         dialog->onSpeciesChosen = [this](const QString& species) { refreshSpeciesDeDetail(species); };
+        dialog->onGroupsChosen = [this, dialog](const QStringList& a, const QStringList& b) {
+            auto detail = _settingsAction.computeSpeciesDeGroups(a,b);
+
+            dialog->setDetail(detail, _settingsAction.significanceLevel());
+        };
 
         // a gene was clicked: select it in the gene table (it may not be listed there: it is then only highlighted in the window)
         dialog->onGeneClicked = [this](const QString& gene, const QString& species) {
@@ -3643,7 +3739,7 @@ void XSCGeneDetectPlugin::showSpeciesDe()
                 return;
             window->setFocusGene(gene);
             window->setStatus(selectGeneInGeneTable(gene) ? QString() : QString("%1 is not in the gene table (it is not a top-N gene of the current selection)").arg(gene));
-            if (!species.isEmpty())
+            if (!species.isEmpty() && !window->usesGroups())
                 _settingsAction.setSpeciesExplorerSelection({ species });
             };
 
@@ -3703,7 +3799,7 @@ void XSCGeneDetectPlugin::refreshSpeciesDeDetail(const QString& species)
     if (!_speciesDeDialog)
         return;
     auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
-    dialog->setDetail(species.isEmpty() ? SpeciesDeDetail() : _settingsAction.computeSpeciesDeDetail(species), _settingsAction.significanceLevel());
+    dialog->setDetail(dialog->usesGroups() ? _settingsAction.computeSpeciesDeGroups(dialog->groupA(), dialog->groupB()) : (species.isEmpty() ? SpeciesDeDetail() : _settingsAction.computeSpeciesDeDetail(species)), _settingsAction.significanceLevel());
 }
 
 void XSCGeneDetectPlugin::refreshSpeciesDeHighlights()

@@ -444,6 +444,7 @@ public: // Action getters
     void showStatusMessage(const QString& text, const QString& backgroundColor);
     /** All genes of the comparison of \p species with the others (fast: derived from the cached species means). */
     SpeciesDeDetail computeSpeciesDeDetail(const QString& species);
+    SpeciesDeDetail computeSpeciesDeGroups(const QStringList& groupA, const QStringList& groupB);
     /** Called (on the interface thread) whenever a new result is available. */
     void setSpeciesDeFinishedCallback(std::function<void()> callback) { _speciesDeFinished = std::move(callback); }
 
