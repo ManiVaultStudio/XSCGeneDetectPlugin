@@ -174,7 +174,8 @@ void SettingsAction::updateButtonTriggered()
         auto speciesDataset = _speciesNamesDataset.getCurrentDataset();
         auto clusterDataset = _bottomClusterNamesDataset.getCurrentDataset();
         auto referenceTreeDataset = _referenceTreeDataset.getCurrentDataset();
-        _selectedSpeciesVals.setString("");
+        // This string mirrors the linked PhyTVu species selection. Preserve it across
+        // recomputations so the GeneDetect explorer remains synchronized.
         _geneNamesConnection.setString("");
         bool isValid = false;
 
@@ -2590,40 +2591,94 @@ void SettingsAction::computeTraitCorrelation()
             const auto jobs = _traitJobs;
             const Dataset<Points>* datasetHandle = &_traitJobDataset; // member: stays valid while the job runs
             const int workers = parallelWorkers(largestPointSet);
+            const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
 
-            // progress: every finished read is reported to the status bar (from the worker thread, queued to the GUI thread)
-            const int traitTotal = static_cast<int>(jobs->size());
-            const auto traitProgress = std::make_shared<std::atomic<int>>(0);
-            const auto traitReport = [this, traitProgress, traitTotal]() {
-                const int done = ++(*traitProgress);
-                QMetaObject::invokeMethod(this, [this, done, traitTotal]() {
-                    showStatusMessage(QString("Reading the expression for the trait correlation: %1 of %2 species / cell type pairs").arg(done).arg(traitTotal),
-                        QStringLiteral("#007bff"));
-                    }, Qt::QueuedConnection);
-                };
-            showStatusMessage(QString("Reading the expression for the trait correlation: 0 of %1 species / cell type pairs").arg(traitTotal), QStringLiteral("#007bff"));
+            showStatusMessage(QStringLiteral("Reading trait data"), QStringLiteral("#007bff"));
 
-            _traitJobWatcher.setFuture(QtConcurrent::run([jobs, datasetHandle, workers, traitReport]() {
-                QThreadPool pool;
-                pool.setMaxThreadCount(workers);
-                QtConcurrent::blockingMap(&pool, *jobs, [&](TraitEntryJob& job) {
-                    StatusTick tick{ traitReport };
-                    const std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
-                    job.entry.cellCount = static_cast<int>(points.size());
-                    if (points.empty()) {
-                        job.entry.known.assign(job.entry.known.size(), 1); // no cells: nothing to read, remembered as "no cells"
-                        return;
+            _traitJobWatcher.setFuture(QtConcurrent::run([this, jobs, datasetHandle, workers, scratchBudgetBytes]() {
+                std::vector<int> geneToSlot(PointStreaming::usableGeneCount(
+                    datasetHandle->get()->getDimensionNames().size(), datasetHandle->get()->getNumDimensions()), -1);
+                std::vector<int> requestedGenes;
+                for (const auto& job : *jobs) {
+                    for (const int gene : job.genes) {
+                        if (gene >= 0 && static_cast<size_t>(gene) < geneToSlot.size() && geneToSlot[static_cast<size_t>(gene)] < 0) {
+                            geneToSlot[static_cast<size_t>(gene)] = static_cast<int>(requestedGenes.size());
+                            requestedGenes.push_back(gene);
+                        }
                     }
-                    // only the genes that are not cached yet; their means are written at their gene index
-                    computeChunkedGeneMeans(*datasetHandle, job.genes, points,
-                        [&job](int, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
-                            for (size_t g = 0; g < chunkGenes.size(); ++g) {
-                                const size_t gene = static_cast<size_t>(chunkGenes[g]);
-                                job.entry.means[gene] = chunkMeans[g];
-                                job.entry.known[gene] = 1;
+                }
+                std::sort(requestedGenes.begin(), requestedGenes.end());
+                std::fill(geneToSlot.begin(), geneToSlot.end(), -1);
+                for (size_t slot = 0; slot < requestedGenes.size(); ++slot)
+                    geneToSlot[static_cast<size_t>(requestedGenes[slot])] = static_cast<int>(slot);
+
+                // For a dense request, all species/cell-type pairs share one read of the matrix.
+                // Preserve the sparse-column reader for very small gene sets to avoid scanning empty columns.
+                const size_t geneSpan = requestedGenes.empty() ? 0 : static_cast<size_t>(requestedGenes.back()) + 1;
+                bool groupedRead = requestedGenes.size() >= 32 || requestedGenes.size() * 4 >= geneSpan;
+                if (groupedRead) {
+                    std::vector<std::vector<std::uint64_t>> groupedPoints;
+                    groupedPoints.reserve(jobs->size());
+                    std::vector<int> points;
+                    for (auto& job : *jobs) {
+                        points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+                        job.entry.cellCount = static_cast<int>(points.size());
+                        if (points.empty()) {
+                            job.entry.known.assign(job.entry.known.size(), 1); // no cells: nothing to read, remembered as "no cells"
+                            groupedPoints.emplace_back();
+                        }
+                        else {
+                            groupedPoints.emplace_back(points.begin(), points.end());
+                        }
+                    }
+
+                    const std::size_t stateBytes = jobs->size() * requestedGenes.size() * sizeof(double) + PointStreaming::kTargetReadBytes;
+                    const std::size_t indexBytes = PointStreaming::groupedIndexMemoryBytes(groupedPoints);
+                    groupedRead = indexBytes <= scratchBudgetBytes && stateBytes <= scratchBudgetBytes - indexBytes;
+                    if (groupedRead) {
+                        const auto grouped = PointStreaming::aggregateGroupedColumns(datasetHandle->get(), groupedPoints,
+                            requestedGenes, workers, scratchBudgetBytes);
+                        for (size_t jobIndex = 0; jobIndex < jobs->size(); ++jobIndex) {
+                            auto& job = (*jobs)[jobIndex];
+                            const std::uint64_t count = grouped.counts[jobIndex];
+                            if (count == 0)
+                                continue;
+                            const double inverseCount = 1.0 / static_cast<double>(count);
+                            for (const int gene : job.genes) {
+                                const size_t slot = static_cast<size_t>(geneToSlot[static_cast<size_t>(gene)]);
+                                job.entry.means[static_cast<size_t>(gene)] = static_cast<float>(grouped.sums[jobIndex][slot] * inverseCount);
+                                job.entry.known[static_cast<size_t>(gene)] = 1;
                             }
-                        });
+                        }
+                    }
+                    else {
+                        groupedPoints.clear();
+                        groupedPoints.shrink_to_fit();
+                    }
+                }
+                if (!groupedRead) {
+                    QThreadPool pool;
+                    pool.setMaxThreadCount(workers);
+                    QtConcurrent::blockingMap(&pool, *jobs, [&](TraitEntryJob& job) {
+                        const std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+                        job.entry.cellCount = static_cast<int>(points.size());
+                        if (points.empty()) {
+                            job.entry.known.assign(job.entry.known.size(), 1);
+                            return;
+                        }
+                        computeChunkedGeneMeans(*datasetHandle, job.genes, points,
+                            [&job](int, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
+                                for (size_t g = 0; g < chunkGenes.size(); ++g) {
+                                    const size_t gene = static_cast<size_t>(chunkGenes[g]);
+                                    job.entry.means[gene] = chunkMeans[g];
+                                    job.entry.known[gene] = 1;
+                                }
+                            });
                     });
+                }
+                QMetaObject::invokeMethod(this, [this]() {
+                    showStatusMessage(QStringLiteral("Trait data ready"), QStringLiteral("#007bff"));
+                    }, Qt::QueuedConnection);
                 }));
             return;
         }
@@ -3576,28 +3631,22 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             const auto jobs = _deJobs;
             const Dataset<Points>* datasetHandle = &_deJobDataset;
             const int workers = parallelWorkers(largestPointSet);
+            const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
             std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(geneCount, mainPointsDataset->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
-            const int deTotal = static_cast<int>(jobs->size());
-            const auto deProgress = std::make_shared<std::atomic<int>>(0);
-            const auto deReport = [this, deProgress, deTotal]() {
-                const int done = ++(*deProgress);
-                QMetaObject::invokeMethod(this, [this, done, deTotal]() {
-                    showStatusMessage(QString("Reading the expression for the species differential expression: %1 of %2 species / cell type pairs").arg(done).arg(deTotal),
-                        QStringLiteral("#007bff"));
-                    }, Qt::QueuedConnection);
-                };
-            showStatusMessage(QString("Reading the expression for the species differential expression: 0 of %1 species / cell type pairs").arg(deTotal), QStringLiteral("#007bff"));
+            showStatusMessage(QStringLiteral("Reading DE data"), QStringLiteral("#007bff"));
 
-            _deJobWatcher.setFuture(QtConcurrent::run([this, jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices, deReport]() {
-                QThreadPool pool;
-                pool.setMaxThreadCount(workers);
-                QtConcurrent::blockingMap(&pool, *jobs, [&](DeEntryJob& job) {
-                    StatusTick tick{ deReport };
-                    std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+            // Build each species/cell-type row group once, then stream their union together.
+            // Separate jobs reread/decompress the same matrix tiles for every pair.
+            _deJobWatcher.setFuture(QtConcurrent::run([this, jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices, scratchBudgetBytes]() {
+                std::vector<std::vector<std::uint64_t>> groupedPoints;
+                groupedPoints.reserve(jobs->size());
+                std::vector<int> points;
+                for (auto& job : *jobs) {
+                    points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
 
-                    // cell cap: an even sample of the cells (deterministic, so the result does not change from run to run)
+                    // Keep the existing deterministic, evenly spaced cell cap.
                     if (maxCells > 0 && static_cast<int>(points.size()) > maxCells) {
                         std::vector<int> sampled;
                         sampled.reserve(static_cast<size_t>(maxCells));
@@ -3609,19 +3658,66 @@ void SettingsAction::computeSpeciesDifferentialExpression()
 
                     job.entry.cellCount = static_cast<int>(points.size());
                     if (points.empty()) {
-                        return; // remembered as "no cells" so it is not looked up again
+                        groupedPoints.emplace_back();
+                        continue;
                     }
+                    groupedPoints.emplace_back(points.begin(), points.end());
                     job.entry.means.assign(geneCount, 0.0f);
                     job.entry.detection.assign(geneCount, 0.0f);
-                    computeChunkedGeneMeansAndDetection(*datasetHandle, allGeneIndices, points,
-                        [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& means, const std::vector<float>& detection) {
-                            for (size_t g = 0; g < chunkGenes.size(); ++g) {
-                                job.entry.means[static_cast<size_t>(start) + g] = means[g];
-                                job.entry.detection[static_cast<size_t>(start) + g] = detection[g];
-                            }
-                        });
+                }
+
+                const std::size_t groupStateBytes = jobs->size() * allGeneIndices.size()
+                    * (sizeof(double) + sizeof(std::uint64_t) + 2 * sizeof(float)) + PointStreaming::kTargetReadBytes;
+                const std::size_t groupIndexBytes = PointStreaming::groupedIndexMemoryBytes(groupedPoints);
+                const bool groupedFitsBudget = groupIndexBytes <= scratchBudgetBytes
+                    && groupStateBytes <= scratchBudgetBytes - groupIndexBytes;
+                if (groupedFitsBudget) {
+                    const auto grouped = PointStreaming::aggregateGroupedColumns(datasetHandle->get(), groupedPoints,
+                        allGeneIndices, workers, scratchBudgetBytes, true);
+                    for (size_t jobIndex = 0; jobIndex < jobs->size(); ++jobIndex) {
+                        auto& entry = (*jobs)[jobIndex].entry;
+                        const std::uint64_t count = grouped.counts[jobIndex];
+                        if (count == 0)
+                            continue;
+                        const double inverseCount = 1.0 / static_cast<double>(count);
+                        for (size_t gene = 0; gene < allGeneIndices.size(); ++gene) {
+                            entry.means[gene] = static_cast<float>(grouped.sums[jobIndex][gene] * inverseCount);
+                            entry.detection[gene] = static_cast<float>(grouped.nonZero[jobIndex][gene] * inverseCount);
+                        }
+                    }
+                }
+                else {
+                    // Very small memory budgets cannot hold the grouped index; keep the low-memory
+                    // per-pair streaming path in that case.
+                    groupedPoints.clear();
+                    groupedPoints.shrink_to_fit();
+                    QThreadPool pool;
+                    pool.setMaxThreadCount(workers);
+                    std::vector<size_t> jobIndices(jobs->size());
+                    std::iota(jobIndices.begin(), jobIndices.end(), size_t(0));
+                    QtConcurrent::blockingMap(&pool, jobIndices, [&](size_t& jobIndex) {
+                        auto& job = (*jobs)[jobIndex];
+                        std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
+                        if (maxCells > 0 && static_cast<int>(points.size()) > maxCells) {
+                            std::vector<int> sampled;
+                            sampled.reserve(static_cast<size_t>(maxCells));
+                            for (int i = 0; i < maxCells; ++i)
+                                sampled.push_back(points[static_cast<size_t>((static_cast<long long>(i) * static_cast<long long>(points.size())) / maxCells)]);
+                            points.swap(sampled);
+                        }
+                        if (points.empty())
+                            return;
+                        computeChunkedGeneMeansAndDetection(*datasetHandle, allGeneIndices, points,
+                            [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& means, const std::vector<float>& detection) {
+                                for (size_t g = 0; g < chunkGenes.size(); ++g) {
+                                    job.entry.means[static_cast<size_t>(start) + g] = means[g];
+                                    job.entry.detection[static_cast<size_t>(start) + g] = detection[g];
+                                }
+                            });
                     });
-                }));
+                }
+                QMetaObject::invokeMethod(this, [this]() { showStatusMessage(QStringLiteral("DE data ready"), QStringLiteral("#007bff")); }, Qt::QueuedConnection);
+            }));
             return; // continues in onSpeciesDeJobsFinished()
         }
     }

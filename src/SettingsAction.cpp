@@ -987,7 +987,14 @@ namespace {
                     sx -= x; sy -= y; xx -= x*x; yy -= y*y; xy -= x*y;
                 }
                 const double vx = xx - sx*sx/count, vy = yy - sy*sy/count;
-                if (vx <= 0.0 || vy <= 0.0) return 0.0;
+                // Removing an extreme species can cancel nearly all variance.
+                // Fall back to the stable direct calculation for that rare subset.
+                if (vx <= 1.0e-12 * std::max(std::fabs(sumXX), std::fabs(sx*sx/count)) ||
+                    vy <= 1.0e-12 * std::max(std::fabs(sumYY), std::fabs(sy*sy/count))) {
+                    subset.clear();
+                    for (size_t i=0; i<speciesCount; ++i) if (omit==0 || i!=omit-1) subset.push_back(geneValues[i]);
+                    return pearsonOfVectors(subset, context.subsetTrait[omit]);
+                }
                 return std::clamp((xy - sx*sy/count) / std::sqrt(vx*vy), -1.0, 1.0);
             }
             subset.clear();

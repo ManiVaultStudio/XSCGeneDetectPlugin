@@ -737,6 +737,13 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         }
         _speciesExplorerInMap.setOptions(speciesOptions);
+        const QString linkedSelection = _selectedSpeciesVals.getString();
+        if (!linkedSelection.isEmpty()) {
+            QStringList restoredSelection;
+            for (const auto& species : linkedSelection.split(" @%$,$%@ ", Qt::SkipEmptyParts))
+                if (speciesOptions.contains(species)) restoredSelection << species;
+            _speciesExplorerInMap.setSelectedOptions(restoredSelection);
+        }
 
         if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
         {

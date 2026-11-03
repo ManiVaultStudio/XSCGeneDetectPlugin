@@ -718,13 +718,36 @@ inline ColumnAggregates aggregateColumns(Points* points, const RowContainer& row
 /** Per-group sums from one shared scan; overlapping and duplicate memberships are retained. */
 struct GroupAggregates {
     std::vector<std::vector<double>> sums;
+    std::vector<std::vector<std::uint64_t>> nonZero;
     std::vector<std::uint64_t> counts;
 };
+
+/** Conservative peak memory estimate for the row-to-group index used by grouped aggregation. */
+inline std::size_t groupedIndexMemoryBytes(const std::vector<std::vector<std::uint64_t>>& groups)
+{
+    std::uint64_t span = 0;
+    std::size_t memberships = 0;
+    std::size_t largestGroup = 0;
+    for (const auto& group : groups) {
+        memberships += group.size();
+        largestGroup = std::max(largestGroup, group.size());
+        for (const auto row : group)
+            span = std::max(span, row + 1);
+    }
+    // counts + offsets by row, group memberships, unique sorted row ids, caller row lists,
+    // and the largest temporary int row list used while building those groups.
+    return static_cast<std::size_t>(span + 1) * 2 * sizeof(std::size_t)
+        + memberships * (sizeof(std::size_t) + 2 * sizeof(std::uint64_t))
+        + largestGroup * sizeof(int);
+}
+
 inline GroupAggregates aggregateGroupedColumns(Points* points,
     const std::vector<std::vector<std::uint64_t>>& groups, const std::vector<int>& columns,
-    int threads, std::size_t budgetBytes) {
+    int threads, std::size_t budgetBytes, bool includeDetection = false) {
     GroupAggregates empty;
     empty.sums.assign(groups.size(), std::vector<double>(columns.size(), 0.0));
+    if (includeDetection)
+        empty.nonZero.assign(groups.size(), std::vector<std::uint64_t>(columns.size(), 0));
     empty.counts.assign(groups.size(), 0);
     if (!points || columns.empty()) return empty;
     std::size_t span = 0, membershipsCount = 0;
@@ -743,8 +766,9 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
     const std::vector<std::uint64_t> columnIds(columns.begin(),columns.end());
     for (int column:columns) if(column<0 || static_cast<std::uint64_t>(column)>=points->getNumDimensions()) throw std::out_of_range("PointStreaming: grouped column out of range");
     const std::uint64_t width=*std::max_element(columnIds.begin(),columnIds.end())+1;
-    const std::size_t mappingBytes=offsets.size()*sizeof(std::size_t)+members.size()*sizeof(std::size_t)+rows.size()*sizeof(std::uint64_t);
-    const std::size_t stateBytes=groups.size()*columns.size()*sizeof(double)+kTargetReadBytes;
+    const std::size_t mappingBytes=groupedIndexMemoryBytes(groups);
+    const std::size_t bytesPerAggregate = sizeof(double) + (includeDetection ? sizeof(std::uint64_t) : 0);
+    const std::size_t stateBytes=groups.size()*columns.size()*bytesPerAggregate+kTargetReadBytes;
     const std::size_t available=budgetBytes>mappingBytes?budgetBytes-mappingBytes:0;
     threads=std::max(1,std::min(threads,static_cast<int>(available/std::max<std::size_t>(1,stateBytes))));
     struct State { GroupAggregates result; SegmentColumns segment; };
@@ -754,13 +778,18 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
             const std::size_t global=static_cast<std::size_t>(rows[position]);
             for(std::size_t m=offsets[global];m<offsets[global+1];++m) {
                 const std::size_t group=members[m];
-                accumulateSegment(view,row,state.segment,state.result.sums[group].data(),nullptr);
+                accumulateSegment(view,row,state.segment,state.result.sums[group].data(),
+                    includeDetection ? state.result.nonZero[group].data() : nullptr);
                 if(offset==0) ++state.result.counts[group];
             }
         },[](State& into,State& from){
             for(std::size_t group=0;group<into.result.sums.size();++group){
                 into.result.counts[group]+=from.result.counts[group];
-                for(std::size_t g=0;g<into.result.sums[group].size();++g)into.result.sums[group][g]+=from.result.sums[group][g];
+                for(std::size_t g=0;g<into.result.sums[group].size();++g) {
+                    into.result.sums[group][g]+=from.result.sums[group][g];
+                    if (!into.result.nonZero.empty())
+                        into.result.nonZero[group][g]+=from.result.nonZero[group][g];
+                }
             }
         });
     return std::move(result.result);
