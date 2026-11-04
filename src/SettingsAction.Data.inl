@@ -38,29 +38,101 @@ void SettingsAction::clearUpdateDatasetHandles()
 void SettingsAction::removeTemporaryDatasets()
 {
     XSC_TRACE("SettingsAction::removeTemporaryDatasets");
-    // Group 10 (selection subset, embeddings, colors) is replaced by every update: the handles are reset and the datasets removed.
+    // Remove only ids registered for the datasets replaced by an update. Group ids
+    // remain tags for identification; they are never used to select deletion targets.
     clearUpdateDatasetHandles();
-    removeDatasets(10);
+    removeDatasets(_updateTemporaryDatasetIds);
+    _updateTemporaryDatasetIds.clear();
 
-    // Groups 20 (filtered UMAP datasets) and 30 (gene similarity datasets) are deliberately NOT removed and their handles are kept:
-    // the update re-uses them. They are filled again when they are needed (the filtered UMAP datasets on every gene click, the
-    // gene similarity datasets on every update), so nothing stale is shown. Resetting their handles used to create a new set on
-    // every update, which is what piled up datasets. Removing them instead is NOT safe: the Scatterplot view keeps handles to
-    // them in its coloring actions, and the next time it switched its color dataset it released a handle to a dataset that no
-    // longer existed (access violation in DimensionPickerAction::setPointsDataset).
+    // The reusable filtered-UMAP and gene-similarity datasets remain attached to
+    // their views until project-open cleanup.
 }
 
-void SettingsAction::removeDatasets(int groupId)
+void SettingsAction::trackTemporaryDataset(const QString& datasetId, int groupId)
+{
+    XSC_TRACE("SettingsAction::trackTemporaryDataset");
+    if (datasetId.isEmpty())
+        return;
+    QStringList* queue = nullptr;
+    if (groupId == 10)
+        queue = &_updateTemporaryDatasetIds;
+    else if (groupId == 20 || groupId == 30)
+        queue = &_sessionTemporaryDatasetIds;
+    if (queue && !queue->contains(datasetId))
+        queue->push_back(datasetId);
+}
+
+void SettingsAction::removeAllManagedTemporaryDatasets()
+{
+    XSC_TRACE("SettingsAction::removeAllManagedTemporaryDatasets");
+    clearTemporaryDatasetHandles();
+
+    // Older projects have no saved queue. Seed it once from known GeneDetect roots
+    // and their tagged descendants, then use the id-only deletion path as usual.
+    if (!_temporaryDatasetQueueWasSerialized) {
+        const auto allDatasets = mv::data().getAllDatasets();
+        QSet<QString> legacyRoots;
+        QHash<QString, QStringList> childrenByParent;
+        for (const auto& dataset : allDatasets) {
+            const QString name = dataset->getGuiName();
+            const int groupId = dataset->getGroupIndex();
+            const bool knownRoot =
+                (name == QStringLiteral("SelectedPointsDataset") && groupId == 10) ||
+                (name == QStringLiteral("Filtered UMAP Dataset Points") && groupId == 20) ||
+                (name == QStringLiteral("GeneSimilarityPoints") && groupId == 30);
+            if (knownRoot)
+                legacyRoots.insert(dataset->getId());
+            const auto parent = dataset->getParent();
+            if (parent.isValid())
+                childrenByParent[parent->getId()].push_back(dataset->getId());
+        }
+
+        QSet<QString> legacyOwned = legacyRoots;
+        QVector<QString> pending;
+        pending.reserve(legacyRoots.size());
+        for (const QString& rootId : legacyRoots)
+            pending.push_back(rootId);
+        for (int i = 0; i < pending.size(); ++i) {
+            const QString parentId = pending[i];
+            for (const QString& childId : childrenByParent.value(parentId)) {
+                if (!legacyOwned.contains(childId)) {
+                    legacyOwned.insert(childId);
+                    pending.push_back(childId);
+                }
+            }
+        }
+        for (const auto& dataset : allDatasets) {
+            const QString id = dataset->getId();
+            const int groupId = dataset->getGroupIndex();
+            if (legacyOwned.contains(id) && (groupId == 10 || groupId == 20 || groupId == 30))
+                trackTemporaryDataset(id, groupId);
+        }
+        _temporaryDatasetQueueWasSerialized = true;
+    }
+
+    QStringList ids = _updateTemporaryDatasetIds;
+    for (const QString& id : _sessionTemporaryDatasetIds)
+        if (!ids.contains(id))
+            ids.push_back(id);
+    removeDatasets(ids);
+    _updateTemporaryDatasetIds.clear();
+    _sessionTemporaryDatasetIds.clear();
+}
+
+void SettingsAction::removeDatasets(const QStringList& datasetIds)
 {
     XSC_TRACE("SettingsAction::removeDatasets");
+    if (datasetIds.isEmpty())
+        return;
     auto allDatasets = mv::data().getAllDatasets();
+    const QSet<QString> requestedIds(datasetIds.begin(), datasetIds.end());
 
     // id -> dataset pointer (NO COPYING)
     QHash<QString, Dataset<DatasetImpl>> idToDataset;
-    idToDataset.reserve(allDatasets.size());
+    idToDataset.reserve(datasetIds.size());
 
     for (const auto& ds : allDatasets) {
-        if (ds->getGroupIndex() == groupId) {
+        if (requestedIds.contains(ds->getId())) {
             idToDataset.insert(ds->getId(), ds);
         }
     }

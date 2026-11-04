@@ -1205,6 +1205,7 @@ namespace {
     struct DeSpeciesStatistics {
         std::vector<float> delta;      /** mean of the species - mean of the other species' means */
         std::vector<float> restMean;   /** mean of the other species' means */
+        std::vector<float> focusSd;    /** SD of the focus group's per-species means */
         std::vector<float> restSd;     /** standard deviation of the other species' means (not moderated) */
         std::vector<float> t;          /** moderated t statistic */
         std::vector<float> pValue;     /** two-sided p-value */
@@ -1232,6 +1233,7 @@ namespace {
         const double restDf = others - 1.0;
         out.delta.assign(geneCount, 0.0f);
         out.restMean.assign(geneCount, 0.0f);
+        out.focusSd.assign(geneCount, 0.0f);
         out.restSd.assign(geneCount, 0.0f);
         out.t.assign(geneCount, 0.0f);
         out.pValue.assign(geneCount, 1.0f);
@@ -1327,6 +1329,7 @@ namespace {
         // 2. per gene: the group mean and variance, the difference, the moderated t and its p-value
         out.delta.assign(geneCount, 0.0f);
         out.restMean.assign(geneCount, 0.0f);
+        out.focusSd.assign(geneCount, 0.0f);
         out.restSd.assign(geneCount, 0.0f);
         out.t.assign(geneCount, 0.0f);
         out.pValue.assign(geneCount, 1.0f);
@@ -1375,7 +1378,7 @@ namespace {
         const std::vector<size_t>& a, const std::vector<size_t>& b) {
         DeSpeciesStatistics out;
         const size_t genes = means[a.front()]->size();
-        out.delta.resize(genes); out.restMean.resize(genes); out.restSd.resize(genes);
+        out.delta.resize(genes); out.restMean.resize(genes); out.focusSd.resize(genes); out.restSd.resize(genes);
         out.t.assign(genes, 0.0f); out.pValue.assign(genes, 1.0f);
         std::vector<double> variances(genes), positive;
         const double df = static_cast<double>(a.size() + b.size()) - 2.0;
@@ -1387,6 +1390,7 @@ namespace {
         for (size_t g=0; g<genes; ++g) {
             const auto ma=moments(a,g), mb=moments(b,g);
             out.delta[g]=static_cast<float>(ma.first-mb.first); out.restMean[g]=static_cast<float>(mb.first);
+            out.focusSd[g]=a.size()>1?static_cast<float>(std::sqrt(ma.second/(a.size()-1))):0.0f;
             out.restSd[g]=b.size()>1?static_cast<float>(std::sqrt(mb.second/(b.size()-1))):0.0f;
             variances[g]=df>0?(ma.second+mb.second)/df:0.0;
             if(variances[g]>0) positive.push_back(variances[g]);

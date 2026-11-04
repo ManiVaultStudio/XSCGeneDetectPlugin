@@ -866,14 +866,7 @@ void XSCGeneDetectPlugin::init()
 
     const auto triggerInit = [this]() -> void
         {
-            int groupIDDeletion = 10;
-            int groupId1 = 10 * 2;
-            int groupId2 = 10 * 3;
-            _settingsAction.clearTemporaryDatasetHandles();
-            _settingsAction.removeDatasets(groupIDDeletion);
-            _settingsAction.removeDatasets(groupId1);
-            _settingsAction.removeDatasets(groupId2);
-            _settingsAction.removeDatasets(-1);
+            _settingsAction.removeAllManagedTemporaryDatasets();
             _settingsAction.getMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker().setChecked(false);
 
 
@@ -1178,13 +1171,18 @@ void XSCGeneDetectPlugin::init()
 
     auto group1Widget = mainOptionsGroup1->createWidget(&getWidget());
     group1Widget->setMaximumWidth(450);
+    if (auto* nTypeCombo = group1Widget->findChild<QComboBox*>()) {
+        nTypeCombo->setMaximumWidth(140);
+        nTypeCombo->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    }
     mainOptionsGroupLayout->addWidget(group1Widget);
 
     auto group2Widget = mainOptionsGroup2->createWidget(&getWidget());
     group2Widget->setMaximumWidth(450);
     mainOptionsGroupLayout->addWidget(group2Widget);
     auto statusBarWiddget = _settingsAction.getStatusBarActionWidget();
-    statusBarWiddget->setMaximumWidth(600);
+    statusBarWiddget->setMaximumWidth(720);
+    statusBarWiddget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     auto searchBoxWidget = _settingsAction.getSearchBox();
     searchBoxWidget->setMaximumWidth(600);
@@ -1932,11 +1930,21 @@ protected:
         painter.setPen(textColor);
         painter.drawText(QRect(plot.left(), height() - metrics.height() - 6, plot.width(), metrics.height()), Qt::AlignCenter,
             metrics.elidedText(_xTitle, Qt::ElideRight, plot.width()));
+        QFont yTitleFont = font();
+        qreal yTitlePointSize = yTitleFont.pointSizeF();
+        if (yTitlePointSize <= 0.0)
+            yTitlePointSize = 9.0;
+        QFontMetrics yTitleMetrics(yTitleFont);
+        while (yTitleMetrics.horizontalAdvance(_yTitle) > plot.height() && yTitlePointSize > 6.0) {
+            yTitlePointSize = std::max<qreal>(6.0, yTitlePointSize - 0.5);
+            yTitleFont.setPointSizeF(yTitlePointSize);
+            yTitleMetrics = QFontMetrics(yTitleFont);
+        }
         painter.save();
-        painter.translate(4 + metrics.height() / 2.0, plot.center().y());
+        painter.setFont(yTitleFont);
+        painter.translate(4 + yTitleMetrics.height() / 2.0, plot.center().y());
         painter.rotate(-90);
-        painter.drawText(QRectF(-plot.height() / 2.0, -metrics.height() / 2.0, plot.height(), metrics.height()), Qt::AlignCenter,
-            metrics.elidedText(_yTitle, Qt::ElideRight, plot.height()));
+        painter.drawText(QRectF(-plot.height() / 2.0, -yTitleMetrics.height() / 2.0, plot.height(), yTitleMetrics.height()), Qt::AlignCenter, _yTitle);
         painter.restore();
 
         // ---- everything inside the plot is clipped to it (zoomed-in content must not leak into the margins) ----
@@ -2092,6 +2100,7 @@ class SpeciesGroupPicker : public QToolButton {
 public:
     explicit SpeciesGroupPicker(QWidget* parent) : QToolButton(parent) {
         setText("Select species"); setPopupMode(QToolButton::InstantPopup);
+        setToolTip("Choose one or more species for this comparison group. Species already in Group A are disabled in Group B.");
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         auto* menu = new QMenu(this);
         auto* action = new QWidgetAction(menu);
@@ -2880,14 +2889,17 @@ public:
         bar->addWidget(new QLabel("Genes:"));
         _direction = new QComboBox();
         _direction->addItems({ "Up in the species", "Down in the species", "Either direction" });
+        _direction->setToolTip("Show genes with higher expression in the selected species, lower expression, or either direction.");
         bar->addWidget(_direction);
         bar->addWidget(new QLabel("Top per species:"));
         _topCount = new QSpinBox();
         _topCount->setRange(1, 100);
+        _topCount->setToolTip("Maximum number of genes shown in each species result.");
         bar->addWidget(_topCount);
         bar->addWidget(new QLabel("Rank by:"));
         _rank = new QComboBox();
         _rank->addItems({ "Effect size", "Moderated t" });
+        _rank->setToolTip("Choose how significant genes are ordered: by expression difference or by difference relative to variability.");
         bar->addWidget(_rank);
         bar->addStretch(1);
         _status = new QLabel();
@@ -2963,7 +2975,9 @@ public:
         auto* groupBar = new QHBoxLayout();
         groupBar->addWidget(new QLabel("Group A:")); groupBar->addWidget(_groupA);
         groupBar->addWidget(new QLabel("Group B:")); groupBar->addWidget(_groupB);
-        groupBar->addWidget(new QLabel("Auto compare"));
+        auto* compareHelp = new QLabel("Auto compare");
+        compareHelp->setToolTip("Results refresh shortly after either group changes.");
+        groupBar->addWidget(compareHelp);
         groupBar->addWidget(new QLabel("Labels:"));
         auto* labels = new QComboBox();
         labels->addItems({ "On hover only", "Top genes and selected gene", "All genes (no overlaps)" });
@@ -3163,9 +3177,14 @@ public:
     void setDetail(const SpeciesDeDetail& detail, double significanceLevel)
     {
         _detail = detail;
+        _table->setColumnCount(_useGroups ? 10 : 9);
         _table->setHorizontalHeaderLabels(_useGroups
-            ? QStringList{ "Gene", "Difference", "Group A", "Group B", "Group B SD", "Moderated t", "FDR", "Detected in A (%)", "Detected in B (%)" }
+            ? QStringList{ "Gene", "Difference", "Group A", "Group A SD", "Group B", "Group B SD", "Moderated t", "FDR", "Detected in A (%)", "Detected in B (%)" }
             : QStringList{ "Gene", "Difference", "Species", "Others", "Others SD", "Moderated t", "FDR", "Detected in species (%)", "Detected in others (%)" });
+        if (_useGroups) {
+            _table->horizontalHeaderItem(3)->setToolTip("Sample SD across the species-level mean expression values in Group A. This describes variation between species, not between cells; it is n/a when Group A has only one species.");
+            _table->horizontalHeaderItem(5)->setToolTip("Sample SD across the species-level mean expression values in Group B. This describes variation between species, not between cells; it is n/a when Group B has only one species.");
+        }
         _level = significanceLevel;
         _detailInfo->setText(detail.valid
             ? QString("%1 against %2 other species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
@@ -3228,6 +3247,17 @@ private:
     {
         if (!_detail.valid || gene < 0 || gene >= _detail.genes.size())
             return QString();
+        if (_useGroups) {
+            const QString sdA = _detail.groupACount > 1 ? QString::number(static_cast<double>(_detail.focusSd[gene]), 'f', 3) : QStringLiteral("n/a (one species)");
+            const QString sdB = _detail.groupBCount > 1 ? QString::number(static_cast<double>(_detail.restSd[gene]), 'f', 3) : QStringLiteral("n/a (one species)");
+            return QString("<b>%1</b><br>Mean A - mean B: %2<br>Group A mean: %3 (SD %4)<br>Group B mean: %5 (SD %6)<br>Moderated t = %7, p = %8, FDR = %9<br>Detected in A: %10%; in B: %11%")
+                .arg(_detail.genes[gene].toHtmlEscaped())
+                .arg(static_cast<double>(_detail.delta[gene]), 0, 'f', 3)
+                .arg(static_cast<double>(_detail.restMean[gene] + _detail.delta[gene]), 0, 'f', 3).arg(sdA)
+                .arg(static_cast<double>(_detail.restMean[gene]), 0, 'f', 3).arg(sdB)
+                .arg(static_cast<double>(_detail.t[gene]), 0, 'f', 2).arg(static_cast<double>(_detail.pValue[gene]), 0, 'g', 3).arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3)
+                .arg(static_cast<double>(_detail.detection[gene]) * 100.0, 0, 'f', 0).arg(static_cast<double>(_detail.restDetection[gene]) * 100.0, 0, 'f', 0);
+        }
         return QString("<b>%1</b> in <b>%2</b><br>Difference to the other species: %3<br>Species: %4, others: %5 (SD %6)<br>Moderated t = %7, p = %8, FDR = %9<br>"
             "Detected in %10% of the cells of the species, %11% of the others")
             .arg(_detail.genes[gene].toHtmlEscaped(), prettyName(_detail.species).toHtmlEscaped())
@@ -3299,7 +3329,7 @@ private:
     {
         _labelAll = labelAll;
         if (!_detail.valid) {
-            _detectionPlot->setData({}, "Mean A - mean B", "Detected in A - B (percentage points)", true);
+            _detectionPlot->setData({}, "Mean A - mean B", "Detection shift (pp)", true);
             return;
         }
         QVector<Point> points;
@@ -3333,7 +3363,7 @@ private:
         _detectionPlot->setGuideLines({ { true, 0.0, "No detection shift" }, { false, 0.0, "No expression shift" } });
         _detectionPlot->setData(points,
             _useGroups ? "Mean A - mean B (higher in A >)" : "Difference to the other species (higher in species >)",
-            "Detected in A - B (percentage points)", true);
+            "Detection shift (pp)", true);
     }
 
     void rebuildTable()
@@ -3351,14 +3381,26 @@ private:
             const double species = static_cast<double>(_detail.restMean[g] + _detail.delta[g]);
             QList<QTableWidgetItem*> items;
             items << new QTableWidgetItem(_detail.genes[g])
-                << number(static_cast<double>(_detail.delta[g]), 'f', 3)
-                << number(species, 'f', 3)
-                << number(static_cast<double>(_detail.restMean[g]), 'f', 3)
-                << number(static_cast<double>(_detail.restSd[g]), 'f', 3)
-                << number(static_cast<double>(_detail.t[g]), 'f', 2)
-                << number(static_cast<double>(_detail.fdr[g]), 'g', 3)
-                << number(static_cast<double>(_detail.detection[g]) * 100.0, 'f', 0)
-                << number(static_cast<double>(_detail.restDetection[g]) * 100.0, 'f', 0);
+                << number(static_cast<double>(_detail.delta[g]), 'f', 3);
+            if (_useGroups) {
+                items << number(species, 'f', 3)
+                    << (_detail.groupACount > 1 ? number(static_cast<double>(_detail.focusSd[g]), 'f', 3) : new QTableWidgetItem("n/a"))
+                    << number(static_cast<double>(_detail.restMean[g]), 'f', 3)
+                    << (_detail.groupBCount > 1 ? number(static_cast<double>(_detail.restSd[g]), 'f', 3) : new QTableWidgetItem("n/a"))
+                    << number(static_cast<double>(_detail.t[g]), 'f', 2)
+                    << number(static_cast<double>(_detail.fdr[g]), 'g', 3)
+                    << number(static_cast<double>(_detail.detection[g]) * 100.0, 'f', 0)
+                    << number(static_cast<double>(_detail.restDetection[g]) * 100.0, 'f', 0);
+            }
+            else {
+                items << number(species, 'f', 3)
+                    << number(static_cast<double>(_detail.restMean[g]), 'f', 3)
+                    << number(static_cast<double>(_detail.restSd[g]), 'f', 3)
+                    << number(static_cast<double>(_detail.t[g]), 'f', 2)
+                    << number(static_cast<double>(_detail.fdr[g]), 'g', 3)
+                    << number(static_cast<double>(_detail.detection[g]) * 100.0, 'f', 0)
+                    << number(static_cast<double>(_detail.restDetection[g]) * 100.0, 'f', 0);
+            }
             const bool isFocus = _detail.genes[g] == _focusGene;
             for (int column = 0; column < items.size(); ++column) {
                 if (isFocus) { // the selected gene: blue background like the selected species rows of the tables

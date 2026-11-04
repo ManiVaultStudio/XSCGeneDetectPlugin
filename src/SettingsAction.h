@@ -270,7 +270,9 @@ struct SpeciesDeDetail {
     QString species;
     QStringList comparison;                  /** the species the focus species is compared with */
     QStringList genes;
-    QVector<float> delta, restMean, restSd, t, pValue, fdr, detection, restDetection;
+    QVector<float> delta, restMean, focusSd, restSd, t, pValue, fdr, detection, restDetection;
+    int groupACount = 1;                    /** number of species contributing to Group A; SD requires at least two */
+    int groupBCount = 0;                    /** number of species contributing to Group B; SD requires at least two */
     QVector<int> top;                        /** indices of the top genes, best first */
 };
 
@@ -537,7 +539,9 @@ public: // Action getters
     void enableActions();
     void removeSelectionTableRows(QStringList* selectedLeaves);
     void enableDisableButtonsAutomatically();
-    void removeDatasets(int groupId);
+    void removeDatasets(const QStringList& datasetIds);
+    void trackTemporaryDataset(const QString& datasetId, int groupId);
+    void removeAllManagedTemporaryDatasets();
     void clearTemporaryDatasetHandles();
     void updateClusterInfoStatusBar();
     QVariant createModelFromData(const std::map<QString, std::map<QString, Stats>>& map, const std::map<QString, std::vector<QString>>& geneCounter, const std::map<QString, std::vector<std::pair<QString, int>>>& rankingMap, const int& n);
@@ -734,6 +738,9 @@ protected:
     mv::Dataset<Points>        _tsneDatasetExpressionColors;
 
     mv::Dataset<Points>             _geneSimilarityPoints;
+    QStringList _updateTemporaryDatasetIds;  /** exact dataset ids replaced by each update */
+    QStringList _sessionTemporaryDatasetIds; /** exact reusable datasets cleared when this project is opened */
+    bool _temporaryDatasetQueueWasSerialized = false;
     //std::vector<QString>        _geneSimilarityClusters;
     mv::Dataset<Clusters>           _geneSimilarityClusterColoring;
     std::unordered_map<QString, float> _geneTraitValuesComputed;   /** gene -> Pearson r */

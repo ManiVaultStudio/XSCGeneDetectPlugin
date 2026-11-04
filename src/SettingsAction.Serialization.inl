@@ -68,6 +68,12 @@ void SettingsAction::fromVariantMap(const QVariantMap& variantMap)
     _usePreComputedTSNE.fromParentVariantMap(variantMap);
     _applyLogTransformation.fromParentVariantMap(variantMap);
 
+    const QString updateDatasetQueueKey = QStringLiteral("CSCGDV:Update Temporary Dataset IDs");
+    const QString sessionDatasetQueueKey = QStringLiteral("CSCGDV:Session Temporary Dataset IDs");
+    _temporaryDatasetQueueWasSerialized = variantMap.contains(updateDatasetQueueKey) || variantMap.contains(sessionDatasetQueueKey);
+    _updateTemporaryDatasetIds = variantMap.value(updateDatasetQueueKey).toStringList();
+    _sessionTemporaryDatasetIds = variantMap.value(sessionDatasetQueueKey).toStringList();
+
 }
 
 QVariantMap SettingsAction::toVariantMap() const
@@ -114,5 +120,7 @@ QVariantMap SettingsAction::toVariantMap() const
     _clusterCountSortingType.insertIntoVariantMap(variantMap);
     _usePreComputedTSNE.insertIntoVariantMap(variantMap);
     _applyLogTransformation.insertIntoVariantMap(variantMap);
+    variantMap.insert(QStringLiteral("CSCGDV:Update Temporary Dataset IDs"), _updateTemporaryDatasetIds);
+    variantMap.insert(QStringLiteral("CSCGDV:Session Temporary Dataset IDs"), _sessionTemporaryDatasetIds);
     return variantMap;
 }

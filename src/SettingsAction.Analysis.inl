@@ -166,7 +166,7 @@ void SettingsAction::updateButtonTriggered()
         int groupID2 = 10 * 3;
         QElapsedTimer updateTimer;
         updateTimer.start();
-        showStatusMessage(QStringLiteral("Updating the selection statistics..."), QStringLiteral("#007bff"));
+        showStatusMessage(QStringLiteral("Updating selection"), QStringLiteral("#007bff"));
         removeTemporaryDatasets(); // all temporary datasets of the previous update (groups 10, 20 and 30), not only group 10
         qDebug() << "[Update] previous temporary datasets removed:" << updateTimer.elapsed() << "ms";
         auto pointsDataset = _mainPointsDataset.getCurrentDataset();
@@ -264,11 +264,13 @@ void SettingsAction::updateButtonTriggered()
                     pointsDatasetRaw->setSelectionIndices(_selectedIndicesFromStorage);
                     _selectedPointsDataset = pointsDatasetRaw->createSubsetFromSelection("SelectedPointsDataset");
                     _selectedPointsDataset->setGroupIndex(groupIDDeletion);
+                    trackTemporaryDataset(_selectedPointsDataset->getId(), groupIDDeletion);
 
                     if (!_tsneDatasetExpressionColors.isValid())
                     {
                         _tsneDatasetExpressionColors = mv::data().createDataset("Points", "TSNEDatasetExpressionColors", _selectedPointsDataset);
                         _tsneDatasetExpressionColors->setGroupIndex(groupIDDeletion);
+                        trackTemporaryDataset(_tsneDatasetExpressionColors->getId(), groupIDDeletion);
                         mv::events().notifyDatasetAdded(_tsneDatasetExpressionColors);
 
                     }
@@ -276,12 +278,14 @@ void SettingsAction::updateButtonTriggered()
                     embeddingDatasetRaw->setSelectionIndices(_selectedIndicesFromStorage);
                     _selectedPointsEmbeddingDataset = embeddingDatasetRaw->createSubsetFromSelection("TSNEDataset", _selectedPointsDataset);
                     _selectedPointsEmbeddingDataset->setGroupIndex(groupIDDeletion);
+                    trackTemporaryDataset(_selectedPointsEmbeddingDataset->getId(), groupIDDeletion);
 
 
                     if (!_tsneDatasetSpeciesColors.isValid())
                     {
                         _tsneDatasetSpeciesColors = mv::data().createDataset("Cluster", "TSNEDatasetSpeciesColors", _selectedPointsDataset);
                         _tsneDatasetSpeciesColors->setGroupIndex(groupIDDeletion);
+                        trackTemporaryDataset(_tsneDatasetSpeciesColors->getId(), groupIDDeletion);
                         mv::events().notifyDatasetAdded(_tsneDatasetSpeciesColors);
                     }
 
@@ -289,6 +293,7 @@ void SettingsAction::updateButtonTriggered()
                     {
                         _tsneDatasetClusterColors = mv::data().createDataset("Cluster", "TSNEDatasetClusterColors", _selectedPointsDataset);
                         _tsneDatasetClusterColors->setGroupIndex(groupIDDeletion);
+                        trackTemporaryDataset(_tsneDatasetClusterColors->getId(), groupIDDeletion);
                         mv::events().notifyDatasetAdded(_tsneDatasetClusterColors);
                     }
 
@@ -297,6 +302,7 @@ void SettingsAction::updateButtonTriggered()
                     {
                         _filteredUMAPDatasetPoints = mv::data().createDataset("Points", "Filtered UMAP Dataset Points");
                         _filteredUMAPDatasetPoints->setGroupIndex(groupID1);
+                        trackTemporaryDataset(_filteredUMAPDatasetPoints->getId(), groupID1);
                         mv::events().notifyDatasetAdded(_filteredUMAPDatasetPoints);
                         if (!_filteredUMAPDatasetColors.isValid())
                         {
@@ -310,10 +316,12 @@ void SettingsAction::updateButtonTriggered()
                         }
                         _filteredUMAPDatasetColors = mv::data().createDataset("Points", "Filtered UMAP Dataset Colors", _filteredUMAPDatasetPoints);
                         _filteredUMAPDatasetColors->setGroupIndex(groupID1);
+                        trackTemporaryDataset(_filteredUMAPDatasetColors->getId(), groupID1);
                         mv::events().notifyDatasetAdded(_filteredUMAPDatasetColors);
 
                         _filteredUMAPDatasetClusters = mv::data().createDataset("Cluster", "Filtered UMAP Dataset Clusters", _filteredUMAPDatasetPoints);
                         _filteredUMAPDatasetClusters->setGroupIndex(groupID1);
+                        trackTemporaryDataset(_filteredUMAPDatasetClusters->getId(), groupID1);
                         mv::events().notifyDatasetAdded(_filteredUMAPDatasetClusters);
 
                     }
@@ -324,6 +332,7 @@ void SettingsAction::updateButtonTriggered()
                     {
                         _selectedPointsEmbeddingDataset = mv::data().createDataset("Points", "TSNEDataset", _selectedPointsDataset);
                         _selectedPointsEmbeddingDataset->setGroupIndex(10);
+                        trackTemporaryDataset(_selectedPointsEmbeddingDataset->getId(), 10);
                         mv::events().notifyDatasetAdded(_selectedPointsEmbeddingDataset);
 
                     }*/
@@ -333,12 +342,14 @@ void SettingsAction::updateButtonTriggered()
                     {
                         _geneSimilarityPoints = mv::data().createDataset("Points", "GeneSimilarityPoints");
                         _geneSimilarityPoints->setGroupIndex(groupID2);
+                        trackTemporaryDataset(_geneSimilarityPoints->getId(), groupID2);
                         mv::events().notifyDatasetAdded(_geneSimilarityPoints);
                     }
                     if (!_geneSimilarityClusterColoring.isValid())
                     {
                         _geneSimilarityClusterColoring = mv::data().createDataset("Cluster", "GeneSimilarityClusterColoring", _geneSimilarityPoints);
                         _geneSimilarityClusterColoring->setGroupIndex(groupID2);
+                        trackTemporaryDataset(_geneSimilarityClusterColoring->getId(), groupID2);
                         mv::events().notifyDatasetAdded(_geneSimilarityClusterColoring);
 
                     }
@@ -557,6 +568,7 @@ void SettingsAction::updateButtonTriggered()
                                 _selectedTsneAnalysisPlugin = analysisPlugin; // remembered so that the next update can destroy it
                                 _selectedPointsTSNEDataset = analysisPlugin->getOutputDataset();
                                 _selectedPointsTSNEDataset->setGroupIndex(groupIDDeletion);
+                                trackTemporaryDataset(_selectedPointsTSNEDataset->getId(), groupIDDeletion);
                                 if (_selectedPointsTSNEDataset.isValid())
                                 {
 
@@ -607,6 +619,7 @@ void SettingsAction::updateButtonTriggered()
 
                                     _selectedPointsTSNEDataset = mv::data().createDerivedDataset<Points>("SelectedPointsTSNEDataset", _selectedPointsEmbeddingDataset, _selectedPointsEmbeddingDataset);
                                     _selectedPointsTSNEDataset->setGroupIndex(groupIDDeletion);
+                                    trackTemporaryDataset(_selectedPointsTSNEDataset->getId(), groupIDDeletion);
                                     mv::events().notifyDatasetAdded(_selectedPointsTSNEDataset);
 
                                     auto umapDatasetRaw = mv::data().getDataset<Points>(umapDataset->getId());
@@ -1171,7 +1184,7 @@ void SettingsAction::updateButtonTriggered()
 
         }
         stopCodeTimer("UpdateGeneFilteringTrigger");
-        showStatusMessage(QString("Selection statistics updated in %1 ms").arg(updateTimer.elapsed()), QStringLiteral("#28a745"));
+        showStatusMessage(QStringLiteral("Selection ready"), QStringLiteral("#28a745"));
         //_startComputationTriggerAction.setDisabled(false);
     }
     catch (const std::exception& e) {
@@ -2354,8 +2367,6 @@ void SettingsAction::onTraitJobsFinished()
 void SettingsAction::computeTraitCorrelation()
 {
     XSC_TRACE("SettingsAction::computeTraitCorrelation");
-    QElapsedTimer traitTimer;
-    traitTimer.start();
     // The expression data is read in the background (see below); until that is finished a new request only has to be remembered,
     // because the cache the background job fills must not be touched.
     if (_traitJobRunning) {
@@ -2985,7 +2996,7 @@ void SettingsAction::computeTraitCorrelation()
     _traitValueLabel = QString(plan.contribution ? "Trait contribution of selected species (%1)" : "Trait correlation (%1)").arg(methodShortName);
 
     publishTraitCorrelationToModel();
-    showStatusMessage(QString("Trait correlation: %1 species, %2 genes, computed in %3 ms").arg(population.size()).arg(geneCount).arg(traitTimer.elapsed()),
+    showStatusMessage(QString("Trait ready: %1 species, %2 genes").arg(population.size()).arg(geneCount),
         QStringLiteral("#28a745"));
 }
 
@@ -3301,6 +3312,7 @@ void SettingsAction::findTopNGenesPerCluster() {
             _selectedPointsTSNEDatasetForGeneTable = analysisPlugin->getOutputDataset();
             int groupID2 = 10 * 3;
             _selectedPointsTSNEDatasetForGeneTable->setGroupIndex(groupID2);
+            trackTemporaryDataset(_selectedPointsTSNEDatasetForGeneTable->getId(), groupID2);
             if (_selectedPointsTSNEDatasetForGeneTable.isValid())
             {
                 //_selectedPointsTSNEDatasetForGeneTable->printChildren();
@@ -3499,8 +3511,6 @@ void SettingsAction::onSpeciesDeJobsFinished()
 void SettingsAction::computeSpeciesDifferentialExpression()
 {
     XSC_TRACE("SettingsAction::computeSpeciesDifferentialExpression");
-    QElapsedTimer deTimer;
-    deTimer.start();
     if (!_deActive) {
         return;
     }
@@ -3923,8 +3933,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         .arg(equalWeighting ? "equal cell-type weighting" : "all cells pooled")
         .arg(maxCells > 0 ? QString::number(maxCells) : QString("all")).arg(minCells).arg(level).arg(static_cast<int>(minDetection * 100.0 + 0.5));
 
-    showStatusMessage(QString("Species differential expression: %1 species, %2 genes, computed in %3 ms")
-        .arg(speciesCount).arg(result.heatmapGenes.size()).arg(deTimer.elapsed()), QStringLiteral("#28a745"));
+    showStatusMessage(QString("DE ready: %1 species, %2 genes").arg(speciesCount).arg(result.heatmapGenes.size()), QStringLiteral("#28a745"));
     _deState = std::move(state);
     _deResult = std::move(result);
     if (_speciesDeFinished) {
@@ -3996,12 +4005,15 @@ SpeciesDeDetail SettingsAction::computeSpeciesDeGroups(const QStringList& groupA
     detail.valid = true;
     detail.message = a.size() + group.size() == 2 ? QStringLiteral("One species in each group: effect sizes only; no significance evidence (p and FDR are 1).") : QStringLiteral("Equal species weights; moderated species-level comparison. Species relatedness is not corrected.");
     detail.species = groupA.join(QStringLiteral(" + "));
+    detail.groupACount = static_cast<int>(a.size());
+    detail.groupBCount = static_cast<int>(group.size());
     detail.genes.reserve(static_cast<int>(geneCount));
     for (const QString& gene : _deState.geneNames) {
         detail.genes << gene;
     }
     detail.delta = QVector<float>(statistics.delta.begin(), statistics.delta.end());
     detail.restMean = QVector<float>(statistics.restMean.begin(), statistics.restMean.end());
+    detail.focusSd = QVector<float>(statistics.focusSd.begin(), statistics.focusSd.end());
     detail.restSd = QVector<float>(statistics.restSd.begin(), statistics.restSd.end());
     detail.t = QVector<float>(statistics.t.begin(), statistics.t.end());
     detail.pValue = QVector<float>(statistics.pValue.begin(), statistics.pValue.end());

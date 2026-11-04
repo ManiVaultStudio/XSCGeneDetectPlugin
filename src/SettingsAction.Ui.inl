@@ -169,7 +169,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _searchBox->setClearButtonEnabled(false);
     _searchBox->setFocusPolicy(Qt::StrongFocus);
     _meanMapComputed = false;
-    _statusBarActionWidget->setStatusTip("Status");
+    _statusBarActionWidget->setStatusTip("Shows whether the data is ready, needs updating, or is being calculated.");
     _statusBarActionWidget->setMaximumHeight(22);
     //_statusBarActionWidget->setFixedWidth(120);
     //_statusBarActionWidget->setMinimumWidth(100);
@@ -357,6 +357,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedRowIndex.setString("");
     _scatterplotReembedColorOption.initialize({ "Species","Cluster","Expression" }, "Species");
     _typeofTopNGenes.initialize({ "Absolute","Negative","Positive" }, "Positive");
+    _typeofTopNGenes.setToolTip("Choose which genes appear in the ranked list: largest absolute difference, most lower, or most higher in the selected species.");
     _traitPoolingMode.initialize({ "Pool cells", "Equal cell-type weighting" }, "Pool cells");
 
     _traitCorrelationMethod.initialize({ "Pearson", "Spearman (rank)", "Phylogenetic contrasts" }, "Pearson");
@@ -457,6 +458,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     QIcon updateIcon = mv::util::StyledIcon("play");
     _startComputationTriggerAction.setIcon(updateIcon);
     _startComputationTriggerAction.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
+    _startComputationTriggerAction.setToolTip("Update the gene list and statistics for the current selection.");
 
     QIcon exploreIcon = mv::util::StyledIcon("wpexplorer");
     _speciesExplorerInMapTrigger.setIcon(exploreIcon);
@@ -521,12 +523,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         });
     const auto changetooltipTopN = [this]() -> void
         {
-            _topNGenesFilter.setToolTip("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setToolTip("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
         };
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, changetooltipTopN);
 
@@ -678,11 +680,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                 _topNGenesFilter.setValue(0);
             }
 
-            _topNGenesFilter.setToolTip("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
             // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
             // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
             // changing the dataset repeatedly never stacks up duplicate listeners.
@@ -698,11 +700,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _topNGenesFilter.setMinimum(0);
             _topNGenesFilter.setMaximum(0);
             _topNGenesFilter.setValue(0);
-            _topNGenesFilter.setToolTip("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
 
         }
 
@@ -992,26 +994,26 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         }
 
         if (string == "C") {
-            labelText = "Updated";
+            labelText = "Data ready";
             backgroundColor = "#28a745"; // Green
 
         }
         else if (string == "M") {
-            labelText = "Outdated";
+            labelText = "Update needed";
             backgroundColor = "#ffc107"; // Gold
 
         }
         else if (string == "E") {
-            labelText = "Error";
+            labelText = "Update error";
             backgroundColor = "#dc3545"; // Red
         }
         else if (string == "R")
         {
-            labelText = "Processing";
+            labelText = "Updating data";
             backgroundColor = "#007bff"; // Blue
         }
         else {
-            labelText = "Unknown";
+            labelText = "Status unknown";
             backgroundColor = "#6c757d"; // Grey
         }
 
@@ -1019,7 +1021,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
         // Update the _statusBarActionWidget with the new label text and background color
-        _statusBarActionWidget->showMessage("Status: " + labelText);
+        _statusBarActionWidget->showMessage(labelText);
         _statusBarActionWidget->setStyleSheet("QStatusBar{padding-left:8px;background:" + backgroundColor + ";color:white;}");
 
 
