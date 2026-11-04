@@ -243,6 +243,11 @@ struct SegmentColumns {
     std::vector<std::uint64_t> relative; /** column index inside the view */
     std::vector<std::size_t>   slot;     /** index of the column in the requested list */
 
+    /** Cache the requested column layout so tiled segments need not rescan every requested column. */
+    const std::uint64_t* cachedColumnsData = nullptr;
+    std::size_t cachedColumnsSize = 0;
+    bool columnsSorted = false;
+
     /** True when relative[k] = firstRelative + k and slot[k] = firstSlot + k (one straight run). */
     bool          contiguous    = false;
     std::uint64_t firstRelative = 0;
@@ -258,10 +263,27 @@ struct SegmentColumns {
         relative.clear();
         slot.clear();
 
-        for (std::size_t k = 0; k < columns.size(); ++k) {
-            if (columns[k] >= segmentStart && columns[k] < segmentStart + segmentWidth) {
-                relative.push_back(columns[k] - segmentStart);
-                slot.push_back(k);
+        if (cachedColumnsData != columns.data() || cachedColumnsSize != columns.size()) {
+            cachedColumnsData = columns.data();
+            cachedColumnsSize = columns.size();
+            columnsSorted = std::is_sorted(columns.begin(), columns.end());
+        }
+
+        if (columnsSorted) {
+            const auto first = std::lower_bound(columns.begin(), columns.end(), segmentStart);
+            const std::uint64_t segmentEnd = segmentStart + segmentWidth;
+            for (auto column = first; column != columns.end() && *column < segmentEnd; ++column) {
+                relative.push_back(*column - segmentStart);
+                slot.push_back(static_cast<std::size_t>(column - columns.begin()));
+            }
+        }
+        else {
+            // Preserve support for arbitrary unsorted column lists.
+            for (std::size_t k = 0; k < columns.size(); ++k) {
+                if (columns[k] >= segmentStart && columns[k] < segmentStart + segmentWidth) {
+                    relative.push_back(columns[k] - segmentStart);
+                    slot.push_back(k);
+                }
             }
         }
 
