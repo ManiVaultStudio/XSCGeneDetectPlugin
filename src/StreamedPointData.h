@@ -1053,7 +1053,8 @@ inline GroupAggregates aggregateSparseDisjointRows(Points* points, const Rows& r
 template <typename Rows, typename GroupAt>
 inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, const std::size_t groupCount,
     GroupAt&& groupAt, const std::vector<int>& columns, int threads, const std::size_t budgetBytes,
-    const std::size_t mappingBytes, const bool includeDetection)
+    const std::size_t mappingBytes, const bool includeDetection,
+    const std::function<void(std::size_t, std::size_t)>& progress = {})
 {
     GroupAggregates empty;
     empty.sums.assign(groupCount, std::vector<double>(columns.size(), 0.0));
@@ -1105,7 +1106,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
                 includeDetection ? state.result.nonZero[group].data() : nullptr);
             if (offset == 0)
                 ++state.result.counts[group];
-        }, mergeState);
+        }, mergeState, progress);
     return std::move(result.result);
 }
 
@@ -1130,7 +1131,8 @@ inline std::size_t groupedIndexMemoryBytes(const std::vector<std::vector<std::ui
 
 inline GroupAggregates aggregateGroupedColumns(Points* points,
     const std::vector<std::vector<std::uint64_t>>& groups, const std::vector<int>& columns,
-    int threads, std::size_t budgetBytes, bool includeDetection = false) {
+    int threads, std::size_t budgetBytes, bool includeDetection = false,
+    const std::function<void(std::size_t, std::size_t)>& progress = {}) {
     GroupAggregates empty;
     empty.sums.assign(groups.size(), std::vector<double>(columns.size(), 0.0));
     if (includeDetection)
@@ -1176,7 +1178,7 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
             const std::size_t mappingBytes = groupByRow.size() * sizeof(std::uint32_t) + rows.size() * sizeof(std::uint32_t);
             return aggregateDisjointRows(points, rows, groups.size(),
                 [&](const std::size_t position) { return groupByRow[rows[position]]; },
-                columns, threads, budgetBytes, mappingBytes, includeDetection);
+                columns, threads, budgetBytes, mappingBytes, includeDetection, progress);
         }
     }
 
@@ -1218,7 +1220,7 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
                         into.result.nonZero[group][g]+=from.result.nonZero[group][g];
                 }
             }
-        });
+        }, progress);
     return std::move(result.result);
 }
 

@@ -1898,6 +1898,8 @@ void SettingsAction::computeGeneMeanExpressionMap()
     }
 
 
+    _meanMapComputed = false;
+    _meanMapSignature.clear();
     _clusterGeneMeanExpressionMap.clear();
     auto start = std::chrono::high_resolution_clock::now();
     qDebug() << "Computing gene mean expression map";
@@ -1916,8 +1918,21 @@ void SettingsAction::computeGeneMeanExpressionMap()
             std::vector<std::vector<std::uint64_t>> groups;
             groups.reserve(speciesclusters.size());
             for (const auto& species : speciesclusters) groups.emplace_back(species.getIndices().begin(), species.getIndices().end());
+            QElapsedTimer baselineTimer;
+            baselineTimer.start();
+            qInfo() << "[Baseline] scanning" << mainPointDatasetFull->getNumPoints() << "cells,"
+                    << allGeneIndices.size() << "genes across" << groups.size() << "species";
+            int lastProgressPercent = -1;
             const auto aggregated = PointStreaming::aggregateGroupedColumns(mainPointDatasetFull.get(), groups, allGeneIndices,
-                std::max(1, _maxWorkerThreads.getValue()), static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20);
+                std::max(1, _maxWorkerThreads.getValue()), static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20, false,
+                [&](std::size_t completed, std::size_t total) {
+                    const int percent = static_cast<int>(100 * completed / total);
+                    if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total) {
+                        qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent
+                                << "%) at" << baselineTimer.elapsed() << "ms";
+                        lastProgressPercent = percent;
+                    }
+                });
             for (size_t species=0; species<groups.size(); ++species) {
                 auto& means = _clusterGeneMeanExpressionMap[speciesclusters[species].getName()];
                 means.reserve(allGeneIndices.size());
@@ -2494,7 +2509,12 @@ void SettingsAction::computeTraitCorrelation()
     {
         for (auto phytvwPlugin : mv::plugins().getPluginsByFactory(phytv))
         {
-            if (phytvwPlugin->getGuiName() != "Phylogenetic Tree View")
+            // Display names can change when a project is restored or a view is
+            // renamed. Use the linked reference tree to identify the view.
+            auto referencePicker = phytvwPlugin->findChildByPath<DatasetPickerAction>("XSCPhyTVuPlugin Chart/Chart Options/Reference tree");
+            if (referencePicker && referencePicker->getCurrentDataset().isValid() &&
+                _referenceTreeDataset.getCurrentDataset().isValid() &&
+                referencePicker->getCurrentDataset().getDatasetId() != _referenceTreeDataset.getCurrentDataset().getDatasetId())
                 continue;
 
             auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
@@ -2510,6 +2530,8 @@ void SettingsAction::computeTraitCorrelation()
             {
                 auto dataString = data->getTreeMetaData();
                 metaOptions = filterData(traitName, "Numeric", dataString);
+                if (!QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject().isEmpty())
+                    break;
             }
         }
     }
@@ -2569,13 +2591,15 @@ void SettingsAction::computeTraitCorrelation()
 
     // ---- 4. Species that have a numeric trait value ----------------------------------------------------------
     std::map<QString, double> traitPerSpecies; // std::map: stable, sorted order
+    int matchingTraitNames = 0;
     for (const auto& entry : _traitCache.speciesSorted) {
         if (!traitObject.contains(entry.first)) {
             continue;
         }
         bool ok = false;
+        ++matchingTraitNames;
         const double traitValue = traitObject.value(entry.first).toVariant().toString().toDouble(&ok);
-        if (ok) {
+        if (ok && std::isfinite(traitValue)) {
             traitPerSpecies[entry.first] = traitValue;
         }
     }
@@ -2777,7 +2801,30 @@ void SettingsAction::computeTraitCorrelation()
     _traitSignificanceBasis.clear();
     if (usable.size() < kMinSpeciesForTraitCorrelation) {
         qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and at least" << minCells << "cells of the selected cell types; found" << usable.size();
-        _traitMethodNote = QString("No trait correlation: only %1 species have a trait value and at least %2 cells of the selected cell type(s)").arg(usable.size()).arg(minCells);
+        qInfo() << "[Trait] trait:" << traitName << "cell types:" << cellTypes
+                << "metadata species:" << traitObject.size() << "expression species:" << speciesClusters.size()
+                << "matching species names:" << matchingTraitNames << "numeric trait matches:" << traitPerSpecies.size()
+                << "species passing cell threshold:" << usable.size();
+        if (traitObject.isEmpty()) {
+            _traitMethodNote = QString("No trait correlation: no numeric metadata was found for trait '%1' in the linked tree view.").arg(traitName);
+        }
+        else if (matchingTraitNames == 0) {
+            _traitMethodNote = QString("No trait correlation: species names in trait '%1' do not match the expression species names.").arg(traitName);
+            qInfo() << "[Trait] metadata names:" << traitObject.keys().mid(0, 5);
+            QStringList expressionNames;
+            for (const auto& entry : _traitCache.speciesSorted) expressionNames << entry.first;
+            qInfo() << "[Trait] expression names:" << expressionNames.mid(0, 5);
+        }
+        else if (traitPerSpecies.empty()) {
+            _traitMethodNote = QString("No trait correlation: matching species have no valid numeric values for trait '%1'.").arg(traitName);
+        }
+        else {
+            _traitMethodNote = QString("No trait correlation: %1 species have numeric values for '%2', but only %3 have at least %4 cells of the selected cell type(s): %5.")
+                .arg(traitPerSpecies.size()).arg(traitName).arg(usable.size()).arg(minCells).arg(cellTypes.join(", "));
+            for (const QString& cellType : cellTypes) {
+                qInfo() << "[Trait] cell type:" << cellType << "dataset cells:" << _traitCache.cellTypeSorted.at(cellType).size();
+            }
+        }
         publishTraitCorrelationToModel();
         return;
     }
