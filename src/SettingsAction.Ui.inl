@@ -606,6 +606,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                 _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(false);
             }
             updateButtonTriggered();
+            // Model publication normally releases this pause, but a first-load
+            // initialization failure or an empty result may publish no model.
+            _pauseStatusUpdates = false;
             enableActions();
 
             QApplication::processEvents();

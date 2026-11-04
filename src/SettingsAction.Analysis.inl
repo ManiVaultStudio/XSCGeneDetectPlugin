@@ -222,6 +222,21 @@ void SettingsAction::updateButtonTriggered()
         auto pointsDatasetRaw = mv::data().getDataset<Points>(pointsDataset->getId());
         auto pointsDatasetallColumnNameList = pointsDatasetRaw->getDimensionNames();
         auto embeddingDatasetallColumnNameList = embeddingDatasetRaw->getDimensionNames();
+        // Project restoration can assign the pickers before their data is ready,
+        // so their change callbacks are not a reliable initialization barrier.
+        // The table model needs this list even on the first explicit Update.
+        _totalGeneList = pointsDatasetallColumnNameList;
+        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()) {
+            logUpdateStage("preparing species-wide baseline means");
+            computeGeneMeanExpressionMap();
+            if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()) {
+                throw std::runtime_error("Species-wide baseline means could not be initialized");
+            }
+            logUpdateStage("species-wide baseline means ready");
+        }
+        if (_topHierarchyClusterMap.empty()) {
+            computeHierarchyAppearanceVector();
+        }
         //stopCodeTimer("Part3");
         //startCodeTimer("Part4");
         std::vector<int> embeddingDatasetColumnIndices(embeddingDatasetallColumnNameList.size());
