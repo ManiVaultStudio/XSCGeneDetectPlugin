@@ -1010,19 +1010,15 @@ void SettingsAction::updateButtonTriggered()
                             const auto& meta = speciesComputationMeta[job.speciesIndex];
                             const auto& baselineMeans = _clusterGeneMeanExpressionMap.at(meta.name);
                             const auto& selectedMeans = speciesSelectedMeans[job.speciesIndex];
-                            auto baselineIt = baselineMeans.begin();
 
                             for (const int geneIndex : genesByName) {
                                 const auto& geneName = pointsDatasetallColumnNameList[geneIndex];
 
-                                // genesByName follows the map's key order, so advance once instead of doing
-                                // a logarithmic tree lookup for every gene.
-                                while (baselineIt != baselineMeans.end() && baselineIt->first < geneName) {
-                                    ++baselineIt;
-                                }
+                                // Baselines are stored in an unordered_map; their iteration order
+                                // does not follow genesByName. Look up each gene by its key.
                                 float allCellMean = 0.0f;
-                                if (baselineIt != baselineMeans.end() && baselineIt->first == geneName) {
-                                    allCellMean = baselineIt->second.second;
+                                if (const auto geneMeanIt = baselineMeans.find(geneName); geneMeanIt != baselineMeans.end()) {
+                                    allCellMean = geneMeanIt->second.second;
                                 }
 
                                 const float selectedCellsMean = (meta.selectedCellCount > 0) ? selectedMeans[geneIndex] : 0.0f;
