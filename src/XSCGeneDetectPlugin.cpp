@@ -987,6 +987,7 @@ void XSCGeneDetectPlugin::init()
 
 
 
+
     //change height of headers
 
 

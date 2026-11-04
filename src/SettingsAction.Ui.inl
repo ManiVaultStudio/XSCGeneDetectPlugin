@@ -588,10 +588,23 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         {
             disableActions();
             _pauseStatusUpdates = true;
-            qDebug() << "XSCGeneDetectPlugin:Clearing Species Explorer selection at line 423";
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
             //_erroredOutFlag = false;
             QApplication::processEvents();
+            // Late-created views keep the project-load blocker enabled. Release
+            // it only for an explicit Update, without triggering expensive
+            // picker-change precomputation while the setup dialog is closing.
+            if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked() &&
+                !mv::projects().isOpeningProject() &&
+                _mainPointsDataset.getCurrentDataset().isValid() &&
+                _embeddingDataset.getCurrentDataset().isValid() &&
+                _speciesNamesDataset.getCurrentDataset().isValid() &&
+                _bottomClusterNamesDataset.getCurrentDataset().isValid() &&
+                _referenceTreeDataset.getCurrentDataset().isValid())
+            {
+                const QSignalBlocker blocker(&_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker);
+                _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(false);
+            }
             updateButtonTriggered();
             enableActions();
 
