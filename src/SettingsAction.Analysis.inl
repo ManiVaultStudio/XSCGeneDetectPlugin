@@ -169,6 +169,9 @@ void SettingsAction::updateButtonTriggered()
         showStatusMessage(QStringLiteral("Updating selection"), QStringLiteral("#007bff"));
         removeTemporaryDatasets(); // remove only the previous update's queued dataset ids; keep linked reusable datasets
         qDebug() << "[Update] previous temporary datasets removed:" << updateTimer.elapsed() << "ms";
+        const auto logUpdateStage = [&updateTimer](const char* stage) {
+            qInfo() << "[Update]" << stage << "at" << updateTimer.elapsed() << "ms";
+        };
         auto pointsDataset = _mainPointsDataset.getCurrentDataset();
         auto embeddingDataset = _embeddingDataset.getCurrentDataset();
         auto speciesDataset = _speciesNamesDataset.getCurrentDataset();
@@ -176,7 +179,9 @@ void SettingsAction::updateButtonTriggered()
         auto referenceTreeDataset = _referenceTreeDataset.getCurrentDataset();
         // This string mirrors the linked PhyTVu species selection. Preserve it across
         // recomputations so the GeneDetect explorer remains synchronized.
+        logUpdateStage("resetting gene connection");
         _geneNamesConnection.setString("");
+        logUpdateStage("validating input datasets");
         bool isValid = false;
 
         QString referenceTreedatasetId = "";
@@ -224,6 +229,8 @@ void SettingsAction::updateButtonTriggered()
 
         std::vector<int> pointsDatasetallColumnIndices(PointStreaming::usableGeneCount(pointsDatasetallColumnNameList.size(), pointsDatasetRaw->getNumDimensions()));
         std::iota(pointsDatasetallColumnIndices.begin(), pointsDatasetallColumnIndices.end(), 0);
+        qInfo() << "[Update] input:" << pointsDatasetRaw->getNumPoints() << "cells,"
+                << _selectedIndicesFromStorage.size() << "selected," << pointsDatasetallColumnIndices.size() << "genes";
         //stopCodeTimer("Part4");
         {
 
@@ -261,8 +268,11 @@ void SettingsAction::updateButtonTriggered()
 
                     }*/
 
-                    pointsDatasetRaw->setSelectionIndices(_selectedIndicesFromStorage);
+                    // The selection was just read from this dataset. Setting it again
+                    // needlessly resolves all linked selections before creating the subset.
+                    logUpdateStage("creating selected expression subset");
                     _selectedPointsDataset = pointsDatasetRaw->createSubsetFromSelection("SelectedPointsDataset");
+                    logUpdateStage("selected expression subset created");
                     _selectedPointsDataset->setGroupIndex(groupIDDeletion);
                     trackTemporaryDataset(_selectedPointsDataset->getId(), groupIDDeletion);
 
@@ -275,8 +285,13 @@ void SettingsAction::updateButtonTriggered()
 
                     }
 
-                    embeddingDatasetRaw->setSelectionIndices(_selectedIndicesFromStorage);
+                    logUpdateStage("preparing embedding selection");
+                    if (embeddingDatasetRaw->getSelectionIndices() != _selectedIndicesFromStorage) {
+                        embeddingDatasetRaw->setSelectionIndices(_selectedIndicesFromStorage);
+                    }
+                    logUpdateStage("creating selected embedding subset");
                     _selectedPointsEmbeddingDataset = embeddingDatasetRaw->createSubsetFromSelection("TSNEDataset", _selectedPointsDataset);
+                    logUpdateStage("selected embedding subset created");
                     _selectedPointsEmbeddingDataset->setGroupIndex(groupIDDeletion);
                     trackTemporaryDataset(_selectedPointsEmbeddingDataset->getId(), groupIDDeletion);
 
@@ -355,6 +370,7 @@ void SettingsAction::updateButtonTriggered()
                     }
                     //_geneSimilarityClusters.clear();
                     //stopCodeTimer("Part6.1");
+                    logUpdateStage("temporary datasets prepared");
                     if (_selectedPointsDataset.isValid() && _selectedPointsEmbeddingDataset.isValid() && _tsneDatasetSpeciesColors.isValid() && _tsneDatasetClusterColors.isValid() && _geneSimilarityPoints.isValid() && _geneSimilarityClusterColoring.isValid())
                     {
                         //startCodeTimer("Part6.2");
@@ -364,6 +380,7 @@ void SettingsAction::updateButtonTriggered()
                         //events().notifyDatasetDataChanged(_tsneDatasetClusterColors);
                         _geneSimilarityClusterColoring->getClusters() = QVector<Cluster>();
                         events().notifyDatasetDataChanged(_geneSimilarityClusterColoring);
+                        logUpdateStage("gene similarity views cleared");
                         //stopCodeTimer("Part6.2");
                         //startCodeTimer("Part7");
                         //startCodeTimer("Part7.1");
@@ -412,6 +429,7 @@ void SettingsAction::updateButtonTriggered()
                         //startCodeTimer("Part7.2.3");
                         //needs to wait for future3 finish only
                         populatePointData(datasetIdExp, resultContainerColorPoints, selectedIndicesFromStorageSize, dimofDatasetExp, dimensionNamesExp);
+                        logUpdateStage("selection expression colors prepared");
                         //stopCodeTimer("Part7.2.3");
 
                         //stopCodeTimer("Part7.2");
@@ -560,6 +578,7 @@ void SettingsAction::updateButtonTriggered()
                             if (!usePreTSNE)
                             {
                                 //startCodeTimer("Part10");
+                                logUpdateStage("creating tSNE analysis");
                                 analysisPlugin = mv::plugins().requestPlugin<AnalysisPlugin>("tSNE Analysis", { _selectedPointsEmbeddingDataset });
                                 if (!analysisPlugin) {
                                     qDebug() << "Could not find create TSNE Analysis";
@@ -600,7 +619,9 @@ void SettingsAction::updateButtonTriggered()
                                     auto startAction = dynamic_cast<TriggerAction*>(_selectedPointsTSNEDataset->findChildByPath("TSNE/TsneComputationAction/Start"));
                                     if (startAction) {
 
+                                        logUpdateStage("starting tSNE analysis");
                                         startAction->trigger();
+                                        logUpdateStage("tSNE start returned");
 
                                         analysisPlugin->getOutputDataset()->setSelectionIndices({});
                                     }
@@ -630,14 +651,18 @@ void SettingsAction::updateButtonTriggered()
 
                                     std::iota(preComputedEmbeddingColumnIndices.begin(), preComputedEmbeddingColumnIndices.end(), 0);
 
+                                    logUpdateStage("reading selected precomputed embedding");
                                     umapDatasetRaw->populateDataForDimensions(resultContainerPreComputedUMAP, preComputedEmbeddingColumnIndices, _selectedIndicesFromStorage);
+                                    logUpdateStage("selected precomputed embedding read");
 
                                     QString datasetId = _selectedPointsTSNEDataset->getId();
                                     populatePointData(datasetId, resultContainerPreComputedUMAP, selectedIndicesFromStorageSize, preComputedEmbeddingColumnsSize, dimNames);
 
                                     if (_selectedPointsTSNEDataset.isValid())
                                     {
+                                        logUpdateStage("updating selected embedding scatterplot");
                                         scatterplotModificationsLowDimUMAP();
+                                        logUpdateStage("selected embedding scatterplot updated");
                                     }
                                 }
                                 else
@@ -659,6 +684,7 @@ void SettingsAction::updateButtonTriggered()
                     {
                         qDebug() << "Datasets are not valid";
                     }
+                    logUpdateStage("preparing species and cell-type membership");
                     std::sort(_selectedIndicesFromStorage.begin(), _selectedIndicesFromStorage.end());
 
                     // position of every cell inside the selection (-1: not selected). A flat array is much faster than a hash
@@ -711,6 +737,7 @@ void SettingsAction::updateButtonTriggered()
                         });
                     futureClusterCVals.waitForFinished(); // Wait for the concurrent task to complete
                     futureSpeciesCVals.waitForFinished();
+                    logUpdateStage("species and cell-type membership prepared");
                     //stopCodeTimer("Part12.1");
 
 
@@ -933,6 +960,7 @@ void SettingsAction::updateButtonTriggered()
                             + QLatin1Char('|') + pointsDatasetRaw->getId() + QLatin1Char('|') + QString::number(totalGeneCount) + QLatin1Char('|')
                             + QString::number(speciesCount) + QLatin1Char('|') + QString::number(_selectedIndicesFromStorage.size());
                         const bool stage1Cached = (stage1Key == _selectedMeansCache.key);
+                        logUpdateStage(stage1Cached ? "reusing selected gene means" : "computing selected gene means");
                         auto& speciesSelectedMeans = _selectedMeansCache.means; // the cache owns the matrix (no second copy)
                         if (!stage1Cached) {
                         const std::vector<std::uint64_t> geneColumns(pointsDatasetallColumnIndices.begin(), pointsDatasetallColumnIndices.end());
@@ -948,6 +976,14 @@ void SettingsAction::updateButtonTriggered()
                             SpeciesGeneSums          sums;
                             PointStreaming::SegmentColumns segment;
                         };
+                        qInfo() << "[Update] selected gene read:" << stage1Threads << "workers,"
+                                << "storage backend" << (pointsDatasetRaw->getStorageBackendType()
+                                    ? static_cast<int>(*pointsDatasetRaw->getStorageBackendType()) : -1);
+                        int lastReadProgress = -1;
+                        if (const auto storage = pointsDatasetRaw->getTiledStorage()) {
+                            qInfo() << "[Update] selected gene read: tile order, geometry"
+                                    << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
+                        }
                         const Stage1State stage1 = PointStreaming::reduceRows(pointsDatasetRaw.get(), _selectedIndicesFromStorage, stage1Threads, static_cast<std::uint64_t>(totalGeneCount),
                             [&]() {
                                 Stage1State state;
@@ -968,6 +1004,14 @@ void SettingsAction::updateButtonTriggered()
                                         into.sums[s][g] += from.sums[s][g];
                                     }
                                 }
+                            },
+                            [&](std::size_t completed, std::size_t total) {
+                                const int percent = static_cast<int>(100 * completed / total);
+                                if (lastReadProgress < 0 || percent >= lastReadProgress + 10 || completed == total) {
+                                    qInfo() << "[Update] selected gene read:" << completed << "/" << total
+                                            << "blocks (" << percent << "%) at" << updateTimer.elapsed() << "ms";
+                                    lastReadProgress = percent;
+                                }
                             });
                         const SpeciesGeneSums& speciesSums = stage1.sums;
 
@@ -986,6 +1030,7 @@ void SettingsAction::updateButtonTriggered()
                         _selectedMeansCache.key = stage1Key;
                         }
                         XSC_LOG("stage 1: done");
+                        logUpdateStage("selected gene means ready");
                         // ---- Stage 2 (parallel over species): build the per-gene statistics maps ----
                         // The outer map entries already exist (created above), so every worker only touches its own inner map.
                         struct SpeciesStatsJob { int speciesIndex; std::map<QString, Stats>* target; };
@@ -1044,6 +1089,7 @@ void SettingsAction::updateButtonTriggered()
                             });
                     }
 
+                    logUpdateStage("selected versus rest statistics ready");
                     //stopCodeTimer("Part12.2");
 
                     auto clusterColorDatasetId = _tsneDatasetClusterColors->getId();

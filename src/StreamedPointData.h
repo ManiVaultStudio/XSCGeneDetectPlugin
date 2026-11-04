@@ -23,8 +23,10 @@
 // ============================================================================
 
 #include "XSCDebug.h"
+#include "PointReadRanges.h"
 
 #include <PointData/PointData.h>
+#include <PointData/storage/tiled/PointDataTiledStorage.h>
 #include <biovault_bfloat16/biovault_bfloat16.h>
 
 #include <algorithm>
@@ -34,6 +36,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <system_error>
@@ -474,12 +477,15 @@ inline void forEachBlockParallel(std::vector<State>& states, const std::size_t b
  *                                          rowIds, row indexes the view, offset is the absolute column position of
  *                                          the view's first column.
  *  - merge(into, from)                     combines two states
+ *  - progress(completed, total)             optional serialized callback after each block;
+ *                                          may run on a worker thread, so must not touch UI objects
  *
  * Throws std::out_of_range / std::runtime_error when the delivered views do not match the request.
  */
 template <typename RowContainer, typename Make, typename Visit, typename Merge>
 inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, std::uint64_t columnCount,
-                       Make&& make, Visit&& visit, Merge&& merge)
+                       Make&& make, Visit&& visit, Merge&& merge,
+                       const std::function<void(std::size_t, std::size_t)>& progress = {})
     -> decltype(make())
 {
     using State = decltype(make());
@@ -531,6 +537,65 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     const auto sortedRowAt = [&](const std::size_t position) -> std::uint64_t {
         return alreadySorted ? static_cast<std::uint64_t>(rowIds[position]) : rows[position];
     };
+
+    // Read tiled data in physical tile order. Reading all genes of each cell
+    // cycles through column tiles and can evict them before the next cell.
+    // One job owns all selected cells in a tile row; it finishes one column
+    // tile for those cells before moving to the next tile. This also prevents
+    // different workers from repeatedly loading the same tile row.
+    const auto tiledStorage = !points->isProxy() && points->isFull() ? points->getTiledStorage() : nullptr;
+    if (tiledStorage) {
+        if (tiledStorage->rowTileSize() == 0 || tiledStorage->columnTileSize() == 0)
+            throw std::runtime_error("PointStreaming: invalid tile geometry");
+        if (sortedRowAt(rowCount - 1) >= tiledStorage->rows())
+            throw std::out_of_range("PointStreaming: requested row ID is out of range");
+
+        std::vector<std::pair<std::size_t, std::size_t>> jobs;
+        for (std::size_t first = 0; first < rowCount;) {
+            const auto end = tileReadEnd(first, rowCount, tiledStorage->rowTileSize(), sortedRowAt);
+            jobs.emplace_back(first, end);
+            first = end;
+        }
+        const auto workers = std::min(workerCount(threads, rowCount), jobs.size());
+        std::vector<State> states;
+        states.reserve(workers);
+        for (std::size_t w = 0; w < workers; ++w)
+            states.push_back(make());
+
+        std::mutex progressMutex;
+        std::size_t completed = 0;
+        forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
+            const auto [begin, end] = jobs[job];
+            for (std::uint64_t column = 0; column < columnCount;) {
+                const auto width = std::min<std::uint64_t>(tiledStorage->columnTileSize(), columnCount - column);
+                for (std::size_t first = begin; first < end;) {
+                    const auto row = sortedRowAt(first);
+                    std::size_t next = first + 1;
+                    while (next < end && sortedRowAt(next) == row)
+                        ++next;
+                    std::uint64_t offset = column;
+                    points->visitRange(row, 1, column, width, [&](const PointDataAccessView& view) {
+                        if (view.rows != 1 || view.columns == 0 || view.columns > column + width - offset)
+                            throw std::runtime_error("PointStreaming: invalid tiled row segment");
+                        for (auto q = first; q < next; ++q)
+                            visit(state, order.empty() ? q : order[q], view, 0, offset);
+                        offset += view.columns;
+                    });
+                    if (offset != column + width)
+                        throw std::runtime_error("PointStreaming: incomplete tiled row segment");
+                    first = next;
+                }
+                column += width;
+            }
+            if (progress) {
+                const std::lock_guard<std::mutex> lock(progressMutex);
+                progress(++completed, jobs.size());
+            }
+        });
+        for (std::size_t w = 1; w < workers; ++w)
+            merge(states[0], states[w]);
+        return std::move(states[0]);
+    }
 
     // Workers and blocks. Every worker gets several blocks, so small selections still use all workers.
     const std::size_t workers = workerCount(threads, rowCount);
@@ -701,15 +766,16 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             }
         }
         else {
-            // Coalesce nearby sparse rows into bounded ranges. A row-list
-            // backend otherwise reopens/decompresses the same tiles per cell.
+            // Coalesce only nearby sparse rows. A byte limit alone can read
+            // nearly the entire dataset for a scattered selection; also cap
+            // the number of fetched rows relative to the requested rows.
             const std::uint64_t maxSpan = std::max<std::uint64_t>(1,
                 kTargetReadBytes / (std::max<std::uint64_t>(1, columnCount) * sizeof(float)));
             std::size_t groupIndex = 0;
             while (groupIndex < groups.size()) {
                 const std::uint64_t first = groups[groupIndex].row;
-                std::size_t next = groupIndex + 1;
-                while (next < groups.size() && groups[next].row - first < maxSpan) ++next;
+                const std::size_t next = boundedReadEnd(groupIndex, groups.size(), maxSpan, kMaxSpanFactor,
+                    [&](std::size_t index) { return groups[index].row; });
                 const std::uint64_t count = groups[next-1].row - first + 1;
                 std::uint64_t batchFirst = first, offset = 0;
                 readRange(first, count, deliverFor(false, groupIndex, batchFirst, offset, columnCount));
@@ -719,6 +785,8 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
         }
     };
 
+    std::mutex progressMutex;
+    std::size_t completedBlocks = 0;
     const auto processBlocks = [&](const void* eagerData, const std::uint32_t elementType,
                                    const std::uint32_t elementSize, const std::uint64_t pointCount) {
         if (eagerData) {
@@ -729,6 +797,10 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
         }
         forEachBlockParallel(states, blockCount, [&](const std::size_t b, State& state) {
             readBlock(b, state, eagerData, elementType, elementSize);
+            if (progress) {
+                const std::lock_guard<std::mutex> lock(progressMutex);
+                progress(++completedBlocks, blockCount);
+            }
         });
     };
 
