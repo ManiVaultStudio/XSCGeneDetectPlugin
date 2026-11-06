@@ -276,6 +276,12 @@ void SettingsAction::updateButtonTriggered()
         }
 
         qInfo() << "Computing gene mean expression map";
+        const QPointer<mv::Task> progressTask(context->getTask());
+        if (progressTask)
+        {
+            progressTask->setName(QStringLiteral("Compute gene mean expression map"));
+            progressTask->setProgressDescription(QStringLiteral("Scanning species-wide baseline means..."));
+        }
         QElapsedTimer scanTimer;
         scanTimer.start();
         qInfo() << "[Baseline] scanning" << data->points->getNumPoints() << "cells," << data->geneColumns.size()
@@ -283,12 +289,14 @@ void SettingsAction::updateButtonTriggered()
         int lastProgressPercent = -1;
         const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), data->speciesRows, data->geneColumns,
             data->workerLimit, data->memoryBudgetBytes, false,
-            [context, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [context, progressTask, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
                 if (total > 0)
                     context->setProgress(static_cast<double>(completed) / static_cast<double>(total));
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
                 if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total)
                 {
+                    if (progressTask)
+                        progressTask->setProgressDescription(QStringLiteral("Baseline means: %1% (%2 / %3 blocks)").arg(percent).arg(completed).arg(total));
                     qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent << "% ) at" << scanTimer.elapsed() << "ms";
                     lastProgressPercent = percent;
                 }
@@ -304,6 +312,8 @@ void SettingsAction::updateButtonTriggered()
             for (std::size_t geneIndex = 0; geneIndex < data->geneColumns.size(); ++geneIndex)
                 means[data->dimensionNames[geneIndex]] = { static_cast<int>(count), static_cast<float>(aggregated.sums[speciesIndex][geneIndex] / count) };
         }
+        if (progressTask)
+            progressTask->setProgressDescription(QStringLiteral("Baseline means ready; continuing selection update..."));
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.45);
 
@@ -312,6 +322,12 @@ void SettingsAction::updateButtonTriggered()
         {
             context->setProgress(1.0);
             return;
+        }
+
+        if (const auto task = context->getTask())
+        {
+            task->setName(QStringLiteral("Scan selected gene means"));
+            task->setProgressDescription(QStringLiteral("Reading selected cells..."));
         }
 
         using SpeciesGeneSums = std::vector<std::vector<double>>;
@@ -352,7 +368,7 @@ void SettingsAction::updateButtonTriggered()
                     for (std::size_t geneIndex = 0; geneIndex < into.sums[speciesIndex].size(); ++geneIndex)
                         into.sums[speciesIndex][geneIndex] += from.sums[speciesIndex][geneIndex];
             },
-            [context, &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [context, task = QPointer<mv::Task>(context->getTask()), &lastProgressPercent](std::size_t completed, std::size_t total) {
                 const double progress = total > 0 ? static_cast<double>(completed) / static_cast<double>(total) : 1.0;
                 context->setProgress(progress);
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
@@ -360,7 +376,11 @@ void SettingsAction::updateButtonTriggered()
                 if (percent >= previous + 10 || completed == total)
                 {
                     if (lastProgressPercent.compare_exchange_strong(previous, percent))
+                    {
+                        if (task)
+                            task->setProgressDescription(QStringLiteral("Selected gene means: %1% (%2 / %3 blocks)").arg(percent).arg(completed).arg(total));
                         qInfo() << "[Update] selected gene read:" << completed << "/" << total << "blocks (" << percent << "% )";
+                    }
                 }
             });
 
@@ -429,9 +449,11 @@ void SettingsAction::updateButtonTriggered()
     }
     if (auto task = future.getTask())
     {
-        // Use the application's live foreground-task popup for progress; no
-        // notification-manager API exposure is needed for a workflow task.
         task->setGuiScopes({ mv::Task::GuiScope::Foreground });
+        auto notification = new mv::util::Notification(QPointer<mv::Task>(task), nullptr);
+        QObject::connect(notification, &mv::util::Notification::finished, notification, &QObject::deleteLater);
+        notification->show();
+        notification->raise();
     }
     future.onFinished(this, [this, data](const mv::workflow::SharedWorkflowResult& result) {
         stopCodeTimer("UpdateGeneFilteringTrigger");
