@@ -1,6 +1,9 @@
 #include "StreamedPointData.h"
 #include "SettingsAction.h"
 #include "XSCGeneDetectPlugin.h"
+#include <Application.h>
+#include <Task.h>
+#include <workflow/WorkflowOptions.h>
 #include<string>  
 #include <QFileDialog>
 #include <QFileInfo>

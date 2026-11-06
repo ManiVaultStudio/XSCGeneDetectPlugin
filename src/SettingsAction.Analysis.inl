@@ -149,7 +149,324 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
 }
 void SettingsAction::updateButtonTriggered()
 {
-    XSC_TRACE("SettingsAction::updateButtonTriggered");
+    if (_updateWorkflowRunning)
+        return;
+
+    struct UpdateWorkflowData
+    {
+        using BaselineMeans = std::unordered_map<QString, std::unordered_map<QString, std::pair<int, float>>>;
+
+        mv::Dataset<Points> points;
+        QString pointsId;
+        QString baselineSignature;
+        std::vector<std::seed_seq::result_type> selectedRows;
+        std::vector<std::vector<std::uint64_t>> speciesRows;
+        std::vector<QString> speciesNames;
+        std::vector<QString> dimensionNames;
+        std::vector<int> geneColumns;
+        std::vector<int> selectedSpeciesIndex;
+        std::vector<std::size_t> selectedCellCounts;
+        QString selectedMeansKey;
+        int workerLimit = 1;
+        std::size_t memoryBudgetBytes = 64u << 20;
+        bool inputsReady = false;
+        bool needsBaselineScan = false;
+        bool needsSelectedScan = false;
+        bool staleInputs = false;
+        bool published = false;
+        BaselineMeans baselineMeans;
+        std::vector<std::vector<float>> selectedMeans;
+    };
+
+    const auto data = std::make_shared<UpdateWorkflowData>();
+    auto workflow = std::make_unique<mv::workflow::WorkflowPlan>(QStringLiteral("Update selection statistics"));
+
+    workflow->addSequentialStage(QStringLiteral("Prepare selection update"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        showStatusMessage(QStringLiteral("Preparing selection update..."), QStringLiteral("#007bff"));
+
+        const auto pointsPicker = _mainPointsDataset.getCurrentDataset();
+        const auto embeddingPicker = _embeddingDataset.getCurrentDataset();
+        const auto speciesPicker = _speciesNamesDataset.getCurrentDataset();
+        const auto clusterPicker = _bottomClusterNamesDataset.getCurrentDataset();
+        const auto treePicker = _referenceTreeDataset.getCurrentDataset();
+        if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked() || !pointsPicker.isValid() || !embeddingPicker.isValid() ||
+            !speciesPicker.isValid() || !clusterPicker.isValid() || !treePicker.isValid())
+        {
+            context->setProgress(1.0);
+            return;
+        }
+
+        data->points = mv::data().getDataset<Points>(pointsPicker->getId());
+        auto embeddingPoints = mv::data().getDataset<Points>(embeddingPicker->getId());
+        auto species = mv::data().getDataset<Clusters>(speciesPicker->getId());
+        auto clusters = mv::data().getDataset<Clusters>(clusterPicker->getId());
+        auto referenceTree = mv::data().getDataset<XSCTree>(treePicker->getId());
+        if (!data->points.isValid() || !embeddingPoints.isValid() || !species.isValid() || !clusters.isValid() || !referenceTree.isValid() ||
+            speciesPicker->getParent() != pointsPicker || clusterPicker->getParent() != pointsPicker || embeddingPicker->getParent() != pointsPicker)
+        {
+            context->setProgress(1.0);
+            return;
+        }
+
+        const auto selected = data->points->getSelectionIndices();
+        data->pointsId = data->points->getId();
+        data->baselineSignature = currentMeanMapSignature();
+        data->selectedRows.assign(selected.begin(), selected.end());
+        data->dimensionNames = data->points->getDimensionNames();
+        const auto geneCount = PointStreaming::usableGeneCount(data->dimensionNames.size(), data->points->getNumDimensions());
+        data->geneColumns.resize(geneCount);
+        std::iota(data->geneColumns.begin(), data->geneColumns.end(), 0);
+        data->workerLimit = std::max(1, _maxWorkerThreads.getValue());
+        data->memoryBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
+
+        const auto speciesClusters = species->getClusters();
+        data->speciesRows.reserve(speciesClusters.size());
+        data->speciesNames.reserve(speciesClusters.size());
+        for (const auto& speciesCluster : speciesClusters)
+        {
+            data->speciesNames.push_back(speciesCluster.getName());
+            data->speciesRows.emplace_back(speciesCluster.getIndices().begin(), speciesCluster.getIndices().end());
+        }
+
+        data->needsBaselineScan = !_meanMapComputed || _meanMapSignature != data->baselineSignature;
+        const auto hashInts = [](std::uint64_t seed, const auto& values) {
+            std::uint64_t hash = seed;
+            for (const auto value : values)
+                hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(value)) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+            return hash;
+        };
+
+        std::vector<int> selectedPositionOf(static_cast<std::size_t>(data->points->getNumPoints()), -1);
+        for (int selectedPosition = 0; selectedPosition < static_cast<int>(data->selectedRows.size()); ++selectedPosition)
+        {
+            const auto globalIndex = static_cast<std::size_t>(data->selectedRows[selectedPosition]);
+            if (globalIndex < selectedPositionOf.size())
+                selectedPositionOf[globalIndex] = selectedPosition;
+        }
+
+        data->selectedSpeciesIndex.assign(data->selectedRows.size(), -1);
+        data->selectedCellCounts.assign(data->speciesRows.size(), 0);
+        for (std::size_t speciesIndex = 0; speciesIndex < data->speciesRows.size(); ++speciesIndex)
+        {
+            for (const auto globalIndex : data->speciesRows[speciesIndex])
+            {
+                const auto selectedPosition = globalIndex < selectedPositionOf.size() ? selectedPositionOf[static_cast<std::size_t>(globalIndex)] : -1;
+                if (selectedPosition >= 0)
+                {
+                    data->selectedSpeciesIndex[static_cast<std::size_t>(selectedPosition)] = static_cast<int>(speciesIndex);
+                    ++data->selectedCellCounts[speciesIndex];
+                }
+            }
+        }
+
+        data->selectedMeansKey = QString::number(hashInts(hashInts(1469598103934665603ull, data->selectedRows), data->selectedSpeciesIndex), 16)
+            + QLatin1Char('|') + data->pointsId + QLatin1Char('|') + QString::number(geneCount) + QLatin1Char('|')
+            + QString::number(data->speciesRows.size()) + QLatin1Char('|') + QString::number(data->selectedRows.size());
+        data->needsSelectedScan = !data->selectedRows.empty() && !data->speciesRows.empty() && !data->geneColumns.empty()
+            && data->selectedMeansKey != _selectedMeansCache.key;
+        data->inputsReady = true;
+        context->setProgress(1.0);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.05);
+
+    workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        if (!data->inputsReady || !data->needsBaselineScan)
+        {
+            context->setProgress(1.0);
+            return;
+        }
+
+        qInfo() << "Computing gene mean expression map";
+        QElapsedTimer scanTimer;
+        scanTimer.start();
+        qInfo() << "[Baseline] scanning" << data->points->getNumPoints() << "cells," << data->geneColumns.size()
+                << "genes across" << data->speciesRows.size() << "species";
+        int lastProgressPercent = -1;
+        const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), data->speciesRows, data->geneColumns,
+            data->workerLimit, data->memoryBudgetBytes, false,
+            [context, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
+                if (total > 0)
+                    context->setProgress(static_cast<double>(completed) / static_cast<double>(total));
+                const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
+                if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total)
+                {
+                    qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent << "% ) at" << scanTimer.elapsed() << "ms";
+                    lastProgressPercent = percent;
+                }
+            });
+
+        for (std::size_t speciesIndex = 0; speciesIndex < data->speciesRows.size(); ++speciesIndex)
+        {
+            auto& means = data->baselineMeans[data->speciesNames[speciesIndex]];
+            means.reserve(data->geneColumns.size());
+            const auto count = aggregated.counts[speciesIndex];
+            if (count == 0)
+                continue;
+            for (std::size_t geneIndex = 0; geneIndex < data->geneColumns.size(); ++geneIndex)
+                means[data->dimensionNames[geneIndex]] = { static_cast<int>(count), static_cast<float>(aggregated.sums[speciesIndex][geneIndex] / count) };
+        }
+        context->setProgress(1.0);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.45);
+
+    workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        if (!data->inputsReady || !data->needsSelectedScan || data->geneColumns.empty())
+        {
+            context->setProgress(1.0);
+            return;
+        }
+
+        using SpeciesGeneSums = std::vector<std::vector<double>>;
+        struct Stage1State
+        {
+            SpeciesGeneSums sums;
+            PointStreaming::SegmentColumns segment;
+        };
+
+        const auto speciesCount = data->speciesRows.size();
+        const auto totalGeneCount = data->geneColumns.size();
+        const auto stage1TableBytes = speciesCount * totalGeneCount * sizeof(double);
+        const int stage1Threads = std::max(1, std::min({ data->workerLimit,
+            static_cast<int>(std::thread::hardware_concurrency()),
+            static_cast<int>(data->memoryBudgetBytes / (stage1TableBytes + PointStreaming::kTargetReadBytes)) }));
+        const std::vector<std::uint64_t> geneColumns(data->geneColumns.begin(), data->geneColumns.end());
+        qInfo() << "[Update] selected gene read:" << stage1Threads << "workers, storage backend"
+                << (data->points->getStorageBackendType() ? static_cast<int>(*data->points->getStorageBackendType()) : -1);
+        if (const auto storage = data->points->getTiledStorage())
+            qInfo() << "[Update] selected gene read: tile order, geometry" << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
+
+        std::atomic<int> lastProgressPercent { -1 };
+        const auto stage1 = PointStreaming::reduceRows(data->points.get(), data->selectedRows, stage1Threads, static_cast<std::uint64_t>(totalGeneCount),
+            [speciesCount, totalGeneCount]() {
+                Stage1State state;
+                state.sums.assign(speciesCount, std::vector<double>(totalGeneCount, 0.0));
+                return state;
+            },
+            [data, &geneColumns](Stage1State& state, std::size_t selectedRowIndex, const PointDataAccessView& view, std::uint64_t row, std::uint64_t offset) {
+                const int speciesIndex = data->selectedSpeciesIndex[selectedRowIndex];
+                if (speciesIndex < 0)
+                    return;
+                state.segment.update(geneColumns, offset, view.columns);
+                PointStreaming::accumulateSegment(view, row, state.segment, state.sums[static_cast<std::size_t>(speciesIndex)].data(), nullptr);
+            },
+            [](Stage1State& into, Stage1State& from) {
+                for (std::size_t speciesIndex = 0; speciesIndex < into.sums.size(); ++speciesIndex)
+                    for (std::size_t geneIndex = 0; geneIndex < into.sums[speciesIndex].size(); ++geneIndex)
+                        into.sums[speciesIndex][geneIndex] += from.sums[speciesIndex][geneIndex];
+            },
+            [context, &lastProgressPercent](std::size_t completed, std::size_t total) {
+                const double progress = total > 0 ? static_cast<double>(completed) / static_cast<double>(total) : 1.0;
+                context->setProgress(progress);
+                const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
+                int previous = lastProgressPercent.load();
+                if (percent >= previous + 10 || completed == total)
+                {
+                    if (lastProgressPercent.compare_exchange_strong(previous, percent))
+                        qInfo() << "[Update] selected gene read:" << completed << "/" << total << "blocks (" << percent << "% )";
+                }
+            });
+
+        data->selectedMeans.assign(speciesCount, std::vector<float>(totalGeneCount, 0.0f));
+        for (std::size_t speciesIndex = 0; speciesIndex < speciesCount; ++speciesIndex)
+        {
+            const auto selectedCount = data->selectedCellCounts[speciesIndex];
+            if (selectedCount == 0)
+                continue;
+            for (std::size_t geneIndex = 0; geneIndex < totalGeneCount; ++geneIndex)
+                data->selectedMeans[speciesIndex][geneIndex] = static_cast<float>(stage1.sums[speciesIndex][geneIndex] / static_cast<double>(selectedCount));
+        }
+        context->setProgress(1.0);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.35);
+
+    workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        if (data->inputsReady)
+        {
+            auto currentPoints = _mainPointsDataset.getCurrentDataset();
+            const auto currentSelection = currentPoints.isValid() ? currentPoints->getSelectionIndices() : std::vector<std::seed_seq::result_type>{};
+            if (!currentPoints.isValid() || currentPoints->getId() != data->pointsId || currentMeanMapSignature() != data->baselineSignature || currentSelection != data->selectedRows)
+            {
+                data->staleInputs = true;
+                context->setProgress(1.0);
+                return;
+            }
+
+            if (data->needsBaselineScan)
+            {
+                _clusterGeneMeanExpressionMap = std::move(data->baselineMeans);
+                _meanMapComputed = true;
+                _meanMapSignature = data->baselineSignature;
+            }
+            if (data->needsSelectedScan)
+            {
+                _selectedMeansCache.key = data->selectedMeansKey;
+                _selectedMeansCache.means = std::move(data->selectedMeans);
+            }
+
+            updateButtonTriggeredCore(context);
+            data->published = true;
+        }
+        context->setProgress(1.0);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.15);
+
+    mv::workflow::WorkflowOptions options;
+    options.reporting.progress = true;
+    options.reporting.finishedNotification = false;
+
+    _updateWorkflowRunning = true;
+    startCodeTimer("UpdateGeneFilteringTrigger");
+    mv::workflow::WorkflowResultFuture future;
+    try
+    {
+        future = mv::Application::getWorkflowPlanExecutor().execute(std::move(workflow), nullptr, options);
+    }
+    catch (const std::exception& exception)
+    {
+        stopCodeTimer("UpdateGeneFilteringTrigger");
+        _updateWorkflowRunning = false;
+        _pauseStatusUpdates = false;
+        showStatusMessage(QStringLiteral("Could not start selection update: %1").arg(QString::fromUtf8(exception.what())), QStringLiteral("#dc3545"));
+        _statusColorAction.setString("E");
+        enableActions();
+        return;
+    }
+    if (auto task = future.getTask())
+    {
+        // Use the application's live foreground-task popup for progress; no
+        // notification-manager API exposure is needed for a workflow task.
+        task->setGuiScopes({ mv::Task::GuiScope::Foreground });
+    }
+    future.onFinished(this, [this, data](const mv::workflow::SharedWorkflowResult& result) {
+        stopCodeTimer("UpdateGeneFilteringTrigger");
+        _updateWorkflowRunning = false;
+
+        if (data->staleInputs)
+        {
+            showStatusMessage(QStringLiteral("Selection or datasets changed during the update. Run Update again."), QStringLiteral("#d99500"));
+            _statusColorAction.setString("M");
+        }
+        else if (!result || result->getStatus() != mv::workflow::WorkflowResultBase::Status::Success)
+        {
+            showStatusMessage(QStringLiteral("Selection update failed."), QStringLiteral("#dc3545"));
+            _statusColorAction.setString("E");
+        }
+        else if (_statusColorAction.getString() != "E")
+        {
+            _statusColorAction.setString("C");
+        }
+
+        _pauseStatusUpdates = false;
+        enableActions();
+        QApplication::processEvents();
+        if (data->published && !data->staleInputs)
+        {
+            auto pointsDataset = _mainPointsDataset.getCurrentDataset();
+            if (pointsDataset.isValid())
+                pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+        }
+    });
+}
+
+void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflowExecutionContext& publicationContext)
+{
+    XSC_TRACE("SettingsAction::updateButtonTriggeredCore");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
     {
         qDebug() << "Map for hierarchy items change method stop for project load blocker is checked";
@@ -158,7 +475,6 @@ void SettingsAction::updateButtonTriggered()
 
     try {
         // _startComputationTriggerAction.setDisabled(true);
-        startCodeTimer("UpdateGeneFilteringTrigger");
         //startCodeTimer("Part1");
 
         int groupIDDeletion = 10;
@@ -169,8 +485,20 @@ void SettingsAction::updateButtonTriggered()
         showStatusMessage(QStringLiteral("Updating selection"), QStringLiteral("#007bff"));
         removeTemporaryDatasets(); // remove only the previous update's queued dataset ids; keep linked reusable datasets
         qDebug() << "[Update] previous temporary datasets removed:" << updateTimer.elapsed() << "ms";
-        const auto logUpdateStage = [&updateTimer](const char* stage) {
+        const auto logUpdateStage = [&updateTimer, &publicationContext](const char* stage) {
             qInfo() << "[Update]" << stage << "at" << updateTimer.elapsed() << "ms";
+            const QString stageName = QString::fromLatin1(stage);
+            double progress = 0.02;
+            if (stageName == QStringLiteral("selected expression subset created")) progress = 0.12;
+            else if (stageName == QStringLiteral("preparing embedding selection")) progress = 0.18;
+            else if (stageName == QStringLiteral("selected embedding subset created")) progress = 0.28;
+            else if (stageName == QStringLiteral("temporary datasets prepared")) progress = 0.38;
+            else if (stageName == QStringLiteral("species and cell-type membership prepared")) progress = 0.48;
+            else if (stageName == QStringLiteral("selected gene means ready")) progress = 0.65;
+            else if (stageName == QStringLiteral("selected versus rest statistics ready")) progress = 0.76;
+            else if (stageName == QStringLiteral("expression statistics finished")) progress = 0.86;
+            else if (stageName == QStringLiteral("top genes and gene table model finished")) progress = 0.96;
+            publicationContext->setProgress(progress);
         };
         auto pointsDataset = _mainPointsDataset.getCurrentDataset();
         auto embeddingDataset = _embeddingDataset.getCurrentDataset();
@@ -1246,7 +1574,6 @@ void SettingsAction::updateButtonTriggered()
             //enableDisableButtonsAutomatically();
 
         }
-        stopCodeTimer("UpdateGeneFilteringTrigger");
         showStatusMessage(QStringLiteral("Selection ready"), QStringLiteral("#28a745"));
         //_startComputationTriggerAction.setDisabled(false);
     }

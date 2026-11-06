@@ -17,6 +17,7 @@
 #include "DataHierarchyItem.h"
 #include "Set.h"
 #include <AnalysisPlugin.h>
+#include <workflow/WorkflowPlan.h>
 #include <QGuiApplication>
 #include <memory>
 #include <atomic>
@@ -682,6 +683,7 @@ private:
 
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
+    void updateButtonTriggeredCore(const mv::workflow::SharedWorkflowExecutionContext& publicationContext);
     void setModifiedTriggeredData(QVariant geneListTable);
 public: // Serialization
 
@@ -780,6 +782,7 @@ protected:
     ToggleAction    _toggleScatterplotSelection;
     //bool _erroredOutFlag;
     bool _meanMapComputed = false;
+    bool _updateWorkflowRunning = false;
     QString _meanMapSignature;       /** datasets the cached species means were computed for */
     OptionAction                _clusterCountSortingType;
 

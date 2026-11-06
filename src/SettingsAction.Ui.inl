@@ -586,6 +586,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateGeneFilteringTrigger = [this]() -> void
         {
+            if (_updateWorkflowRunning)
+                return;
+
             disableActions();
             _pauseStatusUpdates = true;
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
@@ -606,18 +609,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                 _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.setChecked(false);
             }
             updateButtonTriggered();
-            // Model publication normally releases this pause, but a first-load
-            // initialization failure or an empty result may publish no model.
-            _pauseStatusUpdates = false;
-            enableActions();
-
-            QApplication::processEvents();
-            auto pointsDataset = _mainPointsDataset.getCurrentDataset();
-            if (pointsDataset.isValid())
-            {
-                pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
-            }
-            _statusColorAction.setString("C");
+            // updateButtonTriggered() now continues asynchronously through the
+            // workflow; its completion callback resumes status updates and the UI.
 
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
