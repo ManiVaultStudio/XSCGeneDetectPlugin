@@ -22,7 +22,9 @@ public:
             QObject::connect(_timer, &QTimer::timeout, _task, [this] { publish(); });
         }
         _state = std::make_shared<OperationProgressState>();
-        _task->setName(name); _task->setProgress(0, "Queued"); _task->setRunning(); _timer->start();
+        _task->setName(name); _task->setRunning(); _task->setProgress(0);
+        _task->setProgressDescription(QStringLiteral("Queued"));
+        _timer->start();
         return _state;
     }
     State state() const { return _state; }
@@ -47,7 +49,8 @@ private:
             if (total) text += QString(" (%1 / %2)").arg(_state->done.load()).arg(total);
             fraction = _state->value.load();
         }
-        _task->setProgress(fraction, text);
+        if (_task->getProgressDescription() != text) _task->setProgressDescription(text);
+        _task->setProgress(fraction);
     }
     QPointer<mv::Task> _task;
     QPointer<QTimer> _timer;

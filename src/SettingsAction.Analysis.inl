@@ -2854,7 +2854,15 @@ void SettingsAction::onTraitJobsFinished()
     }
     if (failed) {
         _traitProgress.cancel();
-        showStatusMessage(QStringLiteral("Trait data could not be read. Run Update to retry."), QStringLiteral("#dc3545"));
+        QString reason = QStringLiteral("The expression read did not finish.");
+        try {
+            _traitJobWatcher.future().waitForFinished();
+        } catch (const std::exception& error) {
+            reason = QString::fromUtf8(error.what());
+        } catch (...) {
+            reason = QStringLiteral("The expression reader reported an unknown error.");
+        }
+        showStatusMessage(QStringLiteral("Trait expression unavailable: %1").arg(reason), QStringLiteral("#dc3545"));
         if (_deWorkflow.active) requestSpeciesDifferentialExpression();
         return;
     }
@@ -3148,6 +3156,7 @@ void SettingsAction::computeTraitCorrelation()
                 const auto source = datasetHandle->get();
                 const bool tiledSource = !source->isProxy() && source->isFull() && static_cast<bool>(PointStreamingDetail::tiledStorage(source));
                 bool groupedRead = tiledSource || requestedGenes.size() >= 32 || requestedGenes.size() * 4 >= geneSpan;
+                if (!tiledSource && requestedGenes.size() == 1) groupedRead = false;
                 if (groupedRead) {
                     std::vector<std::vector<std::uint64_t>> groupedPoints;
                     groupedPoints.reserve(jobs->size());
@@ -3195,11 +3204,24 @@ void SettingsAction::computeTraitCorrelation()
                 if (!groupedRead) {
                     QThreadPool pool;
                     pool.setMaxThreadCount(workers);
+                    std::atomic_size_t completedJobs{0};
                     QtConcurrent::blockingMap(&pool, *jobs, [&](TraitEntryJob& job) {
+                        if (*cancel) return;
                         const std::vector<int> points = intersectSortedIndicesToInt(*job.speciesPoints, *job.cellTypePoints);
                         job.entry.cellCount = static_cast<int>(points.size());
                         if (points.empty()) {
                             job.entry.known.assign(job.entry.known.size(), 1);
+                            progress->advance(++completedJobs, jobs->size(), 0.02f, 0.60f);
+                            return;
+                        }
+                        if (job.genes.size() == 1 && !tiledSource) {
+                            const auto gene = job.genes.front();
+                            const auto values = PointStreaming::fetchColumnValues(source, gene, points,
+                                [cancel] { return cancel->load(); });
+                            job.entry.means[static_cast<size_t>(gene)] = static_cast<float>(
+                                std::accumulate(values.begin(), values.end(), 0.0) / values.size());
+                            job.entry.known[static_cast<size_t>(gene)] = 1;
+                            progress->advance(++completedJobs, jobs->size(), 0.02f, 0.60f);
                             return;
                         }
                         computeChunkedGeneMeans(*datasetHandle, job.genes, points,
@@ -3211,6 +3233,7 @@ void SettingsAction::computeTraitCorrelation()
                                     job.entry.known[gene] = 1;
                                 }
                             });
+                        progress->advance(++completedJobs, jobs->size(), 0.02f, 0.60f);
                     });
                 }
                 QMetaObject::invokeMethod(this, [this, cancel]() {

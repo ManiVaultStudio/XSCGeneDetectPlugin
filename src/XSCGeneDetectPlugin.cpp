@@ -4203,7 +4203,10 @@ void XSCGeneDetectPlugin::showSpeciesDe()
 
     auto* dialog = static_cast<SpeciesDeDialog*>(_speciesDeDialog.data());
     dialog->setControls(_settingsAction.getDeDirection().getCurrentIndex(), _settingsAction.getDeTopGenes().getValue(), _settingsAction.getDeRankBy().getCurrentIndex());
-    dialog->setStatus("Computing");
+    if (_settingsAction.getSpeciesDeResult().valid)
+        refreshSpeciesDe();
+    else
+        dialog->setStatus("Computing");
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
@@ -4268,13 +4271,20 @@ void XSCGeneDetectPlugin::refreshTraitColumnVisibility()
 {
     auto* view = _settingsAction.getGeneTableView();
     if (!view || !view->model() || view->model()->columnCount() <= kTraitCorrelationColumn) return;
-    const auto gene = _settingsAction.getSelectedGeneAction().getString();
     const auto& values = _settingsAction.getGeneTraitValues();
-    const auto selected = values.find(gene);
-    const bool ready = selected != values.end() && std::isfinite(selected->second);
+    const bool hasValues = std::any_of(values.begin(), values.end(),
+        [](const auto& entry) { return std::isfinite(entry.second); });
+    if (hasValues) view->model()->setProperty("xscTraitColumnHasResults", true);
+    const bool ready = view->model()->property("xscTraitColumnHasResults").toBool();
     const auto header = view->model()->headerData(kTraitCorrelationColumn, Qt::Horizontal).toString();
     const bool wanted = _settingsAction.getHiddenShowncolumns().getSelectedOptions().contains(header);
     const bool hidden = !ready || !wanted;
+    auto* sections = view->horizontalHeader();
+    const int traitIndex = sections->visualIndex(kTraitCorrelationColumn);
+    const int weightedIndex = sections->visualIndex(kWeightedAppearanceColumn);
+    const int targetIndex = weightedIndex + (traitIndex > weightedIndex ? 1 : 0);
+    if (traitIndex >= 0 && weightedIndex >= 0 && traitIndex != targetIndex)
+        sections->moveSection(traitIndex, targetIndex);
     if (view->isColumnHidden(kTraitCorrelationColumn) != hidden) {
         view->setColumnHidden(kTraitCorrelationColumn, hidden);
         fitGeneTableWidth(view);
