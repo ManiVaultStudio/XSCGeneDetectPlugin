@@ -21,6 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include<actions/ColorMap1DAction.h>
+#include <QImage>
 //#include<QTooltip>
 #include <QRegularExpression> 
 #include <QStyledItemDelegate>
@@ -2678,21 +2679,30 @@ private:
 // ============================================================================================================
 
 /**
- * Heatmap with row/column labels, a diverging colour scale, zoom (wheel; Shift: columns only, Ctrl: rows only), pan (drag),
+ * Heatmap with row/column labels, a Viridis colour scale, zoom (wheel; Shift: columns only, Ctrl: rows only), pan (drag),
  * hover details and clicks on cells and labels. Selected rows and columns are outlined and labelled in the blue that marks
  * the selection everywhere in the plugin. (No Q_OBJECT: the owner is informed through callbacks.)
  */
 class HeatmapWidget : public QWidget
 {
 public:
-    explicit HeatmapWidget(QWidget* parent = nullptr) : QWidget(parent)
+    explicit HeatmapWidget(QWidget* parent = nullptr) :
+        QWidget(parent),
+        _colorMap(this, QStringLiteral("1D Color map"), QStringLiteral("Viridis"))
     {
+        _colorMapImage = _colorMap.getColorMapImage();
+        connect(&_colorMap, &ColorMapAction::imageChanged, this, [this](const QImage& image) {
+            _colorMapImage = image;
+            update();
+        });
         setMinimumSize(240, 180);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         updateLabelMetrics();
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
     }
+
+    ColorMap1DAction& colorMap() { return _colorMap; }
 
     void setData(const QStringList& rowLabels, const QStringList& columnLabels, const QVector<QVector<float>>& values, const QVector<int>& columnGroup)
     {
@@ -2796,13 +2806,11 @@ protected:
     {
         if (std::isnan(value))
             return QColor(226, 226, 226); // no value (too few cells): grey
-        const double t = std::max(-1.0, std::min(1.0, static_cast<double>(value) / _scale));
-        // dark grey for higher, orange for lower than the other species (both already used in the tables); blue is reserved for the selection
-        const QColor positive(64, 64, 64);
-        const QColor negative(255, 93, 18);
-        const QColor& target = t >= 0.0 ? positive : negative;
-        const double amount = std::abs(t);
-        return QColor(static_cast<int>(255 + (target.red() - 255) * amount), static_cast<int>(255 + (target.green() - 255) * amount), static_cast<int>(255 + (target.blue() - 255) * amount));
+        if (_colorMapImage.isNull())
+            return palette().color(QPalette::Mid);
+        const double fraction = (std::clamp(static_cast<double>(value) / _scale, -1.0, 1.0) + 1.0) / 2.0;
+        const int column = static_cast<int>(std::lround(fraction * (_colorMapImage.width() - 1)));
+        return _colorMapImage.pixelColor(column, 0);
     }
 
     QPoint cellAt(const QPointF& pixel) const
@@ -3082,6 +3090,8 @@ private:
     int _lineHeight = 14;
     QSet<int> _highlightRows;
     QSet<int> _highlightColumns;
+    ColorMap1DAction _colorMap;
+    QImage _colorMapImage;
     double _scale = 1.0;
     double _col0 = 0.0, _col1 = 1.0, _row0 = 0.0, _row1 = 1.0;
     QPoint _hovered = QPoint(-1, -1);
@@ -3155,8 +3165,9 @@ public:
         auto* overviewPage = new QWidget(_tabs);
         auto* overviewLayout = new QVBoxLayout(overviewPage);
         auto* overviewBar = new QHBoxLayout();
-        overviewBar->addStretch(1);
         _heatmap = new HeatmapWidget(overviewPage);
+        overviewBar->addWidget(_heatmap->colorMap().createWidget(overviewPage, 0));
+        overviewBar->addStretch(1);
         auto* zoomIn = new QPushButton("+");
         auto* zoomOut = new QPushButton(QString::fromUtf8("\xE2\x88\x92"));
         auto* reset = new QPushButton("Reset view");
