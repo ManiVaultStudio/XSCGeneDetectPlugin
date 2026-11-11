@@ -24,6 +24,7 @@
 
 #include "XSCDebug.h"
 #include "PointReadRanges.h"
+#include "PackedTileAccess.h"
 
 #include <PointData/PointData.h>
 #include <PointData/storage/tiled/PointDataTiledStorage.h>
@@ -172,22 +173,22 @@ void setNonOwningRangeView(View& view, const void* data, const std::uint64_t fir
 }
 
 template <typename PointType, typename Work, std::enable_if_t<HasDirectEagerAccess<PointType>::value, int> = 0>
-bool withEagerPointData(const PointType* points, Work&& work)
+bool withEagerPointData(const PointType* points, Work&& work, bool allowSubset = false)
 {
-    if (points->isProxy() || !points->isFull() ||
+    if (points->isProxy() || (!allowSubset && !points->isFull()) ||
         points->getStorageBackendType() != PointType::StorageBackendType::Eager)
         return false;
 
     points->constVisitFromBeginToEnd([&](const auto begin, const auto end) {
         using ValueType = typename std::decay_t<decltype(*begin)>;
         work(begin == end ? nullptr : static_cast<const void*>(std::addressof(*begin)),
-            elementTypeIndex<ValueType>(), static_cast<std::uint32_t>(sizeof(ValueType)), points->getNumPoints());
+            elementTypeIndex<ValueType>(), static_cast<std::uint32_t>(sizeof(ValueType)), allowSubset ? points->getNumRawPoints() : points->getNumPoints());
     });
     return true;
 }
 
 template <typename PointType, typename Work, std::enable_if_t<!HasDirectEagerAccess<PointType>::value, int> = 0>
-bool withEagerPointData(const PointType*, Work&&)
+bool withEagerPointData(const PointType*, Work&&, bool = false)
 {
     return false;
 }
@@ -433,6 +434,7 @@ inline void forEachBlockParallel(std::vector<State>& states, const std::size_t b
     std::vector<std::exception_ptr> errors(workers);
 
     auto work = [&](const std::size_t w) {
+        XSC_TRACE("stream.worker");
         try {
             for (std::size_t b = w; b < blockCount; b += workers)
                 body(b, states[w]);
@@ -556,36 +558,44 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             jobs.emplace_back(first, end);
             first = end;
         }
+        validateTileJobs(jobs, rowCount, tiledStorage->rowTileSize(), tiledStorage->rows(), sortedRowAt);
+        XSC_TIMING_VALUE("stream.physical-tile-rows", (tiledStorage->rows() + tiledStorage->rowTileSize() - 1) / tiledStorage->rowTileSize());
+        XSC_TIMING_VALUE("stream.tile-row-height", tiledStorage->rowTileSize());
+        XSC_TIMING_VALUE("stream.requested-workers", threads);
         const auto workers = std::min(workerCount(threads, rowCount), jobs.size());
         std::vector<State> states;
         states.reserve(workers);
         for (std::size_t w = 0; w < workers; ++w)
             states.push_back(make());
 
+        XSC_TIMING_VALUE("stream.workers", workers);
+        XSC_TIMING_VALUE("stream.tile-row-jobs", jobs.size());
+        XSC_TIMING_VALUE("stream.rows", rowCount);
         std::mutex progressMutex;
         std::size_t completed = 0;
         forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
+            XSC_TRACE("stream.tile-row-block");
             const auto [begin, end] = jobs[job];
+            const auto type = static_cast<std::uint32_t>(Points::elementTypeSpecifier(points->getElementTypeName()));
             for (std::uint64_t column = 0; column < columnCount;) {
-                const auto width = std::min<std::uint64_t>(tiledStorage->columnTileSize(), columnCount - column);
-                for (std::size_t first = begin; first < end;) {
-                    const auto row = sortedRowAt(first);
-                    std::size_t next = first + 1;
-                    while (next < end && sortedRowAt(next) == row)
-                        ++next;
-                    std::uint64_t offset = column;
-                    points->visitRange(row, 1, column, width, [&](const PointDataAccessView& view) {
-                        if (view.rows != 1 || view.columns == 0 || view.columns > column + width - offset)
-                            throw std::runtime_error("PointStreaming: invalid tiled row segment");
-                        for (auto q = first; q < next; ++q)
-                            visit(state, order.empty() ? q : order[q], view, 0, offset);
-                        offset += view.columns;
-                    });
-                    if (offset != column + width)
-                        throw std::runtime_error("PointStreaming: incomplete tiled row segment");
-                    first = next;
+                const auto tile = [&]() {
+                    XSC_TRACE("stream.tile.acquire");
+                    return PackedTileAccess::read(points, tiledStorage, sortedRowAt(begin) / tiledStorage->rowTileSize(), column / tiledStorage->columnTileSize());
+                }();
+                if (!tile || tile.columns() == 0) throw std::runtime_error("PointStreaming: missing tile");
+                PointDataAccessView view{};
+                PointStreamingDetail::setNonOwningRangeView(view, tile.data(), 0, tile.rows(),
+                    tile.columns(), tile.columns(), type, static_cast<std::uint32_t>(tile.elementSize()));
+                view.columns = std::min<std::uint64_t>(tile.columns(), columnCount - column);
+                // One lease per tile, rather than a cache lookup, mutex and shared
+                // allocation for every selected cell and column segment.
+                for (auto position = begin; position < end; ++position) {
+                    const auto row = sortedRowAt(position);
+                    if (row < tile.rowOffset() || row >= tile.rowOffset() + tile.rows())
+                        throw std::runtime_error("PointStreaming: tile does not cover requested row");
+                    visit(state, order.empty() ? position : order[position], view, row - tile.rowOffset(), column);
                 }
-                column += width;
+                column += view.columns;
             }
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
@@ -954,7 +964,8 @@ struct GroupAggregates {
 
 template <typename Rows, typename GroupAt>
 inline GroupAggregates aggregateSparseDisjointRows(Points* points, const Rows& rows, const std::size_t groupCount,
-    GroupAt&& groupAt, const std::vector<int>& columns, const int threads)
+    GroupAt&& groupAt, const std::vector<int>& columns, const int threads,
+    const std::function<void(std::size_t, std::size_t)>& progress = {})
 {
     GroupAggregates empty;
     empty.sums.assign(groupCount, std::vector<double>(columns.size(), 0.0));
@@ -981,6 +992,8 @@ inline GroupAggregates aggregateSparseDisjointRows(Points* points, const Rows& r
         states.push_back(std::move(state));
     }
 
+    std::mutex progressMutex;
+    std::size_t completed = 0;
     forEachBlockParallel(states, blockCount, [&](const std::size_t block, State& state) {
         const std::size_t begin = block * rowsPerBlock;
         const std::size_t end = std::min(rows.size(), begin + rowsPerBlock);
@@ -991,6 +1004,7 @@ inline GroupAggregates aggregateSparseDisjointRows(Points* points, const Rows& r
                 kTargetReadBytes / (std::max<std::uint64_t>(1, run.second) * sizeof(float)));
 
             for (std::size_t rowBegin = begin; rowBegin < end;) {
+                if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(completed, blockCount); }
                 const std::uint64_t firstRow = static_cast<std::uint64_t>(rows[rowBegin]);
                 std::size_t rowEnd = rowBegin + 1;
                 while (rowEnd < end && static_cast<std::uint64_t>(rows[rowEnd]) - firstRow < maxSpan)
@@ -1038,6 +1052,7 @@ inline GroupAggregates aggregateSparseDisjointRows(Points* points, const Rows& r
                 rowBegin = rowEnd;
             }
         }
+        if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(++completed, blockCount); }
     });
 
     for (std::size_t worker = 1; worker < workers; ++worker) {
@@ -1081,11 +1096,14 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
     const bool sparseColumns = uniqueColumns.size() <= 256 && uniqueColumns.size() * 4 < spanWidth;
     const bool eagerStorage = PointStreamingDetail::withEagerPointData(points,
         [](const void*, std::uint32_t, std::uint32_t, std::uint64_t) {});
-    if (sparseColumns && !eagerStorage)
-        return aggregateSparseDisjointRows(points, rows, groupCount, std::forward<GroupAt>(groupAt), columns, threads);
+    // Sparse API reads repeatedly decompress/stage the same row-major tile
+    // for each gene run. Physical tiles must use the single-pass path below.
+    const bool physicalTiles = !points->isProxy() && points->isFull() && points->getTiledStorage();
+    if (groupedReadPath(sparseColumns, eagerStorage, physicalTiles, includeDetection) == GroupedReadPath::SparseRanges)
+        return aggregateSparseDisjointRows(points, rows, groupCount, std::forward<GroupAt>(groupAt), columns, threads, progress);
 
-    struct State { GroupAggregates result; SegmentColumns segment; };
-    auto makeState = [&]() { return State{ empty, {} }; };
+    struct State { GroupAggregates result; SegmentColumns segment; std::unique_ptr<ColumnTileCache::Reader> reader; };
+    auto makeState = [&]() { return State{ empty, {}, std::make_unique<ColumnTileCache::Reader>() }; };
     auto mergeState = [](State& into, State& from) {
         for (std::size_t group = 0; group < into.result.sums.size(); ++group) {
             into.result.counts[group] += from.result.counts[group];
@@ -1096,6 +1114,59 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
             }
         }
     };
+
+    if (physicalTiles && std::is_sorted(rows.begin(), rows.end())) {
+        const auto storage = points->getTiledStorage();
+        const auto cache = PackedTileAccess::columnsFor(storage);
+        if (cache && cache->enabled()) {
+            XSC_TRACE("analysis.gene-blocks.aggregate");
+            std::vector<std::pair<std::size_t, std::size_t>> jobs;
+            const auto rowAt = [&](std::size_t i) { return static_cast<std::uint64_t>(rows[i]); };
+            for (std::size_t first = 0; first < rows.size();) {
+                const auto end = tileReadEnd(first, rows.size(), storage->rowTileSize(), rowAt);
+                jobs.emplace_back(first, end); first = end;
+            }
+            validateTileJobs(jobs, rows.size(), storage->rowTileSize(), storage->rows(), rowAt);
+            std::vector<State> states;
+            const auto workers = std::min<std::size_t>(std::max(1, threads), jobs.size());
+            for (std::size_t w = 0; w < workers; ++w) states.push_back(makeState());
+            std::mutex progressMutex;
+            std::size_t completed = 0;
+            forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
+                const auto [begin, end] = jobs[job];
+                if (uniqueColumns.size() * 4 >= storage->columns()) {
+                    const auto tileColumns = (storage->columns() + storage->columnTileSize() - 1) / storage->columnTileSize();
+                    // DE scans keep encoded bytes in read-ahead memory, not a
+                    // second reconstructed row-major matrix tile.
+                    PackedTileAccess::readerFor(cache, state.reader.get());
+                    if (tileColumns == 1) cache->prefetch(rowAt(begin) / storage->rowTileSize(), storage->columns(), *state.reader);
+                }
+                for (std::size_t next = 0; next < uniqueColumns.size();) {
+                    if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(completed, jobs.size()); }
+                    const auto tile = PackedTileAccess::readStripe(points, storage, rowAt(begin) / storage->rowTileSize(), uniqueColumns[next], state.reader.get());
+                    if (!tile || !tile.columns()) throw std::runtime_error("Missing analysis gene block");
+                    PointDataAccessView view{};
+                    const auto type = static_cast<std::uint32_t>(Points::elementTypeSpecifier(points->getElementTypeName()));
+                    PointStreamingDetail::setNonOwningRangeView(view, tile.data(), 0, tile.rows(), tile.columns(), tile.columns(), type,
+                        static_cast<std::uint32_t>(tile.elementSize()));
+                    state.segment.update(columnIds, tile.columnOffset(), view.columns);
+                    for (std::size_t position = begin; position < end; ++position) {
+                        const auto group = groupAt(position);
+                        accumulateSegment(view, rowAt(position) - tile.rowOffset(), state.segment, state.result.sums[group].data(),
+                            includeDetection ? state.result.nonZero[group].data() : nullptr);
+                        if (next == 0) ++state.result.counts[group];
+                    }
+                    const auto limit = tile.columnOffset() + tile.columns();
+                    if (uniqueColumns[next] < tile.columnOffset() || uniqueColumns[next] >= limit)
+                        throw std::runtime_error("Analysis gene block does not cover its requested column");
+                    do { ++next; } while (next < uniqueColumns.size() && uniqueColumns[next] < limit);
+                }
+                if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(++completed, jobs.size()); }
+            });
+            for (std::size_t w = 1; w < states.size(); ++w) mergeState(states[0], states[w]);
+            return std::move(states[0].result);
+        }
+    }
 
     auto result = reduceRows(points, rows, threads, width, makeState,
         [&](State& state, const std::size_t position, const PointDataAccessView& view,
@@ -1226,7 +1297,8 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
 
 /** Values of one column for \p rowIds, in the order of \p rowIds. Uses the column path of the API. */
 template <typename RowContainer>
-inline std::vector<float> fetchColumnValues(Points* points, int column, const RowContainer& rowIds)
+inline std::vector<float> fetchColumnValues(Points* points, int column, const RowContainer& rowIds,
+    const std::function<bool()>& cancelled = {}, const std::function<void(std::size_t, std::size_t)>& progress = {}, int threads = 1)
 {
     XSC_TRACE("PointStreaming::fetchColumnValues");
 
@@ -1246,27 +1318,83 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
         [&](const void* data, const std::uint32_t elementType, const std::uint32_t elementSize, const std::uint64_t pointCount) {
             PointDataAccessView rowView{};
             for (std::size_t i = 0; i < rowIds.size(); ++i) {
+                if ((i % 4096) == 0 && cancelled && cancelled()) throw std::runtime_error("Cancelled");
                 using RowId = std::decay_t<decltype(rowIds[i])>;
                 if constexpr (std::is_signed_v<RowId>) {
                     if (rowIds[i] < 0)
                         throw std::out_of_range("PointStreaming: requested row ID is out of range");
                 }
-                const auto row = static_cast<std::uint64_t>(rowIds[i]);
+                const auto localRow = static_cast<std::uint64_t>(rowIds[i]);
+                const auto row = logicalToSourceRow(points->isFull(), localRow, points->getNumPoints(), points->indices, pointCount);
                 if (row >= pointCount)
                     throw std::out_of_range("PointStreaming: requested row ID is out of range");
                 PointStreamingDetail::setNonOwningRangeView(rowView, data,
                     row, 1, dimensions, dimensions, elementType, elementSize);
                 values[i] = valueAt(rowView, 0, static_cast<std::uint64_t>(column));
+                if (progress && (i % 4096 == 0 || i + 1 == rowIds.size())) progress(i + 1, rowIds.size());
             }
-        });
+        }, true);
     if (readDirectly)
         return values;
 
+    if (!points->isProxy()) {
+        if (const auto storage = points->getTiledStorage(); storage && (points->isFull() || PackedTileAccess::supportsSubset(storage))) {
+            std::vector<std::pair<std::uint64_t, std::size_t>> requested;
+            requested.reserve(rowIds.size());
+            for (std::size_t i = 0; i < rowIds.size(); ++i) {
+                const auto local = static_cast<std::uint64_t>(rowIds[i]);
+                if (local >= points->getNumPoints()) throw std::out_of_range("PointStreaming: requested row is out of range");
+                const auto global = points->isFull() ? local : static_cast<std::uint64_t>(points->indices.at(static_cast<std::size_t>(local)));
+                requested.emplace_back(global, i);
+            }
+            const auto less = [](const auto& left, const auto& right) { return left.first < right.first; };
+            if (!std::is_sorted(requested.begin(), requested.end(), less)) std::stable_sort(requested.begin(), requested.end(), less);
+            const auto type = static_cast<std::uint32_t>(Points::elementTypeSpecifier(points->getElementTypeName()));
+            std::vector<std::pair<std::size_t, std::size_t>> jobs;
+            for (std::size_t first = 0; first < requested.size();) {
+                auto end = first + 1;
+                const auto tileRow = requested[first].first / storage->rowTileSize();
+                while (end < requested.size() && requested[end].first / storage->rowTileSize() == tileRow) ++end;
+                jobs.emplace_back(first, end);
+                first = end;
+            }
+            std::vector<std::unique_ptr<ColumnTileCache::Reader>> states;
+            const auto workers = std::min<std::size_t>(jobs.size(), static_cast<std::size_t>(std::max(1, threads)));
+            for (std::size_t worker = 0; worker < workers; ++worker) states.push_back(std::make_unique<ColumnTileCache::Reader>());
+            std::mutex progressMutex;
+            std::size_t completed = 0;
+            forEachBlockParallel(states, jobs.size(), [&](std::size_t job, std::unique_ptr<ColumnTileCache::Reader>& reader) {
+                auto first = jobs[job].first;
+                if (cancelled && cancelled()) throw std::runtime_error("Cancelled");
+                const auto tile = PackedTileAccess::readColumn(points, storage, requested[first].first / storage->rowTileSize(),
+                    static_cast<std::uint64_t>(column), reader.get());
+                if (!tile || tile.columns() == 0) throw std::runtime_error("PointStreaming: missing column tile");
+                PointDataAccessView view{};
+                PointStreamingDetail::setNonOwningRangeView(view, tile.data(), 0, tile.rows(), tile.columns(),
+                    tile.columns(), type, static_cast<std::uint32_t>(tile.elementSize()));
+                const auto end = tile.rowOffset() + tile.rows();
+                do {
+                    if (requested[first].first < tile.rowOffset()) throw std::runtime_error("PointStreaming: invalid tile row");
+                    values[requested[first].second] = valueAt(view, requested[first].first - tile.rowOffset(),
+                        static_cast<std::uint64_t>(column) - tile.columnOffset());
+                    ++first;
+                } while (first < jobs[job].second && requested[first].first < end);
+                if (first != jobs[job].second) throw std::runtime_error("PointStreaming: incomplete column tile");
+                if (progress) {
+                    const std::lock_guard<std::mutex> lock(progressMutex);
+                    completed += jobs[job].second - jobs[job].first;
+                    progress(completed, requested.size());
+                }
+            });
+            return values;
+        }
+    }
     const std::vector<std::uint64_t> rows(rowIds.begin(), rowIds.end());
     const std::uint64_t columnId = static_cast<std::uint64_t>(column);
     std::size_t position = 0;
 
     fetchPointData(points, FetchMode::ColumnsForRows, [&](const PointDataAccessView& view) {
+        if (cancelled && cancelled()) throw std::runtime_error("Cancelled");
         for (std::uint64_t row = 0; row < view.rows; ++row, ++position) {
             if (position < values.size())
                 values[position] = valueAt(view, row, 0); // the view holds only this column
@@ -1274,7 +1402,7 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
     }, 0, 0, 0, rows, 0, columnId, 1);
 
     if (position != values.size())
-        throw std::runtime_error("PointStreaming: streamed row count does not match the requested rows");
+        throw std::runtime_error(QString("PointStreaming: received %1 rows for %2 requested rows (dataset %3, proxy %4, full %5)").arg(position).arg(values.size()).arg(points->getId()).arg(points->isProxy()).arg(points->isFull()).toStdString());
 
     return values;
 }

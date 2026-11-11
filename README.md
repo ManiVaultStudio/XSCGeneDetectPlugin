@@ -32,6 +32,9 @@ From these inputs, it computes:
 
 ## Repository Layout
 
+See [workflow and state inventory](docs/WORKFLOWS.md) for on-demand analysis,
+cancellation, cache publication, state ownership, and regression checks.
+
 - [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/CMakeLists.txt): CMake target definition and ManiVault/Qt integration.
 - [src/XSCGeneDetectPlugin.h](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.h): plugin class declaration.
 - [src/XSCGeneDetectPlugin.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.cpp): plugin wiring, view integration, table rendering, and scatterplot/tree coordination.

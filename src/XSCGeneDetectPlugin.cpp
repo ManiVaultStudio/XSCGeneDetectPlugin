@@ -15,6 +15,7 @@
 #include <QColor>
 #include <QJsonArray> 
 #include <unordered_set>
+#include <deque>
 #include <cmath>
 #include <algorithm>
 #include<actions/ColorMap1DAction.h>
@@ -27,6 +28,11 @@
 #include <functional>
 #include <tuple>
 #include <QFileDialog>
+#include <QFile>
+#include <QtConcurrent/QtConcurrentRun>
+#include <QThread>
+#include <atomic>
+#include <mutex>
 #include <QSignalBlocker>
 #include <QPaintEvent>
 #include <QWheelEvent>
@@ -521,9 +527,60 @@ XSCGeneDetectPlugin::XSCGeneDetectPlugin(const PluginFactory* factory) :
 
 }
 
+struct XSCGeneDetectPlugin::GeneClickJob
+{
+    struct Source {
+        mv::Dataset<Points> points;
+        QString id;
+        int column = -1;
+        std::vector<float> values;
+    };
+    std::atomic_bool cancelled{ false };
+    enum class Outcome { Pending, Ready, Failed };
+    Outcome outcome = Outcome::Pending; // read only after the future finishes
+    quint64 serial = 0;
+    bool ready() const { return outcome == Outcome::Ready; }
+    xsc::timing::AsyncSpan timing{ "gene.click.total" };
+    OperationProgress::State progress;
+    QString gene, error, embeddingId;
+    QPersistentModelIndex row;
+    std::vector<Source> sources;
+    mv::Dataset<Points> embedding;
+    std::shared_ptr<std::vector<float>> coordinates;
+};
+
 void XSCGeneDetectPlugin::init()
 {
     XSC_TRACE("XSCGeneDetectPlugin::init");
+    _geneExpressionListener.setSupportedEventTypes({
+        static_cast<std::uint32_t>(EventType::DatasetDataChanged),
+        static_cast<std::uint32_t>(EventType::DatasetDataDimensionsChanged),
+        static_cast<std::uint32_t>(EventType::DatasetAboutToBeRemoved) });
+    _geneExpressionListener.registerDataEvent([this](mv::DatasetEvent* event) {
+        if (event->getDataset()->getId() == _embeddingVisibleSpeciesSource) _embeddingVisibleRows.clear();
+        if (event->getDataset()->getId() == _geneCacheSignature) {
+            PackedTileAccess::clearColumns();
+            _geneExpressionCache.reset();
+            _geneCacheSignature.clear();
+        }
+        if (_geneClickJob) {
+            const QString id = event->getDataset()->getId();
+            const bool sourceChanged = id == _geneClickJob->embeddingId ||
+                std::any_of(_geneClickJob->sources.begin(), _geneClickJob->sources.end(),
+                    [&id](const auto& source) { return source.id == id; });
+            if (sourceChanged) {
+                if (id != _geneClickJob->embeddingId) _geneExpressionCache.reset();
+                _geneClickJob->cancelled = true;
+                _pendingGeneRow = QPersistentModelIndex();
+                _embeddingCoordinates.reset();
+                _embeddingVisibleRows.clear();
+                if (event->getType() == EventType::DatasetAboutToBeRemoved)
+                    _geneClickPool.waitForDone();
+            }
+        }
+    });
+
+
     auto& shortcuts = getShortcuts();
 
     shortcuts.add({ QKeySequence(Qt::MouseButton::LeftButton), "Update Info", "Click update button to update outdated table. Current cells need to be selected in the scatterplot" });
@@ -858,6 +915,7 @@ void XSCGeneDetectPlugin::init()
                     view->showColumn(i);
                 }
             }
+            refreshTraitColumnVisibility();
             fitGeneTableWidth(view);
         }
         };
@@ -1335,12 +1393,41 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
     }
 
 
+    const auto expressionSource = mv::data().getDataset<Points>(mainPointsDataset.getDatasetId());
+    if (!expressionSource.isValid()) return false;
+    const auto embeddingSource = mv::data().getDataset<Points>(umapDataset.getDatasetId());
+    if (!embeddingSource.isValid()) return false;
+    const auto allColors = geneExpressionValues(expressionSource.get(), gene, -1);
+    if (allColors.size() != expressionSource->getNumPoints() || !_embeddingCoordinates ||
+        _embeddingCoordinatesId != umapDataset.getDatasetId() ||
+        _embeddingCoordinates->size() != static_cast<std::size_t>(embeddingSource->getNumPoints()) * embeddingSource->getNumDimensions()) {
+        // Explorer buttons use exactly the same asynchronous path as table
+        // clicks. Never fall back to source/geometry I/O on the GUI thread.
+        if (_geneClickJob && !_geneClickWatcher.isRunning()) _geneClickJob->cancelled = true;
+        if (selectGeneInGeneTable(gene)) {
+            onGeneRowChanged(_settingsAction.getGeneTableView()->currentIndex());
+            _pendingEmbeddingGene = gene;
+            _pendingEmbeddingSpecies = finalsettingSpeciesNamesArray;
+        }
+        return false;
+    }
+
     {
         auto speciesClusterDataset = mv::data().getDataset<Clusters>(speciesDataset.getDatasetId());
         auto umapPointsDataset = mv::data().getDataset<Points>(umapDataset.getDatasetId());
         auto fullMainPointsDataset = mv::data().getDataset<Points>(mainPointsDataset.getDatasetId());
         std::unordered_set<QString> speciesNamesSet(finalsettingSpeciesNamesArray.begin(), finalsettingSpeciesNamesArray.end());
         std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
+        auto canonicalSpecies = finalsettingSpeciesNamesArray;
+        canonicalSpecies.sort(); canonicalSpecies.removeDuplicates();
+        const bool reuseGeometry = !_embeddingVisibleRows.empty() && canonicalSpecies == _embeddingVisibleSpecies &&
+            _embeddingVisibleSpeciesSource == speciesDataset.getDatasetId() && _embeddingVisibleSource == umapPointsDataset->getId() &&
+            _embeddingVisibleOutput == _settingsAction.getFilteredUMAPDatasetPoints()->getId();
+        if (reuseGeometry) {
+            selectedSpeciesIndices = _embeddingVisibleRows;
+            filtSelectInndx = _embeddingVisibleSelectedRows;
+        }
+        else {
         for (const auto& species : speciesClusterDataset->getClusters()) {
             if (speciesNamesSet.find(species.getName()) != speciesNamesSet.end()) {
                 const auto& indices = species.getIndices();
@@ -1359,6 +1446,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 filtSelectInndx.push_back(i);
             }
         }
+        }
         auto dimensionNamesUmap = umapPointsDataset->getDimensionNames();
         auto numDimensions = umapPointsDataset->getNumDimensions();
         std::vector<int> geneIndicesSpecies(numDimensions);
@@ -1367,12 +1455,30 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
         if (selectedSpeciesIndices.size() > 0)
         {
-            std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size() * umapPointsDataset->getNumDimensions());
-            umapPointsDataset->populateDataForDimensions(resultContainerSpeciesUMAP, geneIndicesSpecies, selectedSpeciesIndices);
             auto speciesDataId = _settingsAction.getFilteredUMAPDatasetPoints().getDatasetId();
-            int tempnumPoints = static_cast<int>(selectedSpeciesIndices.size());
-            int tempNumDimensions = static_cast<int>(geneIndicesSpecies.size());
-            _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap);
+            const bool geometryChanged = !reuseGeometry;
+            if (geometryChanged) {
+                std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size() * numDimensions);
+                if (_embeddingCoordinates && _embeddingCoordinatesId == umapPointsDataset->getId() &&
+                    _embeddingCoordinates->size() == static_cast<std::size_t>(umapPointsDataset->getNumPoints()) * numDimensions) {
+                    for (std::size_t row = 0; row < selectedSpeciesIndices.size(); ++row)
+                        for (std::size_t column = 0; column < numDimensions; ++column)
+                            resultContainerSpeciesUMAP[row * numDimensions + column] =
+                                _embeddingCoordinates->at(static_cast<std::size_t>(selectedSpeciesIndices[row]) * numDimensions + column);
+                }
+                else {
+                    return false; // geometry is prepared only by the asynchronous reader
+                }
+                int tempnumPoints = static_cast<int>(selectedSpeciesIndices.size());
+                int tempNumDimensions = static_cast<int>(geneIndicesSpecies.size());
+                _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap);
+                _embeddingVisibleRows = selectedSpeciesIndices;
+                _embeddingVisibleSource = umapPointsDataset->getId();
+                _embeddingVisibleOutput = speciesDataId;
+                _embeddingVisibleSelectedRows = filtSelectInndx;
+                _embeddingVisibleSpecies = canonicalSpecies;
+                _embeddingVisibleSpeciesSource = speciesDataset.getDatasetId();
+            }
 
 
 
@@ -1382,7 +1488,8 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             auto it = std::find(dimensionNames.begin(), dimensionNames.end(), gene);
             if (it != dimensionNames.end()) {
                 const int selectedGeneIndex = static_cast<int>(std::distance(dimensionNames.begin(), it));
-                resultContainerSpeciesColors = PointStreaming::fetchColumnValues(fullMainPointsDataset.get(), selectedGeneIndex, selectedSpeciesIndices);
+                for (std::size_t i = 0; i < selectedSpeciesIndices.size(); ++i)
+                    resultContainerSpeciesColors[i] = allColors.at(selectedSpeciesIndices[i]);
             }
             else {
                 qDebug() << "Gene" << gene << "was not found in the main dataset";
@@ -1403,7 +1510,8 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             //TODO: populate the selectedFilteredUMAPDatasetColorsMap
 
 
-            _settingsAction.populateClusterData(speciesClusterDataId, selectedFilteredUMAPDatasetColorsMap);
+            if (geometryChanged)
+                _settingsAction.populateClusterData(speciesClusterDataId, selectedFilteredUMAPDatasetColorsMap);
 
 
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
@@ -1417,14 +1525,14 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                         //plugin->printChildren();
                         pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
                         if (pointDatasetPickerAction) {
-                            pointDatasetPickerAction->setCurrentText("");
+
 
                             pointDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetPoints());
 
                             colorDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Color"));
                             if (colorDatasetPickerAction)
                             {
-                                colorDatasetPickerAction->setCurrentText("");
+
                                 colorDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
                                 auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
                                 if (legendViewFactory)
@@ -1479,8 +1587,10 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
 
 
-            _settingsAction.getFilteredUMAPDatasetPoints()->setSelectionIndices(filtSelectInndx);
-            mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getFilteredUMAPDatasetPoints());
+            if (_settingsAction.getFilteredUMAPDatasetPoints()->getSelectionIndices() != filtSelectInndx) {
+                _settingsAction.getFilteredUMAPDatasetPoints()->setSelectionIndices(filtSelectInndx);
+                mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getFilteredUMAPDatasetPoints());
+            }
 
 
         }
@@ -1645,6 +1755,7 @@ public:
     // ---- content ----
     void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle, bool keepView = false)
     {
+        XSC_TRACE("plot.setData");
         _points = points;
         _xTitle = xTitle;
         _yTitle = yTitle;
@@ -1871,6 +1982,7 @@ protected:
 
     void paintEvent(QPaintEvent*) override
     {
+        XSC_TRACE("plot.paintEvent");
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.fillRect(rect(), palette().color(QPalette::Base));
@@ -2297,6 +2409,7 @@ public:
 
     void setSpeciesData(const QVector<Point>& points, const QVector<SpeciesRow>& rows, const QString& xTitle, const QString& yTitle, const QString& info)
     {
+        XSC_TRACE("plot.setSpeciesData");
         _rows = rows;
         _speciesPlot->setData(points, xTitle, yTitle, true);
         _speciesInfo->setText(info);
@@ -2330,6 +2443,7 @@ public:
 
     void setVolcanoData(const QVector<Point>& points, double significanceLevel, const QString& info)
     {
+        XSC_TRACE("plot.setVolcanoData");
         _volcanoPlot->setGuideLines({ { true, -std::log10(significanceLevel), QString("FDR = %1").arg(significanceLevel) },{ false, 0.0, QString() } });
         _volcanoPlot->setData(points, "Trait correlation", "-log10 FDR", true);
         _volcanoInfo->setText(info);
@@ -2337,6 +2451,7 @@ public:
 
     void setConservationData(const QVector<Point>& points, const QString& info)
     {
+        XSC_TRACE("plot.setConservationData");
         _conservationPlot->setGuideLines({ { true, 0.0, QString() } });
         _conservationPlot->setData(points, "Weighted appearance", "Trait correlation", true);
         _conservationInfo->setText(info);
@@ -2465,6 +2580,7 @@ public:
 
     void setData(const QStringList& rowLabels, const QStringList& columnLabels, const QVector<QVector<float>>& values, const QVector<int>& columnGroup)
     {
+        XSC_TRACE("plot.setData");
         _rowLabels = rowLabels;
         _columnLabels = columnLabels;
         _values = values;
@@ -2710,6 +2826,7 @@ protected:
     // ---- painting ----
     void paintEvent(QPaintEvent*) override
     {
+        XSC_TRACE("plot.paintEvent");
         QPainter painter(this);
         painter.fillRect(rect(), palette().color(QPalette::Base));
         const QColor textColor = palette().color(QPalette::Text);
@@ -3177,6 +3294,7 @@ public:
 
     void setDetail(const SpeciesDeDetail& detail, double significanceLevel)
     {
+        XSC_TRACE("plot.setDetail");
         _detail = detail;
         _table->setColumnCount(_useGroups ? 10 : 9);
         _table->setHorizontalHeaderLabels(_useGroups
@@ -3591,7 +3709,8 @@ public:
         // 2. value (numeric UserRole, see createModelFromData)
         bool ok = false;
         const double value = index.data(Qt::UserRole).toDouble(&ok);
-        if (!ok || std::isnan(value))
+        if (!ok) { QStyledItemDelegate::paint(painter, option, index); return; }
+        if (std::isnan(value))
             return;
 
         // 3. fixed-size bar area at the left edge of the cell
@@ -3732,6 +3851,81 @@ private:
 //  Gene table installation
 // ============================================================================================================
 
+XSCGeneDetectPlugin::~XSCGeneDetectPlugin()
+{
+    // Destroy demand-owning dialogs while SettingsAction still exists, so
+    // their destroyed callbacks cannot outlive the analysis state they cancel.
+    delete _traitPlotDialog.data();
+    delete _speciesDeDialog.data();
+    cancelGeneExpressionCache();
+    _geneClickPool.waitForDone();
+}
+
+void XSCGeneDetectPlugin::cancelGeneExpressionCache(bool clear)
+{
+    _geneRequests.advance();
+    _pendingEmbeddingGene.clear(); _pendingEmbeddingSpecies.clear();
+    if (_geneClickJob) _geneClickJob->cancelled = true;
+    _pendingGeneRow = QPersistentModelIndex();
+    if (_geneClickDebounce) _geneClickDebounce->stop();
+    if (clear) _embeddingCoordinates.reset();
+    _embeddingVisibleRows.clear();
+    if (clear) { _geneExpressionCache.reset(); _geneCacheSignature.clear(); PackedTileAccess::clearColumns(); }
+    _geneColorProgress.cancel();
+}
+
+void XSCGeneDetectPlugin::prepareGeneExpressionCache()
+{
+    XSC_TRACE("XSCGeneDetectPlugin::prepareGeneExpressionCache");
+    // Demand-driven: constructing a cache must never scan the expression matrix.
+    const auto main = _settingsAction.getMainPointsDataset().getCurrentDataset();
+    const QString signature = main.isValid() ? main->getId() : QString();
+    const std::size_t budget = static_cast<std::size_t>(std::max(64, _settingsAction.getMemoryBudgetMb().getValue())) << 20;
+    PackedTileAccess::setBudget(std::clamp<std::size_t>(budget / 8, 8ULL << 20, 64ULL << 20));
+    if (main.isValid()) PackedTileAccess::configureColumns(mv::data().getDataset<Points>(main.getDatasetId())->getTiledStorage(), budget);
+    const auto blocks = main.isValid() ? PackedTileAccess::columnsFor(mv::data().getDataset<Points>(main.getDatasetId())->getTiledStorage()) : nullptr;
+    if (!_geneExpressionCache || _geneCacheSignature != signature) {
+        _geneExpressionCache = std::make_shared<GeneExpressionCache>(std::min<std::size_t>(budget / 4, 256ULL << 20), 0, blocks && blocks->enabled());
+        _geneCacheSignature = signature;
+        qInfo().noquote() << "[Gene cache]" << (blocks && blocks->enabled() ? "Gene-block layout plus completed vectors in RAM:" : "Demand-driven vectors:")
+            << (blocks && blocks->enabled() ? blocks->fileName() : _geneExpressionCache->fileName());
+    }
+    if (blocks && blocks->enabled()) qInfo().noquote() << "[Gene cache]" << blocks->summary();
+}
+std::vector<float> XSCGeneDetectPlugin::geneExpressionValues(Points* points, const QString& gene, int column)
+{
+    XSC_TRACE("XSCGeneDetectPlugin::geneExpressionValues");
+    if (_geneClickJob && !_geneClickWatcher.isRunning() && _geneClickJob->ready() && !_geneClickJob->cancelled && _geneClickJob->gene == gene) {
+        for (const auto& source : _geneClickJob->sources)
+            if (source.id == points->getId()) return source.values;
+    }
+    // GUI callers must never start a cold read or even a disk-cache read.
+    // prepareGeneClick loads both into its completed, immutable job first.
+    return {};
+}
+
+void XSCGeneDetectPlugin::beginSelectionUpdate()
+{
+    _settingsAction.cancelExplorationAnalysis();
+    // Invalidating trait cells can move the proxy's current row. Cancel any
+    // resulting queued color request after those synchronous model signals.
+    cancelGeneExpressionCache(false);
+    try { prepareGeneExpressionCache(); }
+    catch (const std::exception& error) { qWarning() << "Gene-block cache unavailable:" << error.what(); }
+}
+
+void XSCGeneDetectPlugin::prepareExplorationForCurrentTable()
+{
+    if (_settingsAction.updateWorkflowRunning()) return;
+    auto value = _settingsAction.getListModelAction().getVariant();
+    auto* model = qobject_cast<QStandardItemModel*>(value.value<QAbstractItemModel*>());
+    if (!model) return;
+    try { prepareGeneExpressionCache(); }
+    catch (const std::exception& error) {
+        qWarning() << "Gene preparation unavailable:" << error.what();
+    }
+    _settingsAction.prepareExplorationAnalysis();
+}
 void XSCGeneDetectPlugin::modifyListData()
 {
     XSC_TRACE("XSCGeneDetectPlugin::modifyListData");
@@ -3745,6 +3939,7 @@ void XSCGeneDetectPlugin::modifyListData()
 
         // No model (cleared): empty the table that is currently shown
         if (!model) {
+            cancelGeneExpressionCache();
             QAbstractItemModel* currentModel = _settingsAction.getGeneTableView()->model();
             if (currentModel) {
                 currentModel->removeRows(0, currentModel->rowCount());
@@ -3754,14 +3949,13 @@ void XSCGeneDetectPlugin::modifyListData()
         }
 
         installGeneTableModel(model);
-
         // Secondary views that depend on the new table
         selectedCellStatisticsStatusBarRemove();
         selectedCellCountStatusBarAdd();
 
         // The new model starts with the correlation values it was created with: refresh them for the current
         // selection (debounced, runs in the background of the event loop).
-        _settingsAction.updateTraitReverseSearchFeature();
+        if (!_settingsAction.updateWorkflowRunning()) prepareExplorationForCurrentTable();
     }
     catch (const std::exception& e) {
         qDebug() << "An exception occurred in modifyListData: " << e.what();
@@ -3887,6 +4081,7 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     if (!dynamic_cast<WeightedAppearanceBarDelegate*>(geneTableView->itemDelegateForColumn(kWeightedAppearanceColumn))) {
         geneTableView->setItemDelegateForColumn(kWeightedAppearanceColumn, new WeightedAppearanceBarDelegate(geneTableView));
     }
+    refreshTraitColumnVisibility();
     fitGeneTableWidth(geneTableView);
     geneTableView->update();
 
@@ -4040,11 +4235,28 @@ void XSCGeneDetectPlugin::refreshSpeciesDeHighlights()
 //  Trait plot window
 // ============================================================================================================
 
+void XSCGeneDetectPlugin::refreshTraitColumnVisibility()
+{
+    auto* view = _settingsAction.getGeneTableView();
+    if (!view || !view->model() || view->model()->columnCount() <= kTraitCorrelationColumn) return;
+    const auto gene = _settingsAction.getSelectedGeneAction().getString();
+    const auto& values = _settingsAction.getGeneTraitValues();
+    const bool ready = !values.empty() && (gene.isEmpty() || values.find(gene) != values.end());
+    const auto header = view->model()->headerData(kTraitCorrelationColumn, Qt::Horizontal).toString();
+    const bool wanted = _settingsAction.getHiddenShowncolumns().getSelectedOptions().contains(header);
+    const bool hidden = !ready || !wanted;
+    if (view->isColumnHidden(kTraitCorrelationColumn) != hidden) {
+        view->setColumnHidden(kTraitCorrelationColumn, hidden);
+        fitGeneTableWidth(view);
+    }
+}
+
 void XSCGeneDetectPlugin::showTraitPlot()
 {
     XSC_TRACE("XSCGeneDetectPlugin::showTraitPlot");
     if (!_traitPlotDialog) {
         auto* dialog = new TraitPlotDialog(&getWidget());
+        connect(dialog, &QObject::destroyed, this, [this]() { _settingsAction.setTraitAnalysisActive(false); });
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->setWindowFlag(Qt::Window); // an independent window (movable, resizable, can be put beside the views)
 
@@ -4066,14 +4278,22 @@ void XSCGeneDetectPlugin::showTraitPlot()
             if (!view || !view->model() || gene.isEmpty())
                 return;
             QAbstractItemModel* viewModel = view->model();
-            for (int row = 0; row < viewModel->rowCount(); ++row) {
-                if (viewModel->index(row, 0).data().toString() == gene) {
-                    view->selectRow(row);
-                    view->setCurrentIndex(viewModel->index(row, 0));
-                    view->scrollTo(viewModel->index(row, 0));
-                    return;
-                }
+            // The plot can contain thousands of genes. Build a direct lookup instead of
+            // repeatedly asking the model for every row on each plot click.
+            static QHash<QString, QPersistentModelIndex> rowLookup;
+            static QPointer<QAbstractItemModel> indexedModel;
+            if (indexedModel != viewModel) {
+                rowLookup.clear();
+                indexedModel = viewModel;
+                for (int row = 0; row < viewModel->rowCount(); ++row)
+                    rowLookup.insert(viewModel->index(row, 0).data().toString(), QPersistentModelIndex(viewModel->index(row, 0)));
             }
+            const auto found = rowLookup.constFind(gene);
+            if (found == rowLookup.cend() || !found.value().isValid()) return;
+            const QModelIndex index = found.value();
+            view->selectRow(index.row());
+            view->setCurrentIndex(index);
+            view->scrollTo(index);
             };
 
         dialog->onTabChanged = [this]() { refreshTraitPlot(); };
@@ -4083,6 +4303,7 @@ void XSCGeneDetectPlugin::showTraitPlot()
     _traitPlotDialog->show();
     _traitPlotDialog->raise();
     _traitPlotDialog->activateWindow();
+    _settingsAction.setTraitAnalysisActive(true);
     refreshTraitPlot();
 }
 
@@ -4213,12 +4434,184 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
 void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 {
     XSC_TRACE("XSCGeneDetectPlugin::onGeneRowChanged");
+    if (_settingsAction.updateWorkflowRunning()) return;
+    if (!current.isValid()) { cancelGeneExpressionCache(false); return; }
+    const QPersistentModelIndex requested(current.siblingAtColumn(0));
+    if (_pendingGeneRow == requested) {
+        if (_geneClickDebounce && _geneClickDebounce->isActive()) return;
+        if (_geneClickJob && !_geneClickJob->cancelled && _geneClickJob->gene == requested.data().toString() &&
+            (_geneClickWatcher.isRunning() || _geneClickJob->ready())) return;
+    }
+    _pendingGeneRow = QPersistentModelIndex(current.siblingAtColumn(0));
+    _geneRequests.advance();
+    _pendingEmbeddingGene.clear(); _pendingEmbeddingSpecies.clear();
+    if (_geneClickJob && _geneClickWatcher.isRunning()) _geneClickJob->cancelled = true;
+    applyGeneRowChanged(current); // statistics and selection must not wait for disk I/O
+    refreshTraitColumnVisibility();
+    _settingsAction.showStatusMessage(QStringLiteral("Preparing colors for %1…").arg(requested.data().toString()), QStringLiteral("#007bff"));
+    if (!_geneClickDebounce) {
+        _geneClickDebounce = new QTimer(this);
+        _geneClickDebounce->setSingleShot(true);
+        connect(_geneClickDebounce, &QTimer::timeout, this, [this]() { prepareGeneClick(_pendingGeneRow); });
+    }
+    _geneClickDebounce->start(30);
+}
+
+void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
+{
+    XSC_TRACE("XSCGeneDetectPlugin::prepareGeneClick");
+    if (!current.isValid() || _geneClickWatcher.isRunning()) return;
+    const QString gene = current.data().toString();
+
+    auto job = std::make_shared<GeneClickJob>();
+    job->gene = gene;
+    job->serial = _geneRequests.current();
+    job->row = current;
+    job->progress = _geneColorProgress.begin(this, QStringLiteral("Color gene: %1").arg(gene));
+    // Do not display the previous gene's expression under the new gene's
+    // selection while its cold read is running. Geometry stays in place.
+    for (const auto& colors : { _settingsAction.getTsneDatasetExpressionColors(), _settingsAction.getFilteredUMAPDatasetColors() }) {
+        if (!colors.isValid() || colors->getNumPoints() == 0) continue;
+        std::vector<float> neutral(colors->getNumPoints(), 0.0f);
+        QString id = colors->getId();
+        int count = static_cast<int>(neutral.size()), dimensions = 1;
+        std::vector<QString> names{QStringLiteral("Preparing %1").arg(gene)};
+        _settingsAction.populatePointData(id, neutral, count, dimensions, names);
+    }
+    const auto mainPicker = _settingsAction.getMainPointsDataset().getCurrentDataset();
+    const auto main = mainPicker.isValid() ? mv::data().getDataset<Points>(mainPicker.getDatasetId()) : mv::Dataset<Points>();
+    const auto selected = _settingsAction.getSelectedPointsDataset();
+    for (const auto& points : { main, selected }) {
+        if (!points.isValid()) continue;
+        if (std::any_of(job->sources.begin(), job->sources.end(), [&](const auto& s) { return s.id == points->getId(); })) continue;
+        const auto& names = points->getDimensionNames();
+        const auto found = std::find(names.begin(), names.end(), gene);
+        if (found == names.end()) continue;
+        job->sources.push_back({ points, points->getId(), static_cast<int>(found - names.begin()), {} });
+    }
+    const auto embedding = _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset();
+    if (embedding.isValid()) {
+        job->embedding = mv::data().getDataset<Points>(embedding.getDatasetId());
+        job->embeddingId = embedding.getDatasetId();
+        if (_embeddingCoordinatesId == job->embeddingId && _embeddingCoordinates &&
+            _embeddingCoordinates->size() == static_cast<std::size_t>(job->embedding->getNumPoints()) * job->embedding->getNumDimensions())
+            job->coordinates = _embeddingCoordinates;
+    }
+    _geneClickJob = job;
+    disconnect(&_geneClickWatcher, nullptr, this, nullptr);
+    connect(&_geneClickWatcher, &QFutureWatcher<void>::finished, this, [this, job]() {
+        if (job->cancelled || !_geneRequests.matches(job->serial) || job->row != _pendingGeneRow ||
+            job->gene != _settingsAction.getSelectedGeneAction().getString()) {
+            XSC_TIMING_VALUE("gene.click.discarded", 1);
+            prepareGeneClick(_pendingGeneRow);
+            return;
+        }
+        if (!job->ready()) {
+            _geneColorProgress.cancel();
+            _settingsAction.showStatusMessage(QStringLiteral("Could not prepare gene: %1").arg(job->error), QStringLiteral("#dc3545"));
+            _settingsAction.requestTraitForSelectedGene();
+            return;
+        }
+        _embeddingCoordinatesId = job->embeddingId;
+        _embeddingCoordinates = job->coordinates;
+        applyGeneRowChanged(job->row, true);
+        job->timing.finish();
+        _geneColorProgress.finish();
+        _settingsAction.requestTraitForSelectedGene();
+        _settingsAction.showStatusMessage(QStringLiteral("Colors ready: %1").arg(job->gene), QStringLiteral("#28a745"));
+    });
+    _geneClickPool.setMaxThreadCount(1);
+    const auto cache = _geneExpressionCache; // one shared file stays alive while requests are reading
+    int workers = std::max(1, _settingsAction.getMaxWorkerThreads().getValue());
+    const auto memory = static_cast<std::size_t>(std::max(64, _settingsAction.getMemoryBudgetMb().getValue())) << 20;
+    for (const auto& source : job->sources) {
+        if (const auto storage = source.points->getTiledStorage()) {
+            const auto tileBytes = storage->rowTileSize() * storage->columnTileSize() * storage->elementSize();
+            workers = std::min<int>(workers, static_cast<int>(std::max<std::size_t>(1, memory / std::max<std::size_t>(1, tileBytes * 3))));
+        }
+    }
+    _geneClickWatcher.setFuture(QtConcurrent::run(&_geneClickPool, [job, cache, workers]() {
+        XSC_TRACE("gene.click.read.worker");
+        try {
+            std::size_t sourceIndex = 0;
+            job->progress->phase(QStringLiteral("Reading expression values"), 0.02f);
+            for (auto& source : job->sources) {
+                if (job->cancelled) return;
+                const auto count = source.points->getNumPoints();
+                const auto cached = cache ? cache->read(source.id, job->gene, count) : GeneExpressionCache::Values();
+                if (cached) source.values = *cached;
+                if (!cached && sourceIndex > 0 && !source.points->isProxy() && !source.points->isFull()) {
+                    const auto& full = job->sources.front();
+                    const auto storage = source.points->getTiledStorage();
+                    if (storage && full.points->isFull() && storage == full.points->getTiledStorage() && source.column == full.column) {
+                        source.values.resize(count);
+                        for (std::size_t i = 0; i < count; ++i) {
+                            if (i % 4096 == 0 && job->cancelled) return;
+                            source.values[i] = full.values.at(source.points->indices.at(i));
+                        }
+                    }
+                }
+                if (!cached && source.values.size() != count) {
+                    std::vector<unsigned int> rows(count);
+                    std::iota(rows.begin(), rows.end(), 0);
+                    source.values = PointStreaming::fetchColumnValues(source.points.get(), source.column, rows,
+                        [job]() { return job->cancelled.load(); },
+                        [job, sourceIndex](std::size_t done, std::size_t total) {
+                            const float width = 0.8f / std::max<std::size_t>(1, job->sources.size());
+                            job->progress->advance(done, total, width * sourceIndex, width * (sourceIndex + 1));
+                        }, workers);
+                    if (cache && !job->cancelled)
+                        cache->put(source.id, job->gene, std::make_shared<const std::vector<float>>(source.values),
+                            [job]() { return job->cancelled.load(); });
+                }
+                ++sourceIndex;
+            }
+            job->progress->phase(QStringLiteral("Preparing scatterplot geometry"), 0.82f);
+            if (!job->cancelled && job->embedding.isValid() && !job->coordinates) {
+                const auto count = job->embedding->getNumPoints();
+                const auto width = job->embedding->getNumDimensions();
+                job->coordinates = std::make_shared<std::vector<float>>(static_cast<std::size_t>(count) * width);
+                std::size_t firstRow = 0, offset = 0;
+                const auto backend = job->embedding->getStorageBackendType();
+                if (!backend || *backend == Points::StorageBackendType::Eager) {
+                    std::vector<int> dimensions(width);
+                    std::iota(dimensions.begin(), dimensions.end(), 0);
+                    job->embedding->populateDataForDimensions(*job->coordinates, dimensions);
+                    firstRow = count;
+                }
+                else job->embedding->visitRange(0, count, 0, width, [&](const PointDataAccessView& view) {
+                    if (job->cancelled) throw std::runtime_error("Cancelled");
+                    if (firstRow + view.rows > count || offset + view.columns > width)
+                        throw std::runtime_error("Unexpected embedding read shape");
+                    for (std::size_t row = 0; row < view.rows; ++row)
+                        for (std::size_t column = 0; column < view.columns; ++column)
+                            (*job->coordinates)[(firstRow + row) * width + offset + column] = valueAt(view, row, column);
+                    offset += view.columns;
+                    if (offset == width) { firstRow += view.rows; offset = 0; }
+                });
+                if (firstRow != count || offset != 0) throw std::runtime_error("Incomplete embedding read");
+            }
+            if (!job->cancelled) { job->outcome = GeneClickJob::Outcome::Ready; job->progress->phase(QStringLiteral("Updating scatterplot colors"), 0.97f); }
+        }
+        catch (const std::exception& error) { job->outcome = GeneClickJob::Outcome::Failed; job->error = QString::fromUtf8(error.what()); }
+    }));
+}
+
+void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool expressionReady)
+{
+    XSC_TRACE("XSCGeneDetectPlugin::applyGeneRowChanged");
     if (!current.isValid()) return;
 
     QString gene = current.siblingAtColumn(0).data().toString();
+    // Selection models can emit currentChanged while restoring the same row. Avoid
+    // repeating point-data reads and rebuilding all dependent views in that case.
+    if (!expressionReady && gene == _settingsAction.getSelectedGeneAction().getString())
+        return;
+    if (!expressionReady) {
     _settingsAction.getSelectedGeneAction().setString(gene);
     _settingsAction.getSelectedRowIndexAction().setString(QString::number(current.row()));
     _settingsAction.getRemoveRowSelection().setEnabled(true);
+    }
     //_settingsAction.enableDisableButtonsAutomatically();
 
 
@@ -4229,20 +4622,20 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
     const auto* model = current.model();
     for (int i = 0; i < model->columnCount(); ++i) {
         const QString columnName = model->headerData(i, Qt::Horizontal).toString();
-        const auto data = current.siblingAtColumn(i).data();
 
         if (columnName == "Gene Appearance Species Names") {
             // skip empty parts: a gene without top-N species must give an EMPTY list, not a list holding ""
-            finalsettingSpeciesNamesArray = data.toString().split(";", Qt::SkipEmptyParts);
+            finalsettingSpeciesNamesArray = current.siblingAtColumn(i).data().toString().split(";", Qt::SkipEmptyParts);
             finalSpeciesNameString = finalsettingSpeciesNamesArray.join(" @%$,$%@ ");
         }
-        else if (columnName == "Statistics") {
-            statisticsText = data.toString();
+        else if (!expressionReady && columnName == "Statistics") {
+            statisticsText = current.siblingAtColumn(i).data().toString();
         }
     }
 
     // ---- 2. Per-species statistics table (also for genes that are no top-N gene of any species: the statistics
     //         text holds the numbers of every species) ----
+    if (!expressionReady) {
     std::map<QString, SpeciesDetailsStats> speciesExpressionMap;
     if (!statisticsText.isEmpty()) {
         speciesExpressionMap = convertToStatisticsMap(statisticsText);
@@ -4252,11 +4645,6 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
     else {
         qDebug() << "Warning: the row of gene" << gene << "has no statistics.";
     }
-
-    // Embedding scatterplot: expression of the clicked gene in the species it appears in
-    // (returns false when the embedding datasets are not set up yet; the tree, the expression colors and the selection
-    //  below do not depend on it and are still updated)
-    showGeneInSpeciesEmbedding(gene, finalsettingSpeciesNamesArray);
 
     auto referenceTreeDataset = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
     if (referenceTreeDataset.isValid()) {
@@ -4269,6 +4657,15 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
         }
     }
 
+    _settingsAction.getSelctedSpeciesVals().setString(finalSpeciesNameString);
+    refreshTraitPlot();
+    refreshSpeciesDeHighlights();
+    return;
+    }
+    // Expression/geometry publication is a separate, cancellable second phase.
+    const auto requestedSpecies = _pendingEmbeddingGene == gene ? _pendingEmbeddingSpecies : finalsettingSpeciesNamesArray;
+    _pendingEmbeddingGene.clear(); _pendingEmbeddingSpecies.clear();
+    showGeneInSpeciesEmbedding(gene, requestedSpecies);
     if (_settingsAction.getScatterplotReembedColorOption().getCurrentText() == "Expression" && !_settingsAction.getPerformGeneTableTsneAction().isChecked()) {
 
 
@@ -4299,17 +4696,13 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 
                 if (indexOfGene.size() > 0 && tempselectIndices.size() > 0)
                 {
-                    selectedPointsMain->populateDataForDimensions(resultContainerColorPoints, indexOfGene, tempselectIndices);
-
-
-
+                    resultContainerColorPoints = geneExpressionValues(selectedPointsMain.get(), gene, indexOfGene.front());
+                    if (resultContainerColorPoints.size() != selectedPointsMain->getNumPoints()) return;
+                    if (_settingsAction.getApplyLogTransformation().isChecked())
+                        applyLogTransformation(resultContainerColorPoints);
                     int rowSizeEmbd = rowSize;
                     int columnSizeEmbd = 1;
                     std::vector<QString> columnGeneEmbd = { gene };
-                    if (_settingsAction.getApplyLogTransformation().isChecked())
-                    {
-                        applyLogTransformation(resultContainerColorPoints);
-                    }
                     //
                     _settingsAction.populatePointData(datasetIdEmb, resultContainerColorPoints, rowSizeEmbd, columnSizeEmbd, columnGeneEmbd);
 
@@ -4345,15 +4738,6 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 
     }
 
-    if (_settingsAction.getSelctedSpeciesVals().getString() == finalSpeciesNameString)
-    {
-        _settingsAction.getSelctedSpeciesVals().setString("");
-    }
-    _settingsAction.getSelctedSpeciesVals().setString(finalSpeciesNameString);
-
-    // an open trait plot shows the newly selected gene
-    refreshTraitPlot();
-    refreshSpeciesDeHighlights(); // ... and so does the species differential expression window
 }
 
 // ============================================================================================================

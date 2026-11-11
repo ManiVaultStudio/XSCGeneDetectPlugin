@@ -140,6 +140,16 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
             if (categoryObject.contains(key)) {
                 keyObject.insert(it.key(), categoryObject.value(key)); // Directly insert the value
             }
+            else {
+                // Picker labels can retain whitespace from comma-separated metadata names.
+                const QString normalized = key.trimmed();
+                for (auto value = categoryObject.begin(); value != categoryObject.end(); ++value) {
+                    if (value.key().trimmed() == normalized) {
+                        keyObject.insert(it.key(), value.value());
+                        break;
+                    }
+                }
+            }
         }
     }
     result.insert("type", key);
@@ -149,9 +159,12 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
 }
 void SettingsAction::updateButtonTriggered()
 {
+    XSC_TRACE("SettingsAction::updateButtonTriggered");
     if (_updateWorkflowRunning)
         return;
 
+    const auto updateTiming = std::make_shared<xsc::timing::AsyncSpan>("update.total");
+    const bool baselineNeeded = !_meanMapComputed || _meanMapSignature != currentMeanMapSignature();
     struct UpdateWorkflowData
     {
         using BaselineMeans = std::unordered_map<QString, std::unordered_map<QString, std::pair<int, float>>>;
@@ -160,6 +173,7 @@ void SettingsAction::updateButtonTriggered()
         QString pointsId;
         QString baselineSignature;
         std::vector<std::seed_seq::result_type> selectedRows;
+        std::vector<std::seed_seq::result_type> selectionSnapshot;
         std::vector<std::vector<std::uint64_t>> speciesRows;
         std::vector<QString> speciesNames;
         std::vector<QString> dimensionNames;
@@ -167,11 +181,13 @@ void SettingsAction::updateButtonTriggered()
         std::vector<int> selectedSpeciesIndex;
         std::vector<std::size_t> selectedCellCounts;
         QString selectedMeansKey;
+        QString cachedSelectedMeansKey;
         int workerLimit = 1;
         std::size_t memoryBudgetBytes = 64u << 20;
         bool inputsReady = false;
         bool needsBaselineScan = false;
         bool needsSelectedScan = false;
+        bool selectedScanFinished = false;
         bool staleInputs = false;
         bool published = false;
         BaselineMeans baselineMeans;
@@ -182,6 +198,7 @@ void SettingsAction::updateButtonTriggered()
     auto workflow = std::make_unique<mv::workflow::WorkflowPlan>(QStringLiteral("Update selection statistics"));
 
     workflow->addSequentialStage(QStringLiteral("Prepare selection update"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        XSC_TRACE("update.stage.Prepare selection update");
         showStatusMessage(QStringLiteral("Preparing selection update..."), QStringLiteral("#007bff"));
 
         const auto pointsPicker = _mainPointsDataset.getCurrentDataset();
@@ -211,7 +228,8 @@ void SettingsAction::updateButtonTriggered()
         const auto selected = data->points->getSelectionIndices();
         data->pointsId = data->points->getId();
         data->baselineSignature = currentMeanMapSignature();
-        data->selectedRows.assign(selected.begin(), selected.end());
+        data->selectionSnapshot.assign(selected.begin(), selected.end());
+        data->selectedRows = data->selectionSnapshot;
         data->dimensionNames = data->points->getDimensionNames();
         const auto geneCount = PointStreaming::usableGeneCount(data->dimensionNames.size(), data->points->getNumDimensions());
         data->geneColumns.resize(geneCount);
@@ -229,13 +247,15 @@ void SettingsAction::updateButtonTriggered()
         }
 
         data->needsBaselineScan = !_meanMapComputed || _meanMapSignature != data->baselineSignature;
-        const auto hashInts = [](std::uint64_t seed, const auto& values) {
-            std::uint64_t hash = seed;
-            for (const auto value : values)
-                hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(value)) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
-            return hash;
-        };
+        data->cachedSelectedMeansKey = _selectedMeansCache.key;
+        data->inputsReady = true;
+        context->setProgress(1.0);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.015);
 
+    workflow->addSequentialStage(QStringLiteral("Index selected cells by species"), [data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        XSC_TRACE("update.stage.Index selected cells by species");
+        if (!data->inputsReady) { context->setProgress(1.0); return; }
+        std::sort(data->selectedRows.begin(), data->selectedRows.end());
         std::vector<int> selectedPositionOf(static_cast<std::size_t>(data->points->getNumPoints()), -1);
         for (int selectedPosition = 0; selectedPosition < static_cast<int>(data->selectedRows.size()); ++selectedPosition)
         {
@@ -259,16 +279,14 @@ void SettingsAction::updateButtonTriggered()
             }
         }
 
-        data->selectedMeansKey = QString::number(hashInts(hashInts(1469598103934665603ull, data->selectedRows), data->selectedSpeciesIndex), 16)
-            + QLatin1Char('|') + data->pointsId + QLatin1Char('|') + QString::number(geneCount) + QLatin1Char('|')
-            + QString::number(data->speciesRows.size()) + QLatin1Char('|') + QString::number(data->selectedRows.size());
+        data->selectedMeansKey = selectedMeansKey(data->pointsId, data->selectedRows, data->selectedSpeciesIndex,
+            data->geneColumns.size(), data->speciesRows.size());
         data->needsSelectedScan = !data->selectedRows.empty() && !data->speciesRows.empty() && !data->geneColumns.empty()
-            && data->selectedMeansKey != _selectedMeansCache.key;
-        data->inputsReady = true;
+            && data->selectedMeansKey != data->cachedSelectedMeansKey;
         context->setProgress(1.0);
-    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.05);
-
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.015);
     workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        XSC_TRACE("update.stage.Scan species-wide baseline means");
         if (!data->inputsReady || !data->needsBaselineScan)
         {
             context->setProgress(1.0);
@@ -287,7 +305,17 @@ void SettingsAction::updateButtonTriggered()
         qInfo() << "[Baseline] scanning" << data->points->getNumPoints() << "cells," << data->geneColumns.size()
                 << "genes across" << data->speciesRows.size() << "species";
         int lastProgressPercent = -1;
-        const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), data->speciesRows, data->geneColumns,
+        // Baseline and selected sums share the same decoded matrix tiles.
+        // Append the selected per-species groups and obtain both in one pass.
+        auto groups = data->speciesRows;
+        if (data->needsSelectedScan) {
+            groups.resize(data->speciesRows.size() * 2);
+            for (std::size_t i = 0; i < data->selectedRows.size(); ++i) {
+                const int species = data->selectedSpeciesIndex[i];
+                if (species >= 0) groups[data->speciesRows.size() + species].push_back(data->selectedRows[i]);
+            }
+        }
+        const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), groups, data->geneColumns,
             data->workerLimit, data->memoryBudgetBytes, false,
             [context, progressTask, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
                 if (total > 0)
@@ -296,7 +324,7 @@ void SettingsAction::updateButtonTriggered()
                 if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total)
                 {
                     if (progressTask)
-                        progressTask->setProgressDescription(QStringLiteral("Baseline means: %1% (%2 / %3 blocks)").arg(percent).arg(completed).arg(total));
+                        progressTask->setProgressDescription(QStringLiteral("Baseline means and fast gene blocks: %1% (%2 / %3 tiles)").arg(percent).arg(completed).arg(total));
                     qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent << "% ) at" << scanTimer.elapsed() << "ms";
                     lastProgressPercent = percent;
                 }
@@ -312,13 +340,26 @@ void SettingsAction::updateButtonTriggered()
             for (std::size_t geneIndex = 0; geneIndex < data->geneColumns.size(); ++geneIndex)
                 means[data->dimensionNames[geneIndex]] = { static_cast<int>(count), static_cast<float>(aggregated.sums[speciesIndex][geneIndex] / count) };
         }
+        if (data->needsSelectedScan) {
+            const auto speciesCount = data->speciesRows.size();
+            data->selectedMeans.assign(speciesCount, std::vector<float>(data->geneColumns.size(), 0.0f));
+            for (std::size_t species = 0; species < speciesCount; ++species) {
+                const auto count = aggregated.counts[speciesCount + species];
+                if (count == 0) continue;
+                for (std::size_t gene = 0; gene < data->geneColumns.size(); ++gene)
+                    data->selectedMeans[species][gene] = static_cast<float>(aggregated.sums[speciesCount + species][gene] / count);
+            }
+            data->selectedScanFinished = true;
+            qInfo() << "[Update] baseline and selected means prepared in one scan";
+        }
         if (progressTask)
             progressTask->setProgressDescription(QStringLiteral("Baseline means ready; continuing selection update..."));
         context->setProgress(1.0);
-    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.45);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.86 : 0.01);
 
     workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
-        if (!data->inputsReady || !data->needsSelectedScan || data->geneColumns.empty())
+        XSC_TRACE("update.stage.Scan selected gene means");
+        if (!data->inputsReady || !data->needsSelectedScan || data->selectedScanFinished || data->geneColumns.empty())
         {
             context->setProgress(1.0);
             return;
@@ -394,14 +435,15 @@ void SettingsAction::updateButtonTriggered()
                 data->selectedMeans[speciesIndex][geneIndex] = static_cast<float>(stage1.sums[speciesIndex][geneIndex] / static_cast<double>(selectedCount));
         }
         context->setProgress(1.0);
-    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.35);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.01 : 0.86);
 
     workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        XSC_TRACE("update.stage.Publish selection datasets and update views");
         if (data->inputsReady)
         {
             auto currentPoints = _mainPointsDataset.getCurrentDataset();
             const auto currentSelection = currentPoints.isValid() ? currentPoints->getSelectionIndices() : std::vector<std::seed_seq::result_type>{};
-            if (!currentPoints.isValid() || currentPoints->getId() != data->pointsId || currentMeanMapSignature() != data->baselineSignature || currentSelection != data->selectedRows)
+            if (!currentPoints.isValid() || currentPoints->getId() != data->pointsId || currentMeanMapSignature() != data->baselineSignature || currentSelection != data->selectionSnapshot)
             {
                 data->staleInputs = true;
                 context->setProgress(1.0);
@@ -424,7 +466,7 @@ void SettingsAction::updateButtonTriggered()
             data->published = true;
         }
         context->setProgress(1.0);
-    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.15);
+    }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.10);
 
     mv::workflow::WorkflowOptions options;
     options.reporting.progress = true;
@@ -455,7 +497,8 @@ void SettingsAction::updateButtonTriggered()
         notification->show();
         notification->raise();
     }
-    future.onFinished(this, [this, data](const mv::workflow::SharedWorkflowResult& result) {
+    future.onFinished(this, [this, data, updateTiming](const mv::workflow::SharedWorkflowResult& result) {
+        updateTiming->finish();
         stopCodeTimer("UpdateGeneFilteringTrigger");
         _updateWorkflowRunning = false;
 
@@ -476,13 +519,14 @@ void SettingsAction::updateButtonTriggered()
 
         _pauseStatusUpdates = false;
         enableActions();
-        QApplication::processEvents();
         if (data->published && !data->staleInputs)
         {
             auto pointsDataset = _mainPointsDataset.getCurrentDataset();
             if (pointsDataset.isValid())
-                pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
+                if (pointsDataset->getSelectionIndices() != _selectedIndicesFromStorage) pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
         }
+        if (data->published && !data->staleInputs)
+            QTimer::singleShot(0, &_XSCGeneDetectPlugin, [this]() { _XSCGeneDetectPlugin.prepareExplorationForCurrentTable(); });
     });
 }
 
@@ -566,7 +610,6 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
         }
         _selectedIndicesFromStorage.clear();
         _selectedIndicesFromStorage = pointsDataset->getSelectionIndices();
-        markSelectionChanged(); // cached trait-correlation means refer to the previous selection
 
         auto embeddingDatasetRaw = mv::data().getDataset<Points>(embeddingDataset->getId());
         auto pointsDatasetRaw = mv::data().getDataset<Points>(pointsDataset->getId());
@@ -1314,16 +1357,8 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
                         // sums for all genes; the blocks are merged in a fixed order, so the result does not depend on timing.
                         // Stage 1 (the full scan of the selected cells) only depends on the selected cells, their species and the genes:
                         // when those are unchanged (a change of top-N, cell type or trait) the previous result is reused.
-                        const auto hashInts = [](std::uint64_t seed, const auto& values) {
-                            std::uint64_t hash = seed;
-                            for (const auto value : values) {
-                                hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(value)) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
-                            }
-                            return hash;
-                            };
-                        const QString stage1Key = QString::number(hashInts(hashInts(1469598103934665603ull, _selectedIndicesFromStorage), selectedPointSpeciesIndex), 16)
-                            + QLatin1Char('|') + pointsDatasetRaw->getId() + QLatin1Char('|') + QString::number(totalGeneCount) + QLatin1Char('|')
-                            + QString::number(speciesCount) + QLatin1Char('|') + QString::number(_selectedIndicesFromStorage.size());
+                        const QString stage1Key = selectedMeansKey(pointsDatasetRaw->getId(), _selectedIndicesFromStorage,
+                            selectedPointSpeciesIndex, totalGeneCount, speciesCount);
                         const bool stage1Cached = (stage1Key == _selectedMeansCache.key);
                         logUpdateStage(stage1Cached ? "reusing selected gene means" : "computing selected gene means");
                         auto& speciesSelectedMeans = _selectedMeansCache.means; // the cache owns the matrix (no second copy)
@@ -2761,9 +2796,30 @@ void SettingsAction::applyClusterLabelSelectionStyles()
     }
 }
 
+void SettingsAction::invalidateTraitResults()
+{
+    _traitPublishedKey.clear();
+    if (_traitSampleSize == 0 && _geneTraitValuesComputed.empty()) return;
+    _geneTraitValuesComputed.clear(); _geneTraitPValues.clear();
+    _geneTraitFdrValues.clear(); _geneTraitExtras.clear();
+    _traitSampleSize = 0; _traitMatrix = TraitMatrix();
+    _traitMethodNote.clear(); _traitSignificanceBasis.clear();
+    _traitContributionShown = false; _traitValueLabel.clear();
+    publishTraitCorrelationToModel();
+    _XSCGeneDetectPlugin.refreshTraitPlot();
+}
+
 void SettingsAction::updateTraitReverseSearchFeature()
 {
     XSC_TRACE("SettingsAction::updateTraitReverseSearchFeature");
+    if (!_traitWorkflow.active) { invalidateTraitResults(); return; }
+    if (_explorationSuspended) return;
+    if (_deWorkflow.busy()) {
+        _traitWorkflow.pending = true;
+        if (!_traitProgress.running()) _traitProgress.begin(this, QStringLiteral("Trait correlation"));
+        _traitProgress.state()->phase(QStringLiteral("Waiting for differential expression preparation"), 0);
+        return;
+    }
     // Many events request a refresh within the same event-loop burst (species selection, trait change, cell type click,
     // gene click, new model, ...). The single-shot timer coalesces them into one computation.
     if (_traitCorrelationTimer) {
@@ -2777,16 +2833,27 @@ void SettingsAction::updateTraitReverseSearchFeature()
 void SettingsAction::onTraitJobsFinished()
 {
     XSC_TRACE("SettingsAction::onTraitJobsFinished");
-    QGuiApplication::restoreOverrideCursor();
-    if (_traitJobs) {
+    _traitReadTiming.reset();
+    const bool failed = _traitReadCancel && !*_traitReadCancel && _traitJobWatcher.future().isCanceled();
+    if (!failed && _traitJobs && _traitReadCancel && !*_traitReadCancel) {
         for (auto& job : *_traitJobs) {
             _traitCache.entries[job.key] = std::move(job.entry);
         }
-        _traitJobs.reset();
     }
+    _traitJobs.reset();
     _traitJobDataset = Dataset<Points>();
-    _traitJobRunning = false;
-    _traitRecomputePending = false;
+    _traitWorkflow.finish();
+    _traitWorkflow.pending = false;
+    if ((_traitReadCancel && *_traitReadCancel) || !_traitWorkflow.active) {
+        if (!_explorationSuspended) prepareExplorationAnalysis();
+        return;
+    }
+    if (failed) {
+        _traitProgress.cancel();
+        showStatusMessage(QStringLiteral("Trait data could not be read. Run Update to retry."), QStringLiteral("#dc3545"));
+        if (_deWorkflow.active) requestSpeciesDifferentialExpression();
+        return;
+    }
 
     computeTraitCorrelation(); // all means are cached now (or the selection changed meanwhile and new ones are read)
 }
@@ -2794,12 +2861,14 @@ void SettingsAction::onTraitJobsFinished()
 void SettingsAction::computeTraitCorrelation()
 {
     XSC_TRACE("SettingsAction::computeTraitCorrelation");
+    if (_explorationSuspended || !_traitWorkflow.active) return;
     // The expression data is read in the background (see below); until that is finished a new request only has to be remembered,
     // because the cache the background job fills must not be touched.
-    if (_traitJobRunning) {
-        _traitRecomputePending = true;
+    if (_traitWorkflow.busy()) {
+        _traitWorkflow.pending = true;
         return;
     }
+    if (_deWorkflow.busy()) { _traitWorkflow.pending = true; return; }
 
     // ---- 1. Validate inputs ---------------------------------------------------------------------------
     if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
@@ -2812,6 +2881,7 @@ void SettingsAction::computeTraitCorrelation()
         cellTypes << _selectedClusterName;
     }
     if (traitName.isEmpty() || cellTypes.isEmpty()) {
+        _traitProgress.cancel();
         // nothing to correlate with: do not leave the values of a previous trait in the table
         _geneTraitValuesComputed.clear();
         _geneTraitPValues.clear();
@@ -2824,6 +2894,7 @@ void SettingsAction::computeTraitCorrelation()
         _traitMatrix = TraitMatrix();
         _traitSignificanceBasis.clear();
         publishTraitCorrelationToModel();
+        if (_deWorkflow.active) requestSpeciesDifferentialExpression();
         return;
     }
 
@@ -2835,13 +2906,14 @@ void SettingsAction::computeTraitCorrelation()
 
     // Genes to correlate. The gene table lists the top-N genes (a few hundred): reading only their expression instead of all
     // ~20,000 genes is what makes the analysis fast. The selected gene is always included (it feeds the plot).
-    const bool allGenes = (_traitGeneScope.getCurrentText() == "All genes (slower)") || _uniqueReturnGeneList.isEmpty();
+    const bool allGenes = _traitWindowOpen && (_traitGeneScope.getCurrentText() == "All genes (slower)");
+    const auto requestScope = traitRequestScope(_traitWindowOpen, allGenes);
     const QString selectedGeneName = _selectedGene.getString();
     std::vector<int> geneDims;
     std::vector<QString> geneNames;
     const size_t usableGenes = PointStreaming::usableGeneCount(allGeneNames.size(), mainPointsDataset->getNumDimensions());
     for (size_t g = 0; g < usableGenes; ++g) {
-        if (allGenes || _uniqueReturnGeneList.contains(allGeneNames[g]) || allGeneNames[g] == selectedGeneName) {
+        if (includesTraitGene(requestScope, _uniqueReturnGeneList.contains(allGeneNames[g]), allGeneNames[g] == selectedGeneName)) {
             geneDims.push_back(static_cast<int>(g));
             geneNames.push_back(allGeneNames[g]);
         }
@@ -2850,6 +2922,8 @@ void SettingsAction::computeTraitCorrelation()
     if (geneCount == 0) {
         return;
     }
+    const auto progress = _traitProgress.running() ? _traitProgress.state()
+        : _traitProgress.begin(this, QStringLiteral("Trait correlation: %1").arg(traitName));
 
     // ---- 2. Trait value per species (metadata of the Phylogenetic Tree View) ----------------------------
     QString metaOptions;
@@ -2986,7 +3060,9 @@ void SettingsAction::computeTraitCorrelation()
                     if (job.genes.empty()) {
                         continue; // everything needed is cached
                     }
-                    job.entry = std::move(cached->second); // moved, not copied: it is put back into the cache when the reads are done
+                    // Keep already-known means usable when an interactive
+                    // color request cancels this incremental read.
+                    job.entry = cached->second;
                 }
                 else {
                     job.genes = geneDims;
@@ -3032,17 +3108,20 @@ void SettingsAction::computeTraitCorrelation()
 
             _traitJobs = std::make_shared<std::vector<TraitEntryJob>>(std::move(missingJobs));
             _traitJobDataset = mainPointsDataset;
-            _traitJobRunning = true;
-            QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+            _traitWorkflow.beginRead();
 
             const auto jobs = _traitJobs;
+            const auto cancel = _traitReadCancel = _traitWorkflow.cancellation();
             const Dataset<Points>* datasetHandle = &_traitJobDataset; // member: stays valid while the job runs
             const int workers = parallelWorkers(largestPointSet);
             const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
 
             showStatusMessage(QStringLiteral("Reading trait data"), QStringLiteral("#007bff"));
 
-            _traitJobWatcher.setFuture(QtConcurrent::run([this, jobs, datasetHandle, workers, scratchBudgetBytes]() {
+            _traitReadTiming = std::make_unique<xsc::timing::AsyncSpan>("trait.read.total");
+            _traitJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, scratchBudgetBytes, cancel, progress]() {
+            XSC_TRACE("trait.read.worker");
+                progress->phase(QStringLiteral("Reading species expression means"), 0.02f);
                 std::vector<int> geneToSlot(PointStreaming::usableGeneCount(
                     datasetHandle->get()->getDimensionNames().size(), datasetHandle->get()->getNumDimensions()), -1);
                 std::vector<int> requestedGenes;
@@ -3062,7 +3141,9 @@ void SettingsAction::computeTraitCorrelation()
                 // For a dense request, all species/cell-type pairs share one read of the matrix.
                 // Preserve the sparse-column reader for very small gene sets to avoid scanning empty columns.
                 const size_t geneSpan = requestedGenes.empty() ? 0 : static_cast<size_t>(requestedGenes.back()) + 1;
-                bool groupedRead = requestedGenes.size() >= 32 || requestedGenes.size() * 4 >= geneSpan;
+                const auto source = datasetHandle->get();
+                const bool tiledSource = !source->isProxy() && source->isFull() && source->getTiledStorage();
+                bool groupedRead = tiledSource || requestedGenes.size() >= 32 || requestedGenes.size() * 4 >= geneSpan;
                 if (groupedRead) {
                     std::vector<std::vector<std::uint64_t>> groupedPoints;
                     groupedPoints.reserve(jobs->size());
@@ -3084,7 +3165,11 @@ void SettingsAction::computeTraitCorrelation()
                     groupedRead = indexBytes <= scratchBudgetBytes && stateBytes <= scratchBudgetBytes - indexBytes;
                     if (groupedRead) {
                         const auto grouped = PointStreaming::aggregateGroupedColumns(datasetHandle->get(), groupedPoints,
-                            requestedGenes, workers, scratchBudgetBytes);
+                            requestedGenes, workers, scratchBudgetBytes, false,
+                            [cancel, progress](std::size_t done, std::size_t total) {
+                                if (*cancel) throw std::runtime_error("Cancelled");
+                                progress->advance(done, total, 0.02f, 0.60f);
+                            });
                         for (size_t jobIndex = 0; jobIndex < jobs->size(); ++jobIndex) {
                             auto& job = (*jobs)[jobIndex];
                             const std::uint64_t count = grouped.counts[jobIndex];
@@ -3114,7 +3199,8 @@ void SettingsAction::computeTraitCorrelation()
                             return;
                         }
                         computeChunkedGeneMeans(*datasetHandle, job.genes, points,
-                            [&job](int, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
+                            [&job, cancel](int, const std::vector<int>& chunkGenes, const std::vector<float>& chunkMeans) {
+                                if (*cancel) throw std::runtime_error("Cancelled");
                                 for (size_t g = 0; g < chunkGenes.size(); ++g) {
                                     const size_t gene = static_cast<size_t>(chunkGenes[g]);
                                     job.entry.means[gene] = chunkMeans[g];
@@ -3123,7 +3209,8 @@ void SettingsAction::computeTraitCorrelation()
                             });
                     });
                 }
-                QMetaObject::invokeMethod(this, [this]() {
+                QMetaObject::invokeMethod(this, [this, cancel]() {
+                    if (*cancel) return;
                     showStatusMessage(QStringLiteral("Trait data ready"), QStringLiteral("#007bff"));
                     }, Qt::QueuedConnection);
                 }));
@@ -3138,17 +3225,10 @@ void SettingsAction::computeTraitCorrelation()
         }
     }
 
-    _geneTraitValuesComputed.clear();
-    _geneTraitPValues.clear();
-    _geneTraitFdrValues.clear();
-    _geneTraitExtras.clear();
-    _traitSampleSize = 0;
-    _traitMethodNote.clear();
-    _traitContributionShown = false;
-    _traitValueLabel.clear();
-    _traitMatrix = TraitMatrix();
-    _traitSignificanceBasis.clear();
     if (usable.size() < kMinSpeciesForTraitCorrelation) {
+        _traitProgress.cancel();
+        _geneTraitValuesComputed.clear(); _geneTraitPValues.clear(); _geneTraitFdrValues.clear(); _geneTraitExtras.clear();
+        _traitSampleSize = 0; _traitMatrix = TraitMatrix(); _traitMethodNote.clear();
         qDebug() << "Trait correlation needs at least" << kMinSpeciesForTraitCorrelation << "species with trait values and at least" << minCells << "cells of the selected cell types; found" << usable.size();
         qInfo() << "[Trait] trait:" << traitName << "cell types:" << cellTypes
                 << "metadata species:" << traitObject.size() << "expression species:" << speciesClusters.size()
@@ -3175,6 +3255,7 @@ void SettingsAction::computeTraitCorrelation()
             }
         }
         publishTraitCorrelationToModel();
+        if (_deWorkflow.active) requestSpeciesDifferentialExpression();
         return;
     }
 
@@ -3303,47 +3384,103 @@ void SettingsAction::computeTraitCorrelation()
         expressionRows.push_back(&row);
     }
 
-    // `plan.selected` already refers to rows of the matrix: for the contribution scope the population is everybody (same indices)
-    const TraitStatisticsContext statisticsContext = prepareTraitStatisticsContext(method, traitValues, treeNodes, treeRoot, plan.selected);
-
-    // Phylogenetically corrected statistics next to the chosen method (when that is not already the phylogenetic one)
+    // Pool the small species x genes matrix on the GUI thread, then snapshot it.
+    // All expensive per-gene statistics and multiple-testing correction run in the worker.
+    for (size_t i = 0; i < population.size(); ++i)
+        combineCellTypeMeans(partsPerSpecies[i], pooling, GeneRange{ 0, geneCount }, expressionMatrix[i]);
     const bool phyloSeparate = (method != TraitMethod::Phylogenetic) && treeUsable;
-    const TraitStatisticsContext phyloContext = phyloSeparate ? prepareTraitStatisticsContext(TraitMethod::Phylogenetic, traitValues, treeNodes, treeRoot) : TraitStatisticsContext();
-
-    std::vector<GeneTraitStatistics> statistics(geneCount);
-    std::vector<GeneTraitStatistics> phyloStatistics(phyloSeparate ? geneCount : 0);
-
-    // ---- 9. Statistics of every gene (parallel over gene ranges) ----------------------------------------------------
-    // Every worker owns a range of genes: it combines the cached per cell type means into the species rows of X and
-    // computes correlation, p-value, confidence interval, leave-one-out range and contribution. Disjoint ranges -> no locking.
-    auto geneRanges = splitGeneRanges(geneCount, static_cast<size_t>(std::max(1, QThread::idealThreadCount())) * 4);
-    QtConcurrent::blockingMap(geneRanges, [&](GeneRange& range) {
-        for (size_t i = 0; i < population.size(); ++i) {
-            combineCellTypeMeans(partsPerSpecies[i], pooling, range, expressionMatrix[i]);
-        }
-        computeTraitStatistics(expressionRows, statisticsContext, range, statistics);
-        if (phyloSeparate) {
-            computeTraitStatistics(expressionRows, phyloContext, range, phyloStatistics);
-        }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    const auto addVector = [&hash](const auto& values) {
+        const quint64 count = values.size();
+        hash.addData(QByteArrayView(reinterpret_cast<const char*>(&count), sizeof(count)));
+        if (!values.empty()) hash.addData(QByteArrayView(reinterpret_cast<const char*>(values.data()),
+            static_cast<qsizetype>(values.size() * sizeof(values.front()))));
+    };
+    const std::vector<int> options{ static_cast<int>(method), treeRoot, phyloSeparate ? 1 : 0 };
+    addVector(options); addVector(geneDims); addVector(traitValues); addVector(plan.selected);
+    for (const auto& row : expressionMatrix) addVector(row);
+    for (const auto& node : treeNodes) {
+        addVector(std::vector<int>{ node.leafIndex });
+        addVector(std::vector<double>{ node.branchLength });
+        addVector(node.children);
+    }
+    const QByteArray statisticsKey = hash.result();
+    if (!_traitStatistics || _traitStatistics->key != statisticsKey) {
+        auto batch = std::make_shared<TraitStatisticsBatch>();
+        const auto cancel = _traitWorkflow.cancellation();
+        const auto selected = plan.selected;
+        const int mathWorkers = std::max(1, _maxWorkerThreads.getValue());
+        _traitWorkflow.beginCompute();
+        disconnect(&_traitStatisticsWatcher, nullptr, this, nullptr);
+        connect(&_traitStatisticsWatcher, &QFutureWatcher<void>::finished, this, [this, batch, cancel]() {
+            _traitStatsTiming.reset();
+            _traitWorkflow.finish();
+            if (*cancel || !_traitWorkflow.active) {
+                if (!_explorationSuspended) prepareExplorationAnalysis();
+                return;
+            }
+            if (!*cancel && batch->key.isEmpty()) {
+                _traitProgress.cancel();
+                showStatusMessage(QStringLiteral("Trait calculation could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
+                if (_deWorkflow.active) requestSpeciesDifferentialExpression();
+                return;
+            }
+            if (!*cancel && !batch->key.isEmpty()) _traitStatistics = batch;
+            computeTraitCorrelation();
         });
-
-    // ---- 10. Multiple testing correction and result -------------------------------------------------------------------
-    // p-value, FDR, confidence interval and leave-one-out describe the correlation across the compared species (chosen method).
-    std::vector<float> pValues(geneCount);
-    for (size_t g = 0; g < geneCount; ++g) {
-        pValues[g] = statistics[g].pValue;
+        _traitStatsTiming = std::make_unique<xsc::timing::AsyncSpan>("trait.statistics.total");
+        _traitStatisticsWatcher.setFuture(QtConcurrent::run(&_explorationPool, [batch, cancel, matrix = std::move(expressionMatrix),
+            traitValues, treeNodes, treeRoot, method, selected, phyloSeparate, statisticsKey, geneCount, progress, mathWorkers]() {
+            XSC_TRACE("trait.statistics.worker");
+            progress->phase(QStringLiteral("Computing trait correlations and significance"), 0.62f);
+            if (*cancel) return;
+            std::vector<const std::vector<float>*> rows;
+            for (const auto& row : matrix) rows.push_back(&row);
+            const auto context = prepareTraitStatisticsContext(method, traitValues, treeNodes, treeRoot, selected);
+            const auto phyloContext = phyloSeparate
+                ? prepareTraitStatisticsContext(TraitMethod::Phylogenetic, traitValues, treeNodes, treeRoot) : TraitStatisticsContext();
+            batch->statistics.resize(geneCount);
+            batch->phyloStatistics.resize(phyloSeparate ? geneCount : 0);
+            // Disjoint short ranges retain prompt cancellation and use the
+            // configured worker count without serializing per-gene statistics.
+            auto ranges = splitGeneRanges(geneCount, (geneCount + 31) / 32);
+            QThreadPool pool;
+            pool.setMaxThreadCount(mathWorkers);
+            std::atomic<std::size_t> completed{0};
+            QtConcurrent::blockingMap(&pool, ranges, [&](GeneRange& range) {
+                if (*cancel) return;
+                computeTraitStatistics(rows, context, range, batch->statistics);
+                if (phyloSeparate) computeTraitStatistics(rows, phyloContext, range, batch->phyloStatistics);
+                progress->advance(completed.fetch_add(range.end - range.begin) + range.end - range.begin, geneCount, 0.62f, 0.94f);
+            });
+            if (*cancel) return;
+            progress->phase(QStringLiteral("Correcting trait significance values"), 0.95f);
+            std::vector<float> pValues(geneCount);
+            for (size_t g = 0; g < geneCount; ++g) pValues[g] = batch->statistics[g].pValue;
+            batch->fdr = benjaminiHochberg(pValues);
+            if (phyloSeparate) {
+                for (size_t g = 0; g < geneCount; ++g) pValues[g] = batch->phyloStatistics[g].pValue;
+                batch->phyloFdr = benjaminiHochberg(pValues);
+            }
+            if (!*cancel) batch->key = statisticsKey;
+        }));
+        return;
     }
-    const std::vector<float> fdrValues = benjaminiHochberg(pValues);
-
-    std::vector<float> phyloFdrValues;
-    if (phyloSeparate) {
-        std::vector<float> phyloPValues(geneCount);
-        for (size_t g = 0; g < geneCount; ++g) {
-            phyloPValues[g] = phyloStatistics[g].pValue;
-        }
-        phyloFdrValues = benjaminiHochberg(phyloPValues);
+    const auto& statistics = _traitStatistics->statistics;
+    const auto& phyloStatistics = _traitStatistics->phyloStatistics;
+    const auto& fdrValues = _traitStatistics->fdr;
+    const auto& phyloFdrValues = _traitStatistics->phyloFdr;
+    const auto currentModel = _listModel.getVariant().value<QAbstractItemModel*>();
+    if (_traitPublishedKey == statisticsKey && _traitPublishedModel == currentModel) {
+        for (std::size_t i = 0; i < _traitMatrix.species.size(); ++i)
+            _traitMatrix.selected[i] = explorerSelection.contains(_traitMatrix.species[i]) ? 1 : 0;
+        _traitProgress.finish();
+        _XSCGeneDetectPlugin.refreshTraitPlot();
+        if (_deWorkflow.active) requestSpeciesDifferentialExpression();
+        return;
     }
-
+    progress->phase(QStringLiteral("Publishing trait table and plots"), 0.98f);
+    _geneTraitValuesComputed.clear(); _geneTraitPValues.clear(); _geneTraitFdrValues.clear(); _geneTraitExtras.clear();
     _geneTraitValuesComputed.reserve(geneCount);
     _geneTraitPValues.reserve(geneCount);
     _geneTraitFdrValues.reserve(geneCount);
@@ -3429,7 +3566,7 @@ void SettingsAction::computeTraitCorrelation()
     }
 
     _traitSampleSize = sampleSize;
-    const QString genesText = (allGenes || _uniqueReturnGeneList.isEmpty())
+    const QString genesText = !_traitWindowOpen ? QStringLiteral("On-demand correlation for the selected gene; FDR is restricted to this requested gene, not all genes.") : allGenes
         ? QString("Genes correlated: all %1 genes (FDR over all genes)").arg(geneCount)
         : QString("Genes correlated: %1 listed top-N genes (FDR over these genes)").arg(geneCount);
     _traitMethodNote = methodName + "\n" + selectionText + "\n" + genesText;
@@ -3455,8 +3592,11 @@ void SettingsAction::computeTraitCorrelation()
     _traitValueLabel = QString(plan.contribution ? "Trait contribution of selected species (%1)" : "Trait correlation (%1)").arg(methodShortName);
 
     publishTraitCorrelationToModel();
+    _traitPublishedKey = statisticsKey; _traitPublishedModel = currentModel;
     showStatusMessage(QString("Trait ready: %1 species, %2 genes").arg(population.size()).arg(geneCount),
         QStringLiteral("#28a745"));
+    _traitProgress.finish();
+    if (_deWorkflow.active) requestSpeciesDifferentialExpression();
 }
 
 void SettingsAction::publishTraitCorrelationToModel()
@@ -3489,14 +3629,15 @@ void SettingsAction::publishTraitCorrelationToModel()
                 pIt != _geneTraitPValues.end() ? static_cast<double>(pIt->second) : 1.0,
                 qIt != _geneTraitFdrValues.end() ? static_cast<double>(qIt->second) : 1.0,
                 eIt != _geneTraitExtras.end() ? eIt->second : GeneTraitExtras(),
-                _traitSampleSize, _traitMethodNote, _traitSignificanceBasis);
-            if (rIt == _geneTraitValuesComputed.end() && _traitSampleSize > 0) {
+                rIt != _geneTraitValuesComputed.end() ? _traitSampleSize : 0, _traitMethodNote, _traitSignificanceBasis);
+            if (rIt == _geneTraitValuesComputed.end() && _traitSampleSize > 0 && _traitWindowOpen) {
                 correlationItem->setData("Not part of the trait analysis: the trait correlation is computed for the listed top-N genes only\n(setting Trait Correlation Genes -> All genes (slower) includes every gene).", Qt::ToolTipRole);
             }
         }
     }
 
     emit model->dataChanged(model->index(0, kTraitCorrelationColumn), model->index(model->rowCount() - 1, kTraitCorrelationColumn), { Qt::DisplayRole, Qt::UserRole, Qt::ToolTipRole, kTraitPValueRole, kTraitFdrRole, kTraitStatsRole, kTraitSignificanceFdrRole });
+    _XSCGeneDetectPlugin.refreshTraitColumnVisibility();
 }
 
 
@@ -3927,19 +4068,75 @@ void SettingsAction::showStatusMessage(const QString& text, const QString& backg
     _statusBarActionWidget->setStyleSheet("QStatusBar{padding-left:8px;background:" + backgroundColor + ";color:white;}");
 }
 
+void SettingsAction::cancelExplorationAnalysis()
+{
+    XSC_TRACE("SettingsAction::cancelExplorationAnalysis");
+    _explorationSuspended = true;
+    _traitProgress.cancel(); _deProgress.cancel();
+    _deWorkflow.cancel(); _traitWorkflow.cancel();
+    invalidateTraitResults();
+    if (_deTimer) _deTimer->stop();
+    if (_traitCorrelationTimer) _traitCorrelationTimer->stop();
+    _traitStatistics.reset();
+    _traitPublishedKey.clear(); _dePublishedKey.clear();
+    _deStats.reset();
+    _deOverview.reset();
+}
+
+void SettingsAction::prepareExplorationAnalysis()
+{
+    _explorationSuspended = false;
+    _traitWorkflow.setActive(_traitWindowOpen || !_selectedGene.getString().isEmpty());
+    _deWorkflow.resume(); _traitWorkflow.resume();
+    _explorationPool.setMaxThreadCount(1);
+    _explorationPool.setThreadPriority(QThread::LowPriority);
+    if (_deWorkflow.active) {
+        _traitWorkflow.pending = _traitWorkflow.active && !_reverseSearchTraitSelectionString.getString().isEmpty();
+        requestSpeciesDifferentialExpression();
+    }
+    else if (_traitWorkflow.active && !_reverseSearchTraitSelectionString.getString().isEmpty()) updateTraitReverseSearchFeature();
+}
+
+
+void SettingsAction::setTraitAnalysisActive(bool active)
+{
+    if (!active && _traitWindowOpen) _traitWorkflow.cancel();
+    _traitWindowOpen = active;
+    _traitWorkflow.setActive(active || !_selectedGene.getString().isEmpty());
+    if (_traitWorkflow.active) updateTraitReverseSearchFeature();
+}
+
+void SettingsAction::requestTraitForSelectedGene()
+{
+    if (_selectedGene.getString().isEmpty()) return;
+    _traitWorkflow.setActive(true);
+    updateTraitReverseSearchFeature();
+}
+
 void SettingsAction::setSpeciesDeActive(bool active)
 {
     XSC_TRACE("SettingsAction::setSpeciesDeActive");
-    _deActive = active;
+    _deWorkflow.setActive(active);
     if (active) {
         requestSpeciesDifferentialExpression();
+    }
+    else {
+        if (_deTimer) _deTimer->stop();
+        _deProgress.cancel();
     }
 }
 
 void SettingsAction::requestSpeciesDifferentialExpression()
 {
     XSC_TRACE("SettingsAction::requestSpeciesDifferentialExpression");
-    if (!_deActive) {
+    if (!_deWorkflow.active) {
+        return;
+    }
+    if (_explorationSuspended) return;
+    if (_traitWorkflow.busy()) {
+        _deWorkflow.pending = true;
+        if (!_deProgress.running()) _deProgress.begin(this, QStringLiteral("Differential expression"));
+        _deProgress.state()->phase(QStringLiteral("Waiting for trait preparation"), 0);
         return;
     }
     if (_deTimer) {
@@ -3953,16 +4150,27 @@ void SettingsAction::requestSpeciesDifferentialExpression()
 void SettingsAction::onSpeciesDeJobsFinished()
 {
     XSC_TRACE("SettingsAction::onSpeciesDeJobsFinished");
-    QGuiApplication::restoreOverrideCursor();
-    if (_deJobs) {
+    _deReadTiming.reset();
+    const bool failed = _deReadCancel && !*_deReadCancel && _deJobWatcher.future().isCanceled();
+    if (!failed && _deJobs && _deReadCancel && !*_deReadCancel) {
         for (auto& job : *_deJobs) {
             _deCache.moments[job.key] = std::move(job.entry);
         }
-        _deJobs.reset();
     }
+    _deJobs.reset();
     _deJobDataset = Dataset<Points>();
-    _deJobRunning = false;
-    _deRecomputePending = false;
+    _deWorkflow.finish();
+    _deWorkflow.pending = false;
+    if ((_deReadCancel && *_deReadCancel) || !_deWorkflow.active) {
+        if (!_explorationSuspended) prepareExplorationAnalysis();
+        return;
+    }
+    if (failed) {
+        _deProgress.cancel();
+        showStatusMessage(QStringLiteral("DE data could not be read. Run Update to retry."), QStringLiteral("#dc3545"));
+        if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
+        return;
+    }
 
     computeSpeciesDifferentialExpression(); // everything is cached now (or the selection changed meanwhile)
 }
@@ -3970,22 +4178,29 @@ void SettingsAction::onSpeciesDeJobsFinished()
 void SettingsAction::computeSpeciesDifferentialExpression()
 {
     XSC_TRACE("SettingsAction::computeSpeciesDifferentialExpression");
-    if (!_deActive) {
+    if (_explorationSuspended) return;
+    if (!_deWorkflow.active) {
         return;
     }
     // The cache is being filled in the background: just remember that something changed.
-    if (_deJobRunning) {
-        _deRecomputePending = true;
+    if (_deWorkflow.busy()) {
+        _deWorkflow.pending = true;
         return;
     }
+    if (_traitWorkflow.busy()) { _deWorkflow.pending = true; return; }
 
+    const auto progress = _deProgress.running() ? _deProgress.state()
+        : _deProgress.begin(this, QStringLiteral("Differential expression"));
     const auto finishWith = [this](const QString& message) {
+        _deProgress.cancel();
+        _dePublishedKey.clear();
         _deResult = SpeciesDeResult();
         _deResult.message = message;
         _deState = DeState();
         if (_speciesDeFinished) {
             _speciesDeFinished();
         }
+        if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
         };
 
     // ---- 1. Inputs -------------------------------------------------------------------------------------------
@@ -4094,10 +4309,10 @@ void SettingsAction::computeSpeciesDifferentialExpression()
 
             _deJobs = std::make_shared<std::vector<DeEntryJob>>(std::move(missing));
             _deJobDataset = mainPointsDataset;
-            _deJobRunning = true;
-            QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+            _deWorkflow.beginRead();
 
             const auto jobs = _deJobs;
+            const auto cancel = _deReadCancel = _deWorkflow.cancellation();
             const Dataset<Points>* datasetHandle = &_deJobDataset;
             const int workers = parallelWorkers(largestPointSet);
             const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
@@ -4108,7 +4323,10 @@ void SettingsAction::computeSpeciesDifferentialExpression()
 
             // Build each species/cell-type row group once, then stream their union together.
             // Separate jobs reread/decompress the same matrix tiles for every pair.
-            _deJobWatcher.setFuture(QtConcurrent::run([this, jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices, scratchBudgetBytes]() {
+            _deReadTiming = std::make_unique<xsc::timing::AsyncSpan>("de.read.total");
+            _deJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices, scratchBudgetBytes, cancel, progress]() {
+            XSC_TRACE("de.read.worker");
+                progress->phase(QStringLiteral("Reading differential expression means"), 0.02f);
                 std::vector<std::vector<std::uint64_t>> groupedPoints;
                 groupedPoints.reserve(jobs->size());
                 std::vector<int> points;
@@ -4142,7 +4360,11 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                     && groupStateBytes <= scratchBudgetBytes - groupIndexBytes;
                 if (groupedFitsBudget) {
                     const auto grouped = PointStreaming::aggregateGroupedColumns(datasetHandle->get(), groupedPoints,
-                        allGeneIndices, workers, scratchBudgetBytes, true);
+                        allGeneIndices, workers, scratchBudgetBytes, true,
+                        [cancel, progress](std::size_t done, std::size_t total) {
+                            if (*cancel) throw std::runtime_error("Cancelled");
+                            progress->advance(done, total, 0.02f, 0.65f);
+                        });
                     for (size_t jobIndex = 0; jobIndex < jobs->size(); ++jobIndex) {
                         auto& entry = (*jobs)[jobIndex].entry;
                         const std::uint64_t count = grouped.counts[jobIndex];
@@ -4177,7 +4399,8 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                         if (points.empty())
                             return;
                         computeChunkedGeneMeansAndDetection(*datasetHandle, allGeneIndices, points,
-                            [&job](int start, const std::vector<int>& chunkGenes, const std::vector<float>& means, const std::vector<float>& detection) {
+                            [&job, cancel](int start, const std::vector<int>& chunkGenes, const std::vector<float>& means, const std::vector<float>& detection) {
+                                if (*cancel) throw std::runtime_error("Cancelled");
                                 for (size_t g = 0; g < chunkGenes.size(); ++g) {
                                     job.entry.means[static_cast<size_t>(start) + g] = means[g];
                                     job.entry.detection[static_cast<size_t>(start) + g] = detection[g];
@@ -4185,7 +4408,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                             });
                     });
                 }
-                QMetaObject::invokeMethod(this, [this]() { showStatusMessage(QStringLiteral("DE data ready"), QStringLiteral("#007bff")); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(this, [this, cancel]() { if (*cancel) return; showStatusMessage(QStringLiteral("DE data ready"), QStringLiteral("#007bff")); }, Qt::QueuedConnection);
             }));
             return; // continues in onSpeciesDeJobsFinished()
         }
@@ -4284,9 +4507,6 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         meanPointers.push_back(&row);
     }
 
-    std::vector<SpeciesDeComparison> comparisons(speciesCount);
-    std::vector<size_t> speciesIndices(speciesCount);
-    std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
     // The statistics are kept while the comparison stays the same (cells, cell types, cell cap, pooling, compared species).
     // Top-N, direction, rank and minimum detection only select genes from them: changing those is then instant.
     const QString statisticsKey = cacheKey + QLatin1Char('|') + cellTypes.join(QLatin1Char('\x1f')) + QLatin1Char('|')
@@ -4294,110 +4514,190 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         + QStringList(state.species.begin(), state.species.end()).join(QLatin1Char('\x1f'));
     if (!_deStats || _deStats->key != statisticsKey) {
         auto fresh = std::make_shared<DeStatisticsCacheImpl>();
-        buildDeStatistics(meanPointers, state.detection, state.totalSum, state.totalSumSq, state.totalDetection, *fresh);
-        fresh->key = statisticsKey;
-        _deStats = fresh;
-    }
-
-    QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
-        const DeSpeciesStatistics& statistics = _deStats->statistics[s];
-        const std::vector<float>& fdr = _deStats->fdr[s];
-        const std::vector<float>& restDetection = _deStats->restDetection[s];
-
-        const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, state.detection[s], restDetection, level, minDetection, direction, rank, topCount);
-
-        SpeciesDeComparison& comparison = comparisons[s];
-        comparison.species = state.species[s];
-        comparison.cells = state.cells[s];
-        comparison.topGenes.reserve(static_cast<int>(top.size()));
-        for (const size_t g : top) {
-            SpeciesDeGene gene;
-            gene.gene = geneNames[g];
-            gene.geneIndex = static_cast<int>(g);
-            gene.delta = statistics.delta[g];
-            gene.restMean = statistics.restMean[g];
-            gene.restSd = statistics.restSd[g];
-            gene.t = statistics.t[g];
-            gene.pValue = statistics.pValue[g];
-            gene.fdr = fdr[g];
-            gene.detection = state.detection[s][g];
-            gene.restDetection = restDetection[g];
-            comparison.topGenes.push_back(gene);
-        }
+        const auto cancel = _deWorkflow.cancellation();
+        _deWorkflow.beginCompute();
+        disconnect(&_deStatisticsWatcher, nullptr, this, nullptr);
+        connect(&_deStatisticsWatcher, &QFutureWatcher<void>::finished, this, [this, fresh, cancel]() {
+            _deStatsTiming.reset();
+            _deWorkflow.finish();
+            if (*cancel || !_deWorkflow.active) {
+                if (!_explorationSuspended) prepareExplorationAnalysis();
+                return;
+            }
+            if (!*cancel && fresh->key.isEmpty()) {
+                _deProgress.cancel();
+                showStatusMessage(QStringLiteral("DE calculation could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
+                if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
+                return;
+            }
+            if (!*cancel && !fresh->key.isEmpty()) _deStats = fresh;
+            computeSpeciesDifferentialExpression();
         });
-
-    // ---- 6. Result: one row per species (species tree order). Species with too few cells keep their row; their cells are grey (no value). ----
-    SpeciesDeResult result;
-    result.valid = true;
-    result.cellTypes = cellTypes;
-    std::unordered_map<QString, size_t> stateIndex; // species -> index in the compared species
-    for (size_t s = 0; s < speciesCount; ++s) {
-        stateIndex[state.species[s]] = s;
-    }
-    std::vector<int> rowOfState(speciesCount, -1);
-    for (const QString& species : ordered) {
-        const int row = static_cast<int>(result.species.size());
-        result.species << species;
-        const bool takesPart = stateIndex.count(species) > 0;
-        result.included.push_back(takesPart);
-        SpeciesDeComparison empty;
-        empty.species = species;
-        result.comparisons.push_back(empty);
-        if (takesPart) {
-            rowOfState[stateIndex[species]] = row;
-        }
-    }
-    for (size_t s = 0; s < speciesCount; ++s) {
-        result.comparisons[rowOfState[s]] = comparisons[s];
+        _deStatsTiming = std::make_unique<xsc::timing::AsyncSpan>("de.statistics.total");
+        _deStatisticsWatcher.setFuture(QtConcurrent::run(&_explorationPool, [fresh, snapshot = state, statisticsKey, cancel, progress]() {
+            XSC_TRACE("de.statistics.worker");
+            progress->phase(QStringLiteral("Computing differential expression tests"), 0.65f);
+            std::vector<const std::vector<float>*> rows;
+            for (const auto& row : snapshot.means) rows.push_back(&row);
+            buildDeStatistics(rows, snapshot.detection, snapshot.totalSum, snapshot.totalSumSq, snapshot.totalDetection, *fresh, cancel);
+            // Species details are cached by speciesDeDetail() when requested.
+            if (!*cancel) fresh->key = statisticsKey;
+        }));
+        return;
     }
 
-    std::unordered_map<QString, int> seen;
-    for (size_t s = 0; s < speciesCount; ++s) {
-        for (const SpeciesDeGene& gene : comparisons[s].topGenes) {
-            if (seen.count(gene.gene) == 0) {
-                seen[gene.gene] = static_cast<int>(result.heatmapGenes.size());
-                result.heatmapGenes << gene.gene;
-                result.heatmapOwner << rowOfState[s];
+    const QString overviewKey = statisticsKey + QLatin1Char('|') + QString::number(static_cast<int>(direction))
+        + QLatin1Char('|') + QString::number(static_cast<int>(rank)) + QLatin1Char('|') + QString::number(topCount)
+        + QLatin1Char('|') + QString::number(minDetection, 'g', 17) + QLatin1Char('|') + QString::number(level, 'g', 17)
+        + QLatin1Char('|') + QStringList(ordered.begin(), ordered.end()).join(QLatin1Char('\x1f'));
+    if (!_deOverview || _deOverview->key != overviewKey) {
+        auto batch = std::make_shared<DeOverviewBatch>();
+        const auto cancel = _deWorkflow.cancellation();
+        const auto statisticsSnapshot = _deStats;
+        _deWorkflow.beginCompute();
+        disconnect(&_deStatisticsWatcher, nullptr, this, nullptr);
+        connect(&_deStatisticsWatcher, &QFutureWatcher<void>::finished, this, [this, batch, cancel]() {
+            _deStatsTiming.reset();
+            _deWorkflow.finish();
+            if (*cancel || !_deWorkflow.active) {
+                if (!_explorationSuspended) prepareExplorationAnalysis();
+                return;
             }
-        }
-    }
-    const double others = static_cast<double>(speciesCount - 1);
-    const float noValue = std::numeric_limits<float>::quiet_NaN();
-    result.heatmapDelta.resize(static_cast<int>(result.species.size()));
-    for (int row = 0; row < result.species.size(); ++row) {
-        result.heatmapDelta[row].assign(static_cast<int>(result.heatmapGenes.size()), noValue);
-    }
-    for (int column = 0; column < result.heatmapGenes.size(); ++column) {
-        int geneIndex = -1;
-        for (const SpeciesDeGene& gene : result.comparisons[result.heatmapOwner[column]].topGenes) {
-            if (gene.gene == result.heatmapGenes[column]) {
-                geneIndex = gene.geneIndex;
-                break;
+            if (!*cancel && batch->key.isEmpty()) {
+                _deProgress.cancel();
+                showStatusMessage(QStringLiteral("DE overview could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
+                if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
+                return;
             }
-        }
-        if (geneIndex < 0) {
-            continue;
-        }
-        const size_t g = static_cast<size_t>(geneIndex);
-        for (size_t s = 0; s < speciesCount; ++s) {
-            const double own = static_cast<double>(state.means[s][g]);
-            result.heatmapDelta[rowOfState[s]][column] = static_cast<float>(own - (state.totalSum[g] - own) / others);
-        }
+            if (!*cancel) _deOverview = batch;
+            computeSpeciesDifferentialExpression();
+        });
+        _deStatsTiming = std::make_unique<xsc::timing::AsyncSpan>("de.statistics.total");
+        _deStatisticsWatcher.setFuture(QtConcurrent::run(&_explorationPool, [batch, cancel, statisticsSnapshot, state, speciesCount,
+            geneNames, cellTypes, ordered, direction, rank, topCount, minDetection, level, maxCells, minCells,
+            equalWeighting, overviewKey, progress]() {
+            XSC_TRACE("de.statistics.worker");
+            progress->phase(QStringLiteral("Building differential expression overview"), 0.90f);
+            if (*cancel) return;
+            std::vector<SpeciesDeComparison> comparisons(speciesCount);
+            std::vector<size_t> speciesIndices(speciesCount);
+            std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
+            QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
+                if (*cancel) return;
+                const DeSpeciesStatistics& statistics = statisticsSnapshot->statistics[s];
+                const std::vector<float>& fdr = statisticsSnapshot->fdr[s];
+                const std::vector<float>& restDetection = statisticsSnapshot->restDetection[s];
+
+                const std::vector<size_t> top = selectTopDeGenes(statistics, fdr, state.detection[s], restDetection, level, minDetection, direction, rank, topCount);
+
+                SpeciesDeComparison& comparison = comparisons[s];
+                comparison.species = state.species[s];
+                comparison.cells = state.cells[s];
+                comparison.topGenes.reserve(static_cast<int>(top.size()));
+                for (const size_t g : top) {
+                    SpeciesDeGene gene;
+                    gene.gene = geneNames[g];
+                    gene.geneIndex = static_cast<int>(g);
+                    gene.delta = statistics.delta[g];
+                    gene.restMean = statistics.restMean[g];
+                    gene.restSd = statistics.restSd[g];
+                    gene.t = statistics.t[g];
+                    gene.pValue = statistics.pValue[g];
+                    gene.fdr = fdr[g];
+                    gene.detection = state.detection[s][g];
+                    gene.restDetection = restDetection[g];
+                    comparison.topGenes.push_back(gene);
+                }
+                });
+
+            // ---- 6. Result: one row per species (species tree order). Species with too few cells keep their row; their cells are grey (no value). ----
+            SpeciesDeResult result;
+            result.valid = true;
+            result.cellTypes = cellTypes;
+            std::unordered_map<QString, size_t> stateIndex; // species -> index in the compared species
+            for (size_t s = 0; s < speciesCount; ++s) {
+                stateIndex[state.species[s]] = s;
+            }
+            std::vector<int> rowOfState(speciesCount, -1);
+            for (const QString& species : ordered) {
+                const int row = static_cast<int>(result.species.size());
+                result.species << species;
+                const bool takesPart = stateIndex.count(species) > 0;
+                result.included.push_back(takesPart);
+                SpeciesDeComparison empty;
+                empty.species = species;
+                result.comparisons.push_back(empty);
+                if (takesPart) {
+                    rowOfState[stateIndex[species]] = row;
+                }
+            }
+            for (size_t s = 0; s < speciesCount; ++s) {
+                result.comparisons[rowOfState[s]] = comparisons[s];
+            }
+
+            std::unordered_map<QString, int> seen;
+            for (size_t s = 0; s < speciesCount; ++s) {
+                for (const SpeciesDeGene& gene : comparisons[s].topGenes) {
+                    if (seen.count(gene.gene) == 0) {
+                        seen[gene.gene] = static_cast<int>(result.heatmapGenes.size());
+                        result.heatmapGenes << gene.gene;
+                        result.heatmapOwner << rowOfState[s];
+                    }
+                }
+            }
+            const double others = static_cast<double>(speciesCount - 1);
+            const float noValue = std::numeric_limits<float>::quiet_NaN();
+            result.heatmapDelta.resize(static_cast<int>(result.species.size()));
+            for (int row = 0; row < result.species.size(); ++row) {
+                result.heatmapDelta[row].assign(static_cast<int>(result.heatmapGenes.size()), noValue);
+            }
+            for (int column = 0; column < result.heatmapGenes.size(); ++column) {
+                if (*cancel) return;
+                progress->advance(column + 1, result.heatmapGenes.size(), 0.94f, 0.99f);
+                int geneIndex = -1;
+                for (const SpeciesDeGene& gene : result.comparisons[result.heatmapOwner[column]].topGenes) {
+                    if (gene.gene == result.heatmapGenes[column]) {
+                        geneIndex = gene.geneIndex;
+                        break;
+                    }
+                }
+                if (geneIndex < 0) {
+                    continue;
+                }
+                const size_t g = static_cast<size_t>(geneIndex);
+                for (size_t s = 0; s < speciesCount; ++s) {
+                    const double own = static_cast<double>(state.means[s][g]);
+                    result.heatmapDelta[rowOfState[s]][column] = static_cast<float>(own - (state.totalSum[g] - own) / others);
+                }
+            }
+
+            result.message = QString("%1 species, each against the other %2. Cell type(s): %3. Cells pooled per species (%4), at most %5 cells per species and cell type; "
+                "species with fewer than %6 cells are left out. The test treats the species as replicates (single case against the other species, moderated variance), "
+                "genes with FDR below %7 and detected in at least %8% of the cells are ranked.")
+                .arg(speciesCount).arg(speciesCount - 1).arg(cellTypes.join(", "))
+                .arg(equalWeighting ? "equal cell-type weighting" : "all cells pooled")
+                .arg(maxCells > 0 ? QString::number(maxCells) : QString("all")).arg(minCells).arg(level).arg(static_cast<int>(minDetection * 100.0 + 0.5));
+
+            if (*cancel) return;
+            batch->result = std::move(result);
+            batch->key = overviewKey;
+        }));
+        return;
     }
-
-    result.message = QString("%1 species, each against the other %2. Cell type(s): %3. Cells pooled per species (%4), at most %5 cells per species and cell type; "
-        "species with fewer than %6 cells are left out. The test treats the species as replicates (single case against the other species, moderated variance), "
-        "genes with FDR below %7 and detected in at least %8% of the cells are ranked.")
-        .arg(speciesCount).arg(speciesCount - 1).arg(cellTypes.join(", "))
-        .arg(equalWeighting ? "equal cell-type weighting" : "all cells pooled")
-        .arg(maxCells > 0 ? QString::number(maxCells) : QString("all")).arg(minCells).arg(level).arg(static_cast<int>(minDetection * 100.0 + 0.5));
-
-    showStatusMessage(QString("DE ready: %1 species, %2 genes").arg(speciesCount).arg(result.heatmapGenes.size()), QStringLiteral("#28a745"));
+    if (_dePublishedKey == overviewKey) {
+        _deProgress.finish();
+        if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
+        return;
+    }
     _deState = std::move(state);
-    _deResult = std::move(result);
+    _deResult = _deOverview->result;
+    _dePublishedKey = overviewKey;
+    showStatusMessage(QString("DE ready: %1 species, %2 genes").arg(speciesCount).arg(_deResult.heatmapGenes.size()), QStringLiteral("#28a745"));
     if (_speciesDeFinished) {
         _speciesDeFinished();
     }
+    _deProgress.finish();
+    if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
 }
 
 SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
@@ -4409,6 +4709,7 @@ SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
 
 SpeciesDeDetail SettingsAction::computeSpeciesDeGroups(const QStringList& groupA, const QStringList& groupB)
 {
+    XSC_TRACE("SettingsAction::computeSpeciesDeGroups");
     SpeciesDeDetail detail;
     if (groupA.isEmpty() || groupB.isEmpty()) { detail.message = "Select at least one species in each group."; return detail; }
     std::vector<size_t> a, group;

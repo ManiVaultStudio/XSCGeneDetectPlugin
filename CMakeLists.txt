@@ -50,6 +50,17 @@ set(PLUGIN_SOURCES
     src/SettingsAction.Data.inl
     src/SettingsAction.Tree.inl
     src/SettingsAction.Serialization.inl
+    src/AnalysisWorkflow.h
+    src/ColumnTileCache.h
+    src/RowValueCodes.h
+    src/EvoViewerTemp.h
+    src/GeneExpressionCache.h
+    src/OperationProgress.h
+    src/ProgressState.h
+    src/PackedTileAccess.h
+    src/StoredZipRanges.h
+    src/PointReadRanges.h
+    src/SelectedMeansKey.h
 	src/StreamedPointData.h
 	src/XSCDebug.h
     src/XSCGeneDetectPlugin.json
@@ -103,6 +114,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE "${MV_CSCTMD_INSTALL_DIR}/$<C
 # -----------------------------------------------------------------------------
 # Request C++17
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
+target_compile_definitions(${PROJECT_NAME} PRIVATE XSC_USE_MANIVAULT_TEMP=1)
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /bigobj /FS)
+endif()
 
 
 # -----------------------------------------------------------------------------
@@ -112,6 +127,9 @@ target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::WebEngineWidgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Concurrent )
+# Use the same bundled dependency target as the core application.
+target_link_libraries(${PROJECT_NAME} PRIVATE QuaZip)
+target_link_libraries(${PROJECT_NAME} PRIVATE libzstd_static)
 
 
 # Allow override of plugin library paths from the build system

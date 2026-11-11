@@ -408,8 +408,8 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             itP != _geneTraitPValues.end() ? static_cast<double>(itP->second) : 1.0,
             itQ != _geneTraitFdrValues.end() ? static_cast<double>(itQ->second) : 1.0,
             itE != _geneTraitExtras.end() ? itE->second : GeneTraitExtras(),
-            _traitSampleSize, _traitMethodNote, _traitSignificanceBasis);
-        if (itCorr == _geneTraitValuesComputed.end() && _traitSampleSize > 0) {
+            itCorr != _geneTraitValuesComputed.end() ? _traitSampleSize : 0, _traitMethodNote, _traitSignificanceBasis);
+        if (itCorr == _geneTraitValuesComputed.end() && _traitSampleSize > 0 && _traitWindowOpen) {
             correlationItem->setData("Not part of the trait analysis: the trait correlation is computed for the listed top-N genes only\n(setting Trait Correlation Genes -> All genes (slower) includes every gene).", Qt::ToolTipRole);
         }
         model->setItem(rowIndex, kTraitCorrelationColumn, correlationItem);
@@ -852,7 +852,7 @@ void SettingsAction::exportTraitMatrixToCSV(QTableView* tableView) {
         return;
     }
     if (_traitMatrix.empty()) {
-        QMessageBox::information(nullptr, "Trait matrix", "There is no trait correlation yet.\nChoose a trait and cell type(s) first.");
+        QMessageBox::information(nullptr, "Trait matrix", "There is no trait correlation for the current inputs.\nChoose a trait and cell type(s), then open Trait Analysis to compute it.");
         return;
     }
 
