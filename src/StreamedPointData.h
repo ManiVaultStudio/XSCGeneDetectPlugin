@@ -29,8 +29,14 @@
 #include <PointData/storage/tiled/TiledPointsStorageBackend.h>
 #include <PointData/storage/tiled/PointDataTiledStorage.h>
 #include <biovault_bfloat16/biovault_bfloat16.h>
+#include <util/BlobCodec.h>
+
+#include <QDebug>
+#include <QString>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -539,6 +545,28 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
         return alreadySorted ? static_cast<std::uint64_t>(rowIds[position]) : rows[position];
     };
 
+    // Measure the actual row-block work, including tile access and the caller's
+    // reduction callback. maxConcurrentJobs makes overlap visible in the app log.
+    std::atomic<std::size_t> activeJobs { 0 };
+    std::atomic<std::size_t> maxConcurrentJobs { 0 };
+    const auto runMeasuredJob = [&](auto&& job) {
+        const auto active = activeJobs.fetch_add(1, std::memory_order_relaxed) + 1;
+        auto observedMaximum = maxConcurrentJobs.load(std::memory_order_relaxed);
+        while (active > observedMaximum && !maxConcurrentJobs.compare_exchange_weak(observedMaximum, active, std::memory_order_relaxed))
+        {
+        }
+
+        try {
+            job();
+        }
+        catch (...) {
+            activeJobs.fetch_sub(1, std::memory_order_relaxed);
+            throw;
+        }
+
+        activeJobs.fetch_sub(1, std::memory_order_relaxed);
+    };
+
     // Read tiled data in physical tile order. Reading all genes of each cell
     // cycles through column tiles and can evict them before the next cell.
     // One job owns all selected cells in a tile row; it finishes one column
@@ -560,6 +588,10 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             first = end;
         }
         const auto workers = std::min(workerCount(threads, rowCount), jobs.size());
+        const auto cacheHitsBefore = tiledStorage->cacheHits();
+        const auto cacheMissesBefore = tiledStorage->cacheMisses();
+        const auto cacheEvictionsBefore = tiledStorage->cacheEvictions();
+        const auto codecTelemetryBefore = mv::util::BlobCodec::getFileRangeTelemetry();
         std::vector<State> states;
         states.reserve(workers);
         for (std::size_t w = 0; w < workers; ++w)
@@ -567,34 +599,52 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
 
         std::mutex progressMutex;
         std::size_t completed = 0;
+        const auto scanStart = std::chrono::steady_clock::now();
         forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
-            const auto [begin, end] = jobs[job];
-            for (std::uint64_t column = 0; column < columnCount;) {
-                const auto width = std::min<std::uint64_t>(tiledStorage->columnTileSize(), columnCount - column);
-                for (std::size_t first = begin; first < end;) {
-                    const auto row = sortedRowAt(first);
-                    std::size_t next = first + 1;
-                    while (next < end && sortedRowAt(next) == row)
-                        ++next;
-                    std::uint64_t offset = column;
-                    points->visitRange(row, 1, column, width, [&](const PointDataAccessView& view) {
-                        if (view.rows != 1 || view.columns == 0 || view.columns > column + width - offset)
-                            throw std::runtime_error("PointStreaming: invalid tiled row segment");
-                        for (auto q = first; q < next; ++q)
-                            visit(state, order.empty() ? q : order[q], view, 0, offset);
-                        offset += view.columns;
-                    });
-                    if (offset != column + width)
-                        throw std::runtime_error("PointStreaming: incomplete tiled row segment");
-                    first = next;
+            runMeasuredJob([&] {
+                const auto [begin, end] = jobs[job];
+                for (std::uint64_t column = 0; column < columnCount;) {
+                    const auto width = std::min<std::uint64_t>(tiledStorage->columnTileSize(), columnCount - column);
+                    for (std::size_t first = begin; first < end;) {
+                        const auto row = sortedRowAt(first);
+                        std::size_t next = first + 1;
+                        while (next < end && sortedRowAt(next) == row)
+                            ++next;
+                        std::uint64_t offset = column;
+                        points->visitRange(row, 1, column, width, [&](const PointDataAccessView& view) {
+                            if (view.rows != 1 || view.columns == 0 || view.columns > column + width - offset)
+                                throw std::runtime_error("PointStreaming: invalid tiled row segment");
+                            for (auto q = first; q < next; ++q)
+                                visit(state, order.empty() ? q : order[q], view, 0, offset);
+                            offset += view.columns;
+                        });
+                        if (offset != column + width)
+                            throw std::runtime_error("PointStreaming: incomplete tiled row segment");
+                        first = next;
+                    }
+                    column += width;
                 }
-                column += width;
-            }
+            });
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
                 progress(++completed, jobs.size());
             }
         });
+        const auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - scanStart).count();
+        const auto codecTelemetryAfter = mv::util::BlobCodec::getFileRangeTelemetry();
+        const auto cacheHits = tiledStorage->cacheHits() - cacheHitsBefore;
+        const auto cacheMisses = tiledStorage->cacheMisses() - cacheMissesBefore;
+        const auto cacheEvictions = tiledStorage->cacheEvictions() - cacheEvictionsBefore;
+        const auto residentCacheMiB = static_cast<double>(tiledStorage->cacheSizeInBytes()) / (1024.0 * 1024.0);
+        const auto codecReadCalls = codecTelemetryAfter.calls - codecTelemetryBefore.calls;
+        const auto codecEncodedBytes = codecTelemetryAfter.encodedBytes - codecTelemetryBefore.encodedBytes;
+        const auto codecReadMilliseconds = (codecTelemetryAfter.readNanoseconds - codecTelemetryBefore.readNanoseconds) / 1000000;
+        const auto codecDecodeMilliseconds = (codecTelemetryAfter.decodeNanoseconds - codecTelemetryBefore.decodeNanoseconds) / 1000000;
+        qInfo().noquote() << QStringLiteral("[PointStreaming] tiled row scan: rows=%1 jobs=%2 workers=%3 max-concurrent=%4 wall-ms=%5 cache-hits=%6 cache-misses=%7 cache-evictions=%8 cache-resident-MiB=%9 codec=%10 packed-reads=%11 encoded-MiB=%12 read-worker-ms=%13 decode-worker-ms=%14")
+            .arg(rowCount).arg(jobs.size()).arg(workers).arg(maxConcurrentJobs.load(std::memory_order_relaxed)).arg(elapsedMilliseconds)
+            .arg(cacheHits).arg(cacheMisses).arg(cacheEvictions).arg(residentCacheMiB, 0, 'f', 1).arg(tiledStorage->packedTileSourceCodec()).arg(codecReadCalls)
+            .arg(static_cast<double>(codecEncodedBytes) / (1024.0 * 1024.0), 0, 'f', 1)
+            .arg(codecReadMilliseconds).arg(codecDecodeMilliseconds);
         for (std::size_t w = 1; w < workers; ++w)
             merge(states[0], states[w]);
         return std::move(states[0]);
@@ -790,6 +840,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
 
     std::mutex progressMutex;
     std::size_t completedBlocks = 0;
+    const auto scanStart = std::chrono::steady_clock::now();
     const auto processBlocks = [&](const void* eagerData, const std::uint32_t elementType,
                                    const std::uint32_t elementSize, const std::uint64_t pointCount) {
         if (eagerData) {
@@ -799,7 +850,9 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             }
         }
         forEachBlockParallel(states, blockCount, [&](const std::size_t b, State& state) {
-            readBlock(b, state, eagerData, elementType, elementSize);
+            runMeasuredJob([&] {
+                readBlock(b, state, eagerData, elementType, elementSize);
+            });
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
                 progress(++completedBlocks, blockCount);
@@ -809,6 +862,10 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
 
     if (!PointStreamingDetail::withEagerPointData(points, processBlocks))
         processBlocks(nullptr, 0, 0, 0);
+
+    const auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - scanStart).count();
+    qInfo().noquote() << QStringLiteral("[PointStreaming] row scan: rows=%1 blocks=%2 workers=%3 max-concurrent=%4 wall-ms=%5")
+        .arg(rowCount).arg(blockCount).arg(workers).arg(maxConcurrentJobs.load(std::memory_order_relaxed)).arg(elapsedMilliseconds);
 
     for (std::size_t w = 1; w < workers; ++w)
         merge(states[0], states[w]);
