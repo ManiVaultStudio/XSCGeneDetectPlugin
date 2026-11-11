@@ -26,6 +26,7 @@
 #include "PointReadRanges.h"
 
 #include <PointData/PointData.h>
+#include <PointData/storage/tiled/TiledPointsStorageBackend.h>
 #include <PointData/storage/tiled/PointDataTiledStorage.h>
 #include <biovault_bfloat16/biovault_bfloat16.h>
 
@@ -543,7 +544,9 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     // One job owns all selected cells in a tile row; it finishes one column
     // tile for those cells before moving to the next tile. This also prevents
     // different workers from repeatedly loading the same tile row.
-    const auto tiledStorage = !points->isProxy() && points->isFull() ? points->getTiledStorage() : nullptr;
+    const auto storageBackend = !points->isProxy() && points->isFull() ? points->getStorageBackend() : nullptr;
+    const auto tiledBackend = dynamic_cast<const mv::pointdata::storage::TiledPointsStorageBackend*>(storageBackend);
+    const auto tiledStorage = tiledBackend ? tiledBackend->getStorage() : nullptr;
     if (tiledStorage) {
         if (tiledStorage->rowTileSize() == 0 || tiledStorage->columnTileSize() == 0)
             throw std::runtime_error("PointStreaming: invalid tile geometry");

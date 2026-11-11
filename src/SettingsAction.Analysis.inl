@@ -346,7 +346,9 @@ void SettingsAction::updateButtonTriggered()
         const std::vector<std::uint64_t> geneColumns(data->geneColumns.begin(), data->geneColumns.end());
         qInfo() << "[Update] selected gene read:" << stage1Threads << "workers, storage backend"
                 << (data->points->getStorageBackendType() ? static_cast<int>(*data->points->getStorageBackendType()) : -1);
-        if (const auto storage = data->points->getTiledStorage())
+        const auto storageBackend = data->points->getStorageBackend();
+        const auto tiledBackend = dynamic_cast<const mv::pointdata::storage::TiledPointsStorageBackend*>(storageBackend);
+        if (const auto storage = tiledBackend ? tiledBackend->getStorage() : nullptr)
             qInfo() << "[Update] selected gene read: tile order, geometry" << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
 
         std::atomic<int> lastProgressPercent { -1 };
@@ -1345,7 +1347,9 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
                                 << "storage backend" << (pointsDatasetRaw->getStorageBackendType()
                                     ? static_cast<int>(*pointsDatasetRaw->getStorageBackendType()) : -1);
                         int lastReadProgress = -1;
-                        if (const auto storage = pointsDatasetRaw->getTiledStorage()) {
+                        const auto storageBackend = pointsDatasetRaw->getStorageBackend();
+                        const auto tiledBackend = dynamic_cast<const mv::pointdata::storage::TiledPointsStorageBackend*>(storageBackend);
+                        if (const auto storage = tiledBackend ? tiledBackend->getStorage() : nullptr) {
                             qInfo() << "[Update] selected gene read: tile order, geometry"
                                     << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
                         }
