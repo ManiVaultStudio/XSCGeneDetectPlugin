@@ -13,8 +13,13 @@ QString SettingsAction::currentMeanMapSignature() const
 SettingsAction::~SettingsAction()
 {
     XSC_TRACE("SettingsAction::~SettingsAction");
-    _deJobWatcher.waitForFinished(); // (same reason as for the trait job)
-    _traitJobWatcher.waitForFinished(); // the background job reads datasets that must not disappear under it
+    _deWorkflow.cancel(); _traitWorkflow.cancel();
+    // Join every worker before its datasets/cache disappear. A cancelled read
+    // can carry an exception in its future; it must not escape the destructor.
+    for (auto* watcher : { &_deStatisticsWatcher, &_traitStatisticsWatcher, &_deJobWatcher, &_traitJobWatcher }) {
+        try { watcher->waitForFinished(); }
+        catch (...) { }
+    }
     // The two message boxes are never added to a layout, so nobody else owns them.
     delete _popupMessageInit;
     _popupMessageInit = nullptr;
@@ -78,7 +83,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _saveGeneTable(this, "Save Species Statistics Table"),
     _saveIncludeParameters(this, "Add analysis parameters to the CSV"),
     _saveTraitMatrix(this, "Save Trait Matrix"),
-    _showTraitPlot(this, "Plot Selected Gene vs Trait"),
+    _showTraitPlot(this, "Trait Analysis"),
     _reverseSearchTraitSelectionString(this, "Reverse Search Trait Selection String"),
     _traitPoolingMode(this, "Trait Pooling"),
     _traitCorrelationMethod(this, "Trait Correlation Method"),
@@ -484,7 +489,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         "e.g. to repeat or extend the correlation analysis in R or Python.");
     _showTraitPlot.setIcon(mv::util::StyledIcon("chart-line"));
     _showTraitPlot.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
-    _showTraitPlot.setToolTip("Open a plot of the mean expression of the selected gene against the trait: one point per species.");
+    _showTraitPlot.setToolTip("Compute trait correlations on demand for the configured gene scope, then explore the gene and species plots. Completed results are reused while the inputs stay unchanged.");
 
     QIcon saveSpeciesTableIcon = mv::util::StyledIcon("save");
     _saveSpeciesTable.setIcon(saveSpeciesTableIcon);
@@ -589,6 +594,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             if (_updateWorkflowRunning)
                 return;
 
+            _XSCGeneDetectPlugin.beginSelectionUpdate();
             disableActions();
             _pauseStatusUpdates = true;
             _speciesExplorerInMap.setSelectedOptions(QStringList{});

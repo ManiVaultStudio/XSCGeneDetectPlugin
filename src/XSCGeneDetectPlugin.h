@@ -17,6 +17,12 @@
 #include <QDialog>
 #include <QLabel>
 #include <QStandardItemModel>
+#include <QTemporaryDir>
+#include <QThreadPool>
+#include <QPersistentModelIndex>
+#include "GeneExpressionCache.h"
+#include "OperationProgress.h"
+#include <memory>
 #include <actions/HorizontalToolbarAction.h>
 #include <actions/VerticalToolbarAction.h>
 #include <actions/ToolbarAction.h>
@@ -44,7 +50,7 @@ public:
     XSCGeneDetectPlugin(const PluginFactory* factory);
 
     /** Destructor */
-    ~XSCGeneDetectPlugin() override = default;
+    ~XSCGeneDetectPlugin() override;
 
     /** This function is called by the core after the view plugin has been created */
     void init() override;
@@ -65,6 +71,9 @@ public:
 
     /** Called when the current row of the gene table changes (gene clicked). */
     void onGeneRowChanged(const QModelIndex& current);
+    void beginSelectionUpdate();
+    void prepareExplorationForCurrentTable();
+    void refreshTraitColumnVisibility();
 
     /**
      * Show the expression of \p gene in the cells of \p speciesNames in the embedding scatterplot.
@@ -113,6 +122,32 @@ public: // Serialization
     Q_INVOKABLE QVariantMap toVariantMap() const override;
 
 protected:
+
+    void prepareGeneExpressionCache();
+    void applyGeneRowChanged(const QModelIndex& current, bool expressionReady = false);
+    void prepareGeneClick(const QPersistentModelIndex& current);
+    void cancelGeneExpressionCache(bool clear = true);
+    std::vector<float> geneExpressionValues(Points* points, const QString& gene, int column);
+    std::shared_ptr<GeneExpressionCache> _geneExpressionCache;
+    QString _geneCacheSignature;
+    OperationProgress _geneColorProgress;
+    mv::EventListener _geneExpressionListener;
+    struct GeneClickJob;
+    std::shared_ptr<GeneClickJob> _geneClickJob;
+    QFutureWatcher<void> _geneClickWatcher;
+    QThreadPool _geneClickPool;
+    QTimer* _geneClickDebounce = nullptr;
+    QPersistentModelIndex _pendingGeneRow;
+    RequestGeneration _geneRequests;
+    QString _pendingEmbeddingGene;
+    QStringList _pendingEmbeddingSpecies;
+    QString _embeddingCoordinatesId;
+    std::shared_ptr<std::vector<float>> _embeddingCoordinates;
+    std::vector<std::seed_seq::result_type> _embeddingVisibleRows;
+    std::vector<std::seed_seq::result_type> _embeddingVisibleSelectedRows;
+    QStringList _embeddingVisibleSpecies;
+    QString _embeddingVisibleSpeciesSource;
+    QString _embeddingVisibleSource, _embeddingVisibleOutput;
 
     SettingsAction _settingsAction;
     //HorizontalToolbarAction     _toolbarAction;    // Toolbar action that is shown in the main window

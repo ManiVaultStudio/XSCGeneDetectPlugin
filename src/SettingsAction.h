@@ -1,6 +1,8 @@
 #pragma once
 
 #include "XSCDebug.h"
+#include "OperationProgress.h"
+#include "AnalysisWorkflow.h"
 #include <actions/WidgetAction.h>
 #include <actions/IntegralAction.h>
 #include <actions/OptionAction.h>
@@ -21,6 +23,7 @@
 #include <QGuiApplication>
 #include <memory>
 #include <atomic>
+#include <QThreadPool>
 #include <functional>
 #include <algorithm>    
 #include <QDebug>
@@ -436,9 +439,14 @@ public: // Action getters
     IntegralAction& getDeMinCells() { return _deMinCells; }
     TriggerAction& getShowSpeciesDe() { return _showSpeciesDe; }
 
-    /** The window is open: results are computed (and kept up to date). Closing it stops all work. */
+    /** Explicit demand: closed windows never start analysis. */
     void setSpeciesDeActive(bool active);
-    /** Recompute when something relevant changed (debounced; does nothing while the window is closed). */
+    void prepareExplorationAnalysis();
+    void setTraitAnalysisActive(bool active);
+    void requestTraitForSelectedGene();
+    void cancelExplorationAnalysis();
+    bool updateWorkflowRunning() const { return _updateWorkflowRunning; }
+    /** Recompute changed inputs only while its analysis window is open. */
     void requestSpeciesDifferentialExpression();
     const SpeciesDeResult& getSpeciesDeResult() const { return _deResult; }
 
@@ -588,7 +596,6 @@ public: // Action getters
     QStringList resolveExplorerSelectionForGene(const QStringList& geneSpecies);
 
     /** Must be called whenever the cell selection that feeds the tables changes (invalidates cached means). */
-    void markSelectionChanged() { ++_selectionRevision; }
 
     /** Worker count for tasks that each need roughly \p pointsPerWorker x 256 floats of scratch memory (respects the settings). */
     int parallelWorkers(size_t pointsPerWorker) const;
@@ -678,6 +685,7 @@ private:
     void applyClusterLabelSelectionStyles();   /** (re)style the cell-type labels of the status bar from _selectedClusterNames */
 
     void computeTraitCorrelation();            /** the actual (non-debounced) computation */
+    void invalidateTraitResults();             /** changed inputs must not display a previous result */
     void publishTraitCorrelationToModel();     /** write _geneTraitValuesComputed into the gene table model */
 
 
@@ -853,22 +861,32 @@ protected:
     DeCache     _deCache;
     DeState     _deState;
     std::shared_ptr<DeStatisticsCacheImpl> _deStats; /** species statistics of the last comparison (see the .cpp) */
+    struct DeOverviewBatch { QString key; SpeciesDeResult result; };
+    std::shared_ptr<DeOverviewBatch> _deOverview;
     SpeciesDeResult _deResult;
     std::shared_ptr<std::vector<DeEntryJob>> _deJobs;
     QFutureWatcher<void> _deJobWatcher;
     mv::Dataset<Points> _deJobDataset;
     QTimer* _deTimer = nullptr;
-    bool        _deActive = false;
-    bool        _deJobRunning = false;
-    bool        _deRecomputePending = false;
+    AnalysisWorkflow _deWorkflow, _traitWorkflow;
+    bool _traitWindowOpen = false;
+    bool        _explorationSuspended = false;
+    std::shared_ptr<std::atomic_bool> _deReadCancel, _traitReadCancel;
+    QFutureWatcher<void> _deStatisticsWatcher;
+    std::unique_ptr<xsc::timing::AsyncSpan> _deReadTiming, _traitReadTiming, _deStatsTiming, _traitStatsTiming;
+    QThreadPool _explorationPool;
+    OperationProgress _traitProgress, _deProgress;
     std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
+    struct TraitStatisticsBatch;
+    std::shared_ptr<TraitStatisticsBatch> _traitStatistics;
+    QFutureWatcher<void> _traitStatisticsWatcher;
+    QByteArray _traitPublishedKey;
+    QPointer<QAbstractItemModel> _traitPublishedModel;
+    QString _dePublishedKey;
     std::shared_ptr<std::vector<TraitEntryJob>> _traitJobs;  /** reading in the background (see computeTraitCorrelation) */
     QFutureWatcher<void> _traitJobWatcher;
-    bool        _traitJobRunning = false;
-    bool        _traitRecomputePending = false;              /** another request arrived while the reading was running */
     mv::Dataset<Points> _traitJobDataset;                    /** keeps the dataset alive while the background job reads it */
-    quint64     _selectionRevision = 0;             /** bumped by markSelectionChanged() */
 
     // ---- Main dataset selection watcher ---------------------------------------------------------------
     mv::Dataset<Points>      _watchedMainPointsDataset;  /** kept alive so the connection below stays valid */

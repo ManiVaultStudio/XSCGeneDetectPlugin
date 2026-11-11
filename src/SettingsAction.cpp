@@ -1,5 +1,6 @@
 #include "StreamedPointData.h"
 #include "SettingsAction.h"
+#include "SelectedMeansKey.h"
 #include "XSCGeneDetectPlugin.h"
 #include <Application.h>
 #include <Task.h>
@@ -41,6 +42,7 @@
 #include <QFutureWatcher>
 #include <QThreadPool>
 #include <QSignalBlocker>
+#include <QCryptographicHash>
 #include <QStandardItemModel>
 #include <QMutexLocker>
 #include <limits>
@@ -59,13 +61,13 @@ std::map<std::string, std::chrono::high_resolution_clock::time_point> timers;
 
 // Function to sort by count (descending)
 bool sortByCount(const ClusterOrderContainer& a, const ClusterOrderContainer& b) {
-    XSC_TRACE("sortByCount");
+    XSC_HOT_TRACE("sortByCount");
     return a.count > b.count;
 }
 
 // Function to sort by name (ascending)
 bool sortByName(const ClusterOrderContainer& a, const ClusterOrderContainer& b) {
-    XSC_TRACE("sortByName");
+    XSC_HOT_TRACE("sortByName");
     return a.name < b.name;
 }
 
@@ -82,7 +84,7 @@ std::unordered_map<QString, int> prepareCustomSortMap(const std::vector<QString>
 // Function to sort by custom list
 bool sortByCustomList(const ClusterOrderContainer& a, const ClusterOrderContainer& b,
     const std::unordered_map<QString, int>& sortOrderMap) {
-    XSC_TRACE("sortByCustomList");
+    XSC_HOT_TRACE("sortByCustomList");
     auto posA = sortOrderMap.find(a.name);
     auto posB = sortOrderMap.find(b.name);
     int indexA = (posA != sortOrderMap.end()) ? posA->second : INT_MAX;
@@ -91,7 +93,7 @@ bool sortByCustomList(const ClusterOrderContainer& a, const ClusterOrderContaine
 }
 
 Stats combineStatisticsSingle(const StatisticsSingle& selected, const StatisticsSingle& nonSelected, const int topAbundance, const int middleAbundance, const int countAbundanceNumerator/*, const StatisticsSingle& allSelected*/) {
-    XSC_TRACE("combineStatisticsSingle");
+    XSC_HOT_TRACE("combineStatisticsSingle");
     Stats combinedStats;
     combinedStats.meanSelected = selected.meanVal;
     combinedStats.countSelected = selected.countVal;
@@ -109,7 +111,7 @@ Stats combineStatisticsSingle(const StatisticsSingle& selected, const Statistics
 }
 
 StatisticsSingle calculateStatistics(const std::vector<float>& data) {
-    XSC_TRACE("calculateStatistics");
+    XSC_HOT_TRACE("calculateStatistics");
     const int count = static_cast<int>(data.size());
     if (count == 0) {
         return { 0.0f, 0 }; // Return early if data is empty to avoid division by zero
@@ -127,7 +129,7 @@ StatisticsSingle calculateStatistics(const std::vector<float>& data) {
     return { mean, count };
 }
 float calculateMean(const std::vector<float>& v) {
-    XSC_TRACE("calculateMean");
+    XSC_HOT_TRACE("calculateMean");
     if (v.empty())
         return 0.0f;
 
@@ -369,6 +371,14 @@ namespace {
      * and a tooltip that explains how far the number can be trusted.
      */
     inline void setTraitCorrelationItemData(QStandardItem* item, double value, double p, double q, const GeneTraitExtras& extras, int sampleSize, const QString& methodNote, const QString& significanceBasis) {
+        if (sampleSize == 0) {
+            item->setData(QStringLiteral("—"), Qt::DisplayRole); item->setData(QVariant(), Qt::UserRole);
+            item->setData(1.0, kTraitPValueRole); item->setData(1.0, kTraitFdrRole);
+            item->setData(1.0, kTraitSignificanceFdrRole); item->setData(QVariant(), kTraitStatsRole);
+            const QString pending = QStringLiteral("No result for this gene. Click it to compute correlation on demand; the column appears when the selected gene is ready.");
+            item->setData(methodNote.isEmpty() ? pending : pending + QLatin1Char('\n') + methodNote, Qt::ToolTipRole);
+            return;
+        }
         item->setData(value, Qt::DisplayRole);
         item->setData(value, Qt::UserRole);
         item->setData(p, kTraitPValueRole);
@@ -600,6 +610,7 @@ namespace {
 
     /** Benjamini-Hochberg false discovery rate (q-values) for a vector of p-values. */
     inline std::vector<float> benjaminiHochberg(const std::vector<float>& pValues) {
+        XSC_TRACE("math.benjaminiHochberg");
         const size_t count = pValues.size();
         std::vector<float> qValues(count, 1.0f);
         if (count == 0) {
@@ -955,6 +966,7 @@ namespace {
         const TraitStatisticsContext& context,
         const GeneRange& range,
         std::vector<GeneTraitStatistics>& out) {
+        XSC_TRACE("math.computeTraitStatistics");
         const size_t speciesCount = context.speciesCount;
         if (speciesCount == 0 || speciesGeneMeans.size() != speciesCount) {
             return;
@@ -1226,6 +1238,7 @@ namespace {
      */
     inline DeSpeciesStatistics speciesAgainstRest(const std::vector<const std::vector<float>*>& speciesMeans, size_t species,
         const std::vector<double>& totalSum, const std::vector<double>& totalSumSq, double priorDf = 4.0) {
+        XSC_TRACE("math.speciesAgainstRest");
         DeSpeciesStatistics out;
         const size_t speciesCount = speciesMeans.size();
         const size_t geneCount = totalSum.size();
@@ -1296,6 +1309,7 @@ namespace {
      */
     inline DeSpeciesStatistics focusAgainstGroup(const std::vector<const std::vector<float>*>& speciesMeans, size_t focus,
         const std::vector<size_t>& group, double priorDf = 4.0) {
+        XSC_TRACE("math.focusAgainstGroup");
         DeSpeciesStatistics out;
         const size_t speciesCount = speciesMeans.size();
         if (speciesCount < 2 || group.empty() || focus >= speciesCount) {
@@ -1380,6 +1394,7 @@ namespace {
      */
     inline DeSpeciesStatistics groupsAgainstGroups(const std::vector<const std::vector<float>*>& means,
         const std::vector<size_t>& a, const std::vector<size_t>& b) {
+        XSC_TRACE("math.groupsAgainstGroups");
         DeSpeciesStatistics out;
         const size_t genes = means[a.front()]->size();
         out.delta.resize(genes); out.restMean.resize(genes); out.focusSd.resize(genes); out.restSd.resize(genes);
@@ -1413,6 +1428,7 @@ namespace {
     inline std::vector<size_t> selectTopDeGenes(const DeSpeciesStatistics& statistics, const std::vector<float>& fdr,
         const std::vector<float>& detection, const std::vector<float>& restDetection,
         double fdrLevel, double minDetection, DeDirection direction, DeRank rank, size_t count) {
+        XSC_TRACE("math.selectTopDeGenes");
         std::vector<std::pair<double, size_t>> candidates;
         for (size_t g = 0; g < statistics.delta.size(); ++g) {
             if (!(static_cast<double>(fdr[g]) < fdrLevel)) {
@@ -1459,10 +1475,16 @@ struct DeStatisticsCacheImpl {
     std::vector<std::vector<float>> restDetection;  /** [species][gene] detection averaged over the other species */
 };
 
+struct SettingsAction::TraitStatisticsBatch {
+    QByteArray key;
+    std::vector<GeneTraitStatistics> statistics, phyloStatistics;
+    std::vector<float> fdr, phyloFdr;
+};
+
 /** Fills \p out for every species, in parallel over the species. */
 void buildDeStatistics(const std::vector<const std::vector<float>*>& means, const std::vector<std::vector<float>>& detection,
     const std::vector<double>& totalSum, const std::vector<double>& totalSumSq, const std::vector<double>& totalDetection,
-    DeStatisticsCacheImpl& out)
+    DeStatisticsCacheImpl& out, const std::shared_ptr<std::atomic_bool>& cancel = {})
 {
     const size_t speciesCount = means.size();
     const size_t geneCount = totalSum.size();
@@ -1473,6 +1495,7 @@ void buildDeStatistics(const std::vector<const std::vector<float>*>& means, cons
     std::vector<size_t> speciesIndices(speciesCount);
     std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
     QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
+        if (cancel && *cancel) return;
         out.statistics[s] = speciesAgainstRest(means, s, totalSum, totalSumSq);
         out.fdr[s] = benjaminiHochberg(out.statistics[s].pValue);
         std::vector<float>& rest = out.restDetection[s];
