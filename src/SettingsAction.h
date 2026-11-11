@@ -538,7 +538,7 @@ public: // Action getters
     void precomputeTreesFromHierarchy();
     //void computeGeneMeanExpressionMapExperimental();
     void populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames);
-    void populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames);
+    void populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames, bool notify = true);
     void populateClusterData(QString& datasetId, std::map<QString, std::pair<QColor, std::vector<int>>>& clusterMap);
     QStringList getSystemModeColor();
     double* condensedDistanceMatrix(const std::vector<float>& items);

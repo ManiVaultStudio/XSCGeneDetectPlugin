@@ -1182,7 +1182,7 @@ void SettingsAction::enableDisableButtonsAutomatically()
 }
 
 
-void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames)
+void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames, bool notify)
 {
     XSC_TRACE("SettingsAction::populatePointData");
     auto pointDataset = mv::data().getDataset<Points>(datasetId);
@@ -1193,7 +1193,8 @@ void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& p
         if (pointVector.size() > 0 && numPoints > 0 && numDimensions > 0) {
             pointDataset->setData(pointVector.data(), numPoints, numDimensions);
             pointDataset->setDimensionNames(dimensionNames);
-            mv::events().notifyDatasetDataChanged(pointDataset);
+            if (notify)
+                mv::events().notifyDatasetDataChanged(pointDataset);
         }
 
     }

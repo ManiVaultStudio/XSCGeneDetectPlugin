@@ -1475,7 +1475,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 }
                 int tempnumPoints = static_cast<int>(selectedSpeciesIndices.size());
                 int tempNumDimensions = static_cast<int>(geneIndicesSpecies.size());
-                _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap);
+                _settingsAction.populatePointData(speciesDataId, resultContainerSpeciesUMAP, tempnumPoints, tempNumDimensions, dimensionNamesUmap, false);
                 _embeddingVisibleRows = selectedSpeciesIndices;
                 _embeddingVisibleSource = umapPointsDataset->getId();
                 _embeddingVisibleOutput = speciesDataId;
@@ -1531,7 +1531,11 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 // Refresh the renderer even when the action already had these endpoints.
                 range.rangeChanged(range.getRange());
             };
-            _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors);
+            // Publish the embedding only after its positions and colors have both been updated.
+            _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors, false);
+            if (geometryChanged)
+                mv::events().notifyDatasetDataChanged(_settingsAction.getFilteredUMAPDatasetPoints());
+            mv::events().notifyDatasetDataChanged(_settingsAction.getFilteredUMAPDatasetColors());
 
             //std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
             //TODO: populate the selectedFilteredUMAPDatasetColorsMap
