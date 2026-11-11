@@ -332,6 +332,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _usePreComputedTSNE.setSerializationName("CSCGDV:Use Precomputed TSNE");
     _usePreComputedTSNE.setChecked(true);
     _applyLogTransformation.setChecked(false);
+    _applyLogTransformation.setToolTip(QStringLiteral(
+        "Apply log(1 + expression) to gene coloring and its legend. Analysis statistics use the source expression values."));
     _toggleScatterplotSelection.setChecked(false);
     _performGeneTableTsneAction.setChecked(false);
     _hiddenShowncolumns.setSerializationName("CSCGDV:Hidden Shown Columns");
@@ -1228,10 +1230,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         };
     connect(&_topSelectedHierarchyStatus, &StringAction::stringChanged, this, updateTopSelectedHierarchyStatus);
 
-    const auto updateApplyLogTransformation = [this]() -> void {
-        _statusColorAction.setString("M");
-
-        };
+    const auto updateApplyLogTransformation = [this]() {
+        if (mv::projects().isOpeningProject() || updateWorkflowRunning()) return;
+        auto* table = getGeneTableView();
+        if (table && table->currentIndex().isValid())
+            _XSCGeneDetectPlugin.onGeneRowChanged(table->currentIndex());
+    };
     connect(&_applyLogTransformation, &ToggleAction::toggled, this, updateApplyLogTransformation);
     const auto updateMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker = [this]() -> void {
         // Project/workspace restoration may restore this internal blocker.

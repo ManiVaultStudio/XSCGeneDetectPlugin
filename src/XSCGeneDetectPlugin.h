@@ -148,6 +148,7 @@ protected:
     QStringList _embeddingVisibleSpecies;
     QString _embeddingVisibleSpeciesSource;
     QString _embeddingVisibleSource, _embeddingVisibleOutput;
+    mv::Dataset<Points> _geneLegendRange;
 
     SettingsAction _settingsAction;
     //HorizontalToolbarAction     _toolbarAction;    // Toolbar action that is shown in the main window

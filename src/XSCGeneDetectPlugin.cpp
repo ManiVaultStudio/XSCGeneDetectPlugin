@@ -1526,7 +1526,10 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 if (!map || !std::isfinite(colorMinimum)) return;
                 const auto axis = ColorMapAction::Axis::X;
                 map->getDataRangeAction(axis).setRange({colorMinimum, colorMaximum});
-                map->getRangeAction(axis).initialize({colorMinimum, colorMaximum}, {colorMinimum, colorMaximum});
+                auto& range = map->getRangeAction(axis);
+                range.initialize({colorMinimum, colorMaximum}, {colorMinimum, colorMaximum});
+                // Refresh the renderer even when the action already had these endpoints.
+                range.rangeChanged(range.getRange());
             };
             _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors);
 
@@ -1570,7 +1573,25 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                                             auto legendDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster dataset"));
                                             if (legendDatasetPickerAction)
                                             {
-                                                legendDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                                // The legend derives its displayed domain from its dataset.
+                                                // It only needs the two endpoints for a numerical gradient.
+                                                if (std::isfinite(colorMinimum)) {
+                                                    if (!_geneLegendRange.isValid()) {
+                                                        _geneLegendRange = mv::data().createDataset("Points", "Gene expression scale",
+                                                            _settingsAction.getFilteredUMAPDatasetPoints());
+                                                        const int group = _settingsAction.getFilteredUMAPDatasetPoints()->getGroupIndex();
+                                                        _geneLegendRange->setGroupIndex(group);
+                                                        _settingsAction.trackTemporaryDataset(_geneLegendRange->getId(), group);
+                                                        mv::events().notifyDatasetAdded(_geneLegendRange);
+                                                    }
+                                                    QString rangeId = _geneLegendRange->getId();
+                                                    std::vector<float> endpoints{colorMinimum, colorMaximum};
+                                                    int count = 2, dimensions = 1;
+                                                    _settingsAction.populatePointData(rangeId, endpoints, count, dimensions, columnGeneColors);
+                                                    legendDatasetPickerAction->setCurrentDataset(_geneLegendRange);
+                                                } else {
+                                                    legendDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                                }
                                                 auto* legendMap = dynamic_cast<ColorMap1DAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Color map"));
                                                 if (legendMap && scatterMap && scatterMap->getColorMap() != legendMap->getColorMap())
                                                     scatterMap->setColorMap(legendMap->getColorMap());
