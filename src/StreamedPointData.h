@@ -1187,7 +1187,9 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
     if (physicalTiles && std::is_sorted(rows.begin(), rows.end())) {
         const auto storage = tiledStorage;
         const auto cache = PackedTileAccess::columnsFor(storage);
-        if (cache && cache->enabled() && uniqueColumns.size() * 4 < storage->columns()) {
+        const bool sparseRows = rows.size() <= storage->rows() / 8;
+        const bool narrow = uniqueColumns.size() * 4 < storage->columns();
+        if (cache && ((narrow && cache->enabled()) || (includeDetection && sparseRows && cache->complete()))) {
             XSC_TRACE("analysis.gene-blocks.aggregate");
             std::vector<std::pair<std::size_t, std::size_t>> jobs;
             const auto rowAt = [&](std::size_t i) { return static_cast<std::uint64_t>(rows[i]); };
@@ -1201,11 +1203,42 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
             for (std::size_t w = 0; w < workers; ++w) states.push_back(makeState());
             std::mutex progressMutex;
             std::size_t completed = 0;
+            // A contiguous cache read pays off when the request touches most
+            // stripes. Sparse requests retain their per-stripe reads.
+            const auto stripeWidth = ColumnTileCache::stripeWidth;
+            const auto stripeCount = (storage->columns() + stripeWidth - 1) / stripeWidth;
+            std::size_t requestedStripes = 0;
+            auto previousStripe = stripeCount;
+            for (const auto column : uniqueColumns) {
+                const auto stripe = column / stripeWidth;
+                if (stripe != previousStripe) ++requestedStripes;
+                previousStripe = stripe;
+            }
+            const bool readAhead = storage->columnTileSize() >= storage->columns() &&
+                requestedStripes >= 8 && requestedStripes * 4 >= stripeCount * 3;
             forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
                 const auto [begin, end] = jobs[job];
+                const auto tileRow = rowAt(begin) / storage->rowTileSize();
+                auto& selectedRows = state.reader->selectedRows;
+                selectedRows.clear();
+                if (end - begin <= storage->rowTileSize() / 4) {
+                    for (auto position = begin; position < end; ++position)
+                        selectedRows.push_back(rowAt(position) % storage->rowTileSize());
+                }
+                if (readAhead) {
+                    PackedTileAccess::readerFor(cache, state.reader.get());
+                    cache->prefetch(tileRow, storage->columns(), *state.reader);
+                }
+                std::size_t blocksRead = 0;
                 for (std::size_t next = 0; next < uniqueColumns.size();) {
-                    if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(completed, jobs.size()); }
-                    const auto tile = PackedTileAccess::readStripe(points, storage, rowAt(begin) / storage->rowTileSize(), uniqueColumns[next], state.reader.get());
+                    // Bound cancellation latency without serializing every stripe read.
+                    if (progress && blocksRead++ % 8 == 0) {
+                        const std::lock_guard<std::mutex> lock(progressMutex);
+                        progress(completed, jobs.size());
+                    }
+                    const auto tile = uniqueColumns.size() == 1
+                        ? PackedTileAccess::readColumn(points, storage, tileRow, uniqueColumns[next], state.reader.get())
+                        : PackedTileAccess::readStripe(points, storage, tileRow, uniqueColumns[next], state.reader.get());
                     if (!tile || !tile.columns()) throw std::runtime_error("Missing analysis gene block");
                     PointDataAccessView view{};
                     const auto type = static_cast<std::uint32_t>(Points::elementTypeSpecifier(points->getElementTypeName()));

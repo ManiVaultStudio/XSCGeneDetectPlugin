@@ -21,6 +21,7 @@ class ColumnTileCache {
     struct Block { qint64 offset = -1; std::uint32_t size = 0; std::uint8_t encoding = 0; }; // zstd / all-zero / row codes
 public:
     struct Reader {
+        std::vector<std::size_t> selectedRows;
         std::shared_ptr<ColumnTileCache> owner;
         QFile file; // closes before owner, so Windows can remove the cache file
         QByteArray ahead;
@@ -112,10 +113,12 @@ private:
             const auto source = layout.constData() + first * rows * packingSize;
             std::size_t encodedSize = 0;
             std::uint8_t encoding = 0;
-            const bool zero = std::all_of(source, source + sizeBytes, [](char value) { return value == 0; });
+            const auto compact = useCodes && !coded.allZero
+                ? RowValueCodes::pack(source, sizeBytes, !coded.hasRawRows) : QByteArray();
+            const bool zero = useCodes ? compact.isEmpty() :
+                std::all_of(source, source + sizeBytes, [](char value) { return value == 0; });
             if (zero && !coded.hasRawRows) encoding = 2;
             else {
-                const auto compact = useCodes ? RowValueCodes::pack(source, sizeBytes) : QByteArray();
                 const auto input = useCodes ? compact.constData() : source;
                 const auto inputSize = useCodes ? static_cast<std::size_t>(compact.size()) : sizeBytes;
                 encoding = useCodes ? 6 : 0;
@@ -153,7 +156,9 @@ private:
         XSC_TIMING_VALUE("gene.block-cache.encoded-bytes", packed.size());
     }
 public:
-    bool prefetch(std::size_t tile, std::size_t columns, Reader& reader) {
+    bool prefetch(std::size_t tile, std::size_t columns, Reader& reader, std::size_t maxBytes = 2 * 1024 * 1024) {
+        reader.ahead.clear();
+        reader.aheadOffset = -1;
         qint64 first, length;
         {
             const std::lock_guard<std::mutex> lock(_mutex);
@@ -166,6 +171,7 @@ public:
             first = begin.offset; length = end.offset + end.size - first;
             if (_dictionaries[tile].offset >= 0) { length += first - _dictionaries[tile].offset; first = _dictionaries[tile].offset; }
         }
+        if (length <= 0 || static_cast<std::uint64_t>(length) > maxBytes) return false;
         if (!reader.file.isOpen()) { reader.file.setFileName(fileName()); if (!reader.file.open(QIODevice::ReadOnly)) return false; }
         if (!reader.file.seek(first)) return false;
         reader.ahead = reader.file.read(length); reader.aheadOffset = first;
@@ -184,7 +190,7 @@ public:
         const auto decode = [&](const char* data) {
             const auto dictionary = block.encoding >= 4 ? loadDictionary(tile, &reader) : QByteArray();
             if (!singleColumn)
-                return decodeBlock(data, block.size, rows * width * _elementSize, block.encoding, rows, dictionary, first);
+                return decodeBlock(data, block.size, rows * width * _elementSize, block.encoding, rows, dictionary, first, reader.selectedRows);
             QByteArray result(static_cast<qsizetype>(rows * _elementSize), Qt::Uninitialized);
             if (block.encoding == 6) {
                 const auto size = ZSTD_getFrameContentSize(data, block.size);
@@ -295,6 +301,10 @@ public:
         return result;
     }
     bool full() const { const std::lock_guard<std::mutex> lock(_mutex); return _full; }
+    bool complete() const {
+        const std::lock_guard<std::mutex> lock(_mutex);
+        return _enabled && _preparedTiles == _tiles.size();
+    }
 private:
     QByteArray loadDictionary(std::size_t tile, Reader* reader = nullptr) {
         if (reader && reader->dictionaryTile == tile) return reader->dictionary;
@@ -340,7 +350,7 @@ private:
         return position == bytes;
     }
     bool decodeBlockInto(const char* source, std::size_t bytes, std::size_t expected, char* output, std::uint8_t encoding,
-        std::size_t rows, const QByteArray& dictionary, std::size_t columnBase) const {
+        std::size_t rows, const QByteArray& dictionary, std::size_t columnBase, const std::vector<std::size_t>& selectedRows = {}) const {
         if (encoding == 0) return decodeInto(source, bytes, expected, output);
         if (encoding == 2) { std::memset(output, 0, expected); return bytes == 0; }
         if (encoding == 4 || encoding == 5 || encoding == 6) {
@@ -350,7 +360,7 @@ private:
             QByteArray codes(raw, Qt::Uninitialized);
             if (!decodeInto(source, bytes, codes.size(), codes.data())) return false;
             if (encoding >= 5) codes = RowValueCodes::unpack(codes, expected / 4);
-            return RowValueCodes::decode(codes, dictionary, rows, expected / (rows * 4), output, encoding == 6, columnBase);
+            return RowValueCodes::decode(codes, dictionary, rows, expected / (rows * 4), output, encoding == 6, columnBase, selectedRows);
         }
         if (encoding != 1) return false;
         switch (_elementSize) {
@@ -362,9 +372,9 @@ private:
         }
     }
     QByteArray decodeBlock(const char* source, std::size_t bytes, std::size_t expected, std::uint8_t encoding,
-        std::size_t rows, const QByteArray& dictionary, std::size_t columnBase) const {
+        std::size_t rows, const QByteArray& dictionary, std::size_t columnBase, const std::vector<std::size_t>& selectedRows = {}) const {
         QByteArray result(static_cast<qsizetype>(expected), Qt::Uninitialized);
-        return decodeBlockInto(source, bytes, expected, result.data(), encoding, rows, dictionary, columnBase) ? result : QByteArray();
+        return decodeBlockInto(source, bytes, expected, result.data(), encoding, rows, dictionary, columnBase, selectedRows) ? result : QByteArray();
     }
     static bool decodeInto(const char* data, std::size_t size, std::size_t expected, char* output) {
         struct Context { ZSTD_DCtx* value = ZSTD_createDCtx(); ~Context() { ZSTD_freeDCtx(value); } };

@@ -221,6 +221,8 @@ void SettingsAction::updateButtonTriggered()
         if (!data->points.isValid() || !embeddingPoints.isValid() || !species.isValid() || !clusters.isValid() || !referenceTree.isValid() ||
             speciesPicker->getParent() != pointsPicker || clusterPicker->getParent() != pointsPicker || embeddingPicker->getParent() != pointsPicker)
         {
+            context->message(mv::util::SeverityLevel::Warning,
+                QStringLiteral("Selection update skipped because the analysis datasets are invalid or do not share the same expression dataset."), {}, {});
             context->setProgress(1.0);
             return;
         }
@@ -298,7 +300,8 @@ void SettingsAction::updateButtonTriggered()
         if (progressTask)
         {
             progressTask->setName(QStringLiteral("Compute gene mean expression map"));
-            progressTask->setProgressDescription(QStringLiteral("Scanning species-wide baseline means..."));
+            progressTask->setProgressDescription(QStringLiteral("Reading expression tiles for species baselines"));
+        context->message(mv::util::SeverityLevel::Info, QStringLiteral("Reading expression tiles for species baselines"), {}, {});
         }
         QElapsedTimer scanTimer;
         scanTimer.start();
@@ -324,7 +327,7 @@ void SettingsAction::updateButtonTriggered()
                 if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total)
                 {
                     if (progressTask)
-                        progressTask->setProgressDescription(QStringLiteral("Baseline means and fast gene blocks: %1% (%2 / %3 tiles)").arg(percent).arg(completed).arg(total));
+                        progressTask->setProgressDescription(QStringLiteral("Species baseline scan: %1 of %2 tiles (%3%)").arg(completed).arg(total).arg(percent));
                     qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent << "% ) at" << scanTimer.elapsed() << "ms";
                     lastProgressPercent = percent;
                 }

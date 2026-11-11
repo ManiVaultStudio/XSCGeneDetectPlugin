@@ -395,6 +395,9 @@ static QString geneTableCellTooltip(SettingsAction& settings, const QModelIndex&
         html += row("Best position", bestText);
         html += row("Mean differential", QString("%1 (higher in the selection in %2% of the species)").arg(num(meanDifferential)).arg(positivePercent, 0, 'f', 0));
         html += row("Mean expression (selection)", num(meanExpression));
+        const auto trait = index.siblingAtColumn(kTraitCorrelationColumn);
+        if (!trait.data(kTraitStatsRole).toList().isEmpty())
+            html += row("Trait correlation", trait.data(Qt::ToolTipRole).toString().toHtmlEscaped().replace('\n', "<br>"));
         html += row("Rank consistency", QString("p = %1, FDR = %2").arg(weightedIndex.data(kWeightedPValueRole).toDouble(), 0, 'g', 3).arg(weightedIndex.data(kWeightedFdrRole).toDouble(), 0, 'g', 3));
         html += "</table><p>Hover the other columns for details.</p>";
         return html;
@@ -1501,10 +1504,30 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
             std::vector<QString> columnGeneColors = { gene };
             int tempNumDimensionsColors = static_cast<int>(columnGeneColors.size());
-            if (_settingsAction.getApplyLogTransformation().isChecked())
+            const bool logColors = _settingsAction.getApplyLogTransformation().isChecked();
+            if (logColors)
             {
                 applyLogTransformation(resultContainerSpeciesColors);
             }
+            float colorMinimum = std::numeric_limits<float>::infinity();
+            float colorMaximum = -colorMinimum;
+            // Use the complete source column for the selected gene so that
+            // changing the visible species does not change the color scale.
+            for (const float value : allColors) {
+                if (!std::isfinite(value) || (logColors && value <= -1.0f)) continue;
+                colorMinimum = std::min(colorMinimum, value);
+                colorMaximum = std::max(colorMaximum, value);
+            }
+            if (logColors && std::isfinite(colorMinimum)) {
+                colorMinimum = std::log(colorMinimum + 1.0f);
+                colorMaximum = std::log(colorMaximum + 1.0f);
+            }
+            const auto applyExpressionRange = [colorMinimum, colorMaximum](ColorMap1DAction* map) {
+                if (!map || !std::isfinite(colorMinimum)) return;
+                const auto axis = ColorMapAction::Axis::X;
+                map->getDataRangeAction(axis).setRange({colorMinimum, colorMaximum});
+                map->getRangeAction(axis).initialize({colorMinimum, colorMaximum}, {colorMinimum, colorMaximum});
+            };
             _settingsAction.populatePointData(speciesColorDataId, resultContainerSpeciesColors, tempnumPointsColors, tempNumDimensionsColors, columnGeneColors);
 
             //std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
@@ -1535,6 +1558,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                             {
 
                                 colorDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                auto* scatterMap = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("Settings/Coloring/1D Color map"));
                                 auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
                                 if (legendViewFactory)
                                 {
@@ -1547,6 +1571,10 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                                             if (legendDatasetPickerAction)
                                             {
                                                 legendDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                                auto* legendMap = dynamic_cast<ColorMap1DAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Color map"));
+                                                if (legendMap && scatterMap && scatterMap->getColorMap() != legendMap->getColorMap())
+                                                    scatterMap->setColorMap(legendMap->getColorMap());
+                                                applyExpressionRange(legendMap);
                                             }
                                             auto chartTitle = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Chart Title"));
                                             if (chartTitle)
@@ -1556,6 +1584,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                                         }
                                     }
                                 }
+                                applyExpressionRange(scatterMap);
                             }
 
                             auto focusSelectionAction = dynamic_cast<ToggleAction*>(plugin->findChildByPath("Settings/Plot/Point/Focus selection"));
@@ -1736,6 +1765,8 @@ public:
         bool highlighted = false;
         QColor color;           // invalid: grey (blue when highlighted)
         int id = -1;            // free for the owner (index of a row, a species, ...)
+        double low = std::numeric_limits<double>::quiet_NaN();
+        double high = std::numeric_limits<double>::quiet_NaN();
     };
     struct GuideLine {
         bool horizontal = true;
@@ -1754,6 +1785,8 @@ public:
     }
 
     // ---- content ----
+    void setGeneLabels() { _geneLabels = true; updateMargins(); }
+
     void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle, bool keepView = false)
     {
         XSC_TRACE("plot.setData");
@@ -1821,6 +1854,7 @@ public:
             };
         pad(minX, maxX);
         pad(minY, maxY);
+        if (_geneLabels) { minX = -1.0; maxX = 1.0; }
         _minX = minX; _maxX = maxX; _minY = minY; _maxY = maxY;
         _viewValid = true;
         update();
@@ -1837,6 +1871,7 @@ protected:
         const int line = metrics.height();
         const int tickWidth = metrics.horizontalAdvance(QStringLiteral("-1.2345e-05"));
         _leftMargin = 6 + line + 6 + tickWidth + 10;
+        if (_geneLabels) _leftMargin = std::max(_leftMargin, 125);
         _bottomMargin = 6 + line + 6 + line + 6;
     }
 
@@ -2032,7 +2067,7 @@ protected:
             }
             painter.setPen(textColor);
             painter.drawLine(QPointF(plot.left() - 4, pixel.y()), QPointF(plot.left(), pixel.y()));
-            if (pixel.y() + metrics.height() / 2.0 <= previousTop - 2.0) {
+            if (!_geneLabels && pixel.y() + metrics.height() / 2.0 <= previousTop - 2.0) {
                 painter.drawText(QRectF(plot.left() - 6 - yLabelBox, pixel.y() - metrics.height() / 2.0, yLabelBox, metrics.height()), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
                 previousTop = pixel.y() - metrics.height() / 2.0;
             }
@@ -2060,6 +2095,16 @@ protected:
         painter.rotate(-90);
         painter.drawText(QRectF(-plot.height() / 2.0, -yTitleMetrics.height() / 2.0, plot.height(), yTitleMetrics.height()), Qt::AlignCenter, _yTitle);
         painter.restore();
+
+        if (_geneLabels) {
+            painter.setPen(textColor);
+            for (const auto& point : _points) {
+                if (point.y < _minY || point.y > _maxY) continue;
+                const auto pixel = toPixel(point.x, point.y);
+                painter.drawText(QRectF(4, pixel.y() - metrics.height() / 2.0, plot.left() - 12, metrics.height()),
+                    Qt::AlignRight | Qt::AlignVCenter, metrics.elidedText(point.label, Qt::ElideRight, plot.left() - 12));
+            }
+        }
 
         // ---- everything inside the plot is clipped to it (zoomed-in content must not leak into the margins) ----
         painter.save();
@@ -2105,14 +2150,20 @@ protected:
         // points (the hovered one last, so that it is on top)
         const double radius = _pointSize / 2.0;
         for (int i = 0; i < _points.size(); ++i) {
-            if (i == _hovered)
+            if (i == _hovered && !_geneLabels)
                 continue;
             const Point& point = _points[i];
             const QPointF pixel = toPixel(point.x, point.y);
             if (!plot.adjusted(-10, -10, 10, 10).contains(pixel.toPoint()))
                 continue;
+            const QColor color = point.color.isValid() ? point.color : (point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray));
+            if (std::isfinite(point.low) && std::isfinite(point.high)) {
+                painter.setPen(QPen(color, 1));
+                painter.drawLine(toPixel(std::max(_minX, point.low), point.y),
+                    toPixel(std::min(_maxX, point.high), point.y));
+            }
             painter.setPen(Qt::NoPen);
-            painter.setBrush(point.color.isValid() ? point.color : (point.highlighted ? QColor("#00A2ED") : QColor(Qt::gray)));
+            painter.setBrush(color);
             painter.drawEllipse(pixel, radius, radius);
         }
         if (_hovered >= 0 && _hovered < _points.size()) {
@@ -2182,6 +2233,7 @@ protected:
 
 private:
     QVector<Point> _points;
+    bool _geneLabels = false;
     QVector<GuideLine> _guides;
     QString _xTitle;
     QString _yTitle;
@@ -2399,6 +2451,18 @@ public:
             "Use this view to spot trait-linked genes whose signal is also shared across species.");
         wireGenePlot(_conservationPlot);
 
+        auto* rankingPage = new QWidget(_tabs);
+        auto* rankingLayout = new QVBoxLayout(rankingPage);
+        _rankingPlot = new ZoomablePlotWidget(rankingPage);
+        _rankingPlot->setGeneLabels();
+        _rankingPlot->setShowTrendLine(false);
+        addToolbar(rankingLayout, _rankingPlot, false, ZoomablePlotWidget::LabelMode::None);
+        rankingLayout->addWidget(_rankingPlot, 1);
+        _tabs->addTab(rankingPage, "Ranked correlations");
+        _tabs->setTabToolTip(_tabs->indexOf(rankingPage),
+            "Genes ranked from the most negative to the most positive correlation. Click a point to select its gene.");
+        wireGenePlot(_rankingPlot);
+
         connect(_tabs, &QTabWidget::currentChanged, this, [this](int) {
             if (onTabChanged)
                 onTabChanged();
@@ -2442,20 +2506,36 @@ public:
         _speciesTable->resizeColumnsToContents();
     }
 
-    void setVolcanoData(const QVector<Point>& points, double significanceLevel, const QString& info)
+    void setVolcanoData(const QVector<Point>& points, double significanceLevel, const QString& metric, const QString& info)
     {
         XSC_TRACE("plot.setVolcanoData");
         _volcanoPlot->setGuideLines({ { true, -std::log10(significanceLevel), QString("FDR = %1").arg(significanceLevel) },{ false, 0.0, QString() } });
-        _volcanoPlot->setData(points, "Trait correlation", "-log10 FDR", true);
+        _volcanoPlot->setData(points, metric, "-log10 FDR", true);
         _volcanoInfo->setText(info);
     }
 
-    void setConservationData(const QVector<Point>& points, const QString& info)
+    void setConservationData(const QVector<Point>& points, const QString& metric, const QString& info)
     {
         XSC_TRACE("plot.setConservationData");
         _conservationPlot->setGuideLines({ { true, 0.0, QString() } });
-        _conservationPlot->setData(points, "Weighted appearance", "Trait correlation", true);
+        _conservationPlot->setData(points, "Weighted appearance", metric);
         _conservationInfo->setText(info);
+    }
+
+    void setRankedCorrelations(QVector<Point> points, const QString& selected)
+    {
+        std::sort(points.begin(), points.end(), [](const Point& left, const Point& right) {
+            if (left.x != right.x) return left.x < right.x;
+            return left.label < right.label;
+        });
+        QVector<Point> shown;
+        for (qsizetype i = 0; i < points.size(); ++i) {
+            if (i >= 5 && i < points.size() - 5 && points[i].label != selected) continue;
+            points[i].y = shown.size() + 1;
+            shown.push_back(points[i]);
+        }
+        _rankingPlot->setGuideLines({ { false, 0.0, QString() } });
+        _rankingPlot->setData(shown, "Trait correlation (95% confidence intervals where available)", QString());
     }
 
 private:
@@ -2577,6 +2657,7 @@ private:
     ZoomablePlotWidget* _speciesPlot = nullptr;
     ZoomablePlotWidget* _volcanoPlot = nullptr;
     ZoomablePlotWidget* _conservationPlot = nullptr;
+    ZoomablePlotWidget* _rankingPlot = nullptr;
     QTableWidget* _speciesTable = nullptr;
     QLabel* _speciesInfo = nullptr;
     QLabel* _volcanoInfo = nullptr;
@@ -4271,22 +4352,8 @@ void XSCGeneDetectPlugin::refreshTraitColumnVisibility()
 {
     auto* view = _settingsAction.getGeneTableView();
     if (!view || !view->model() || view->model()->columnCount() <= kTraitCorrelationColumn) return;
-    const auto& values = _settingsAction.getGeneTraitValues();
-    const bool hasValues = std::any_of(values.begin(), values.end(),
-        [](const auto& entry) { return std::isfinite(entry.second); });
-    if (hasValues) view->model()->setProperty("xscTraitColumnHasResults", true);
-    const bool ready = view->model()->property("xscTraitColumnHasResults").toBool();
-    const auto header = view->model()->headerData(kTraitCorrelationColumn, Qt::Horizontal).toString();
-    const bool wanted = _settingsAction.getHiddenShowncolumns().getSelectedOptions().contains(header);
-    const bool hidden = !ready || !wanted;
-    auto* sections = view->horizontalHeader();
-    const int traitIndex = sections->visualIndex(kTraitCorrelationColumn);
-    const int weightedIndex = sections->visualIndex(kWeightedAppearanceColumn);
-    const int targetIndex = weightedIndex + (traitIndex > weightedIndex ? 1 : 0);
-    if (traitIndex >= 0 && weightedIndex >= 0 && traitIndex != targetIndex)
-        sections->moveSection(traitIndex, targetIndex);
-    if (view->isColumnHidden(kTraitCorrelationColumn) != hidden) {
-        view->setColumnHidden(kTraitCorrelationColumn, hidden);
+    if (!view->isColumnHidden(kTraitCorrelationColumn)) {
+        view->hideColumn(kTraitCorrelationColumn);
         fitGeneTableWidth(view);
     }
 }
@@ -4419,21 +4486,23 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
 
     // ---- tabs 2 and 3: all analysed genes (only the visible tab is rebuilt) ----
     const int tab = dialog->currentTab();
-    if ((tab == 1 || tab == 2) && haveModel) {
+    if (tab >= 1 && tab <= 3 && haveModel) {
         const auto& values = _settingsAction.getGeneTraitValues();
         const auto& extras = _settingsAction.getGeneTraitExtras();
 
         QVector<Point> points;
         points.reserve(model->rowCount());
         int significantCount = 0;
+        bool contribution = false;
         for (int row = 0; row < model->rowCount(); ++row) {
             const QString geneName = model->item(row, 0)->text();
             const auto valueIt = values.find(geneName);
             const auto extrasIt = extras.find(geneName);
-            if (valueIt == values.end() || extrasIt == extras.end())
+            if (valueIt == values.end() || extrasIt == extras.end() || !std::isfinite(valueIt->second))
                 continue;
 
             const double fdr = static_cast<double>(extrasIt->second.significanceFdr);
+            contribution |= std::isfinite(extrasIt->second.overall);
             const bool significant = fdr < level;
             significantCount += significant ? 1 : 0;
 
@@ -4445,23 +4514,33 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
                 point.x = static_cast<double>(valueIt->second);
                 point.y = -std::log10(std::max(fdr, 1e-12));
             }
-            else {
+            else if (tab == 2) {
                 if (model->item(row, 1)->data(Qt::DisplayRole).toInt() < 1)
                     continue; // only the listed genes have a weighted appearance
                 point.x = model->item(row, kWeightedAppearanceColumn)->data(Qt::UserRole).toDouble();
                 point.y = static_cast<double>(valueIt->second);
             }
+            else {
+                const auto& stats = extrasIt->second;
+                point.x = std::isfinite(stats.overall) ? stats.overall : valueIt->second;
+                point.low = stats.ciLow;
+                point.high = stats.ciHigh;
+            }
             points.push_back(point);
         }
 
         const QString basis = QString(" %1 genes are significant.").arg(significantCount);
+        const QString metric = contribution ? QStringLiteral("Selected-species contribution score") : QStringLiteral("Trait correlation");
         if (tab == 1) {
-            dialog->setVolcanoData(points, level, QString("%1 genes analysed, %2 significant (FDR < %3; blue). Click a gene to select it in the gene table. "
+            dialog->setVolcanoData(points, level, metric, QString("%1 genes analysed, %2 significant (FDR < %3; blue). Click a gene to select it in the gene table. "
                 "Hover for details. Wheel: zoom, drag: move, double click: reset.").arg(points.size()).arg(significantCount).arg(level));
         }
+        else if (tab == 2) {
+            dialog->setConservationData(points, metric, QString("Listed genes: weighted appearance across species versus %1. Blue points meet the FDR threshold of %2.%3")
+                .arg(metric).arg(level).arg(basis));
+        }
         else {
-            dialog->setConservationData(points, QString("Listed genes: weighted appearance across species (x) against the trait correlation (y). Genes in the upper right are "
-                "conserved markers whose expression rises with the trait; blue: significant (FDR < %1).%2").arg(level).arg(basis));
+            dialog->setRankedCorrelations(std::move(points), gene);
         }
 
     }

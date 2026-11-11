@@ -76,9 +76,10 @@ struct RowValueCodes {
         out.valid = true;
         return out;
     }
-    static QByteArray pack(const char* source, std::size_t count) {
+    static QByteArray pack(const char* source, std::size_t count, bool omitAllZero = false) {
         std::array<std::size_t, 256> frequencies{};
         for (std::size_t i = 0; i < count; ++i) ++frequencies[static_cast<unsigned char>(source[i])];
+        if (omitAllZero && frequencies[0] == count) return {};
         std::size_t best = count + 1; unsigned bits = 8;
         std::size_t escaped = count - frequencies[0];
         std::size_t firstEscape = 1;
@@ -88,12 +89,15 @@ struct RowValueCodes {
             const std::size_t size = 1 + (count * candidate + 7) / 8 + escaped;
             if (size < best) { best = size; bits = candidate; }
         }
-        QByteArray result(static_cast<qsizetype>(best), 0);
+        QByteArray result(static_cast<qsizetype>(best), Qt::Uninitialized);
         result[0] = static_cast<char>(bits);
         if (bits == 8) { std::memcpy(result.data() + 1, source, count); return result; }
         const auto escape = (1U << bits) - 1;
         auto position = 1 + (count * bits + 7) / 8;
         auto* output = reinterpret_cast<unsigned char*>(result.data());
+        // Escape bytes are assigned below, so only the packed bit field
+        // needs initialization before combining codes with bitwise OR.
+        std::memset(output + 1, 0, position - 1);
         for (std::size_t i = 0; i < count; ++i) {
             const auto value = static_cast<unsigned char>(source[i]);
             const auto code = std::min<unsigned>(value, escape);
@@ -119,11 +123,14 @@ struct RowValueCodes {
         return position == static_cast<std::size_t>(packed.size()) ? result : QByteArray();
     }
     static bool decode(const QByteArray& codes, const QByteArray& dictionary, std::size_t rows, std::size_t columns, char* output,
-        bool columnMajor = false, std::size_t columnBase = 0) {
+        bool columnMajor = false, std::size_t columnBase = 0, const std::vector<std::size_t>& selectedRows = {}) {
         const auto header = (rows + 1) * 4;
         if (codes.size() != rows * columns || dictionary.size() < header) return false;
         const auto values = (dictionary.size() - header) / 4;
-        for (std::size_t row = 0; row < rows; ++row) {
+        const auto count = selectedRows.empty() ? rows : selectedRows.size();
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto row = selectedRows.empty() ? i : selectedRows[i];
+            if (row >= rows) return false;
             std::uint32_t first, end;
             std::memcpy(&first, dictionary.constData() + row * 4, 4);
             std::memcpy(&end, dictionary.constData() + (row + 1) * 4, 4);

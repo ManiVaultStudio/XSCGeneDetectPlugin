@@ -17,6 +17,10 @@ public:
         if (!_task) {
             _task = new mv::Task(parent, name, {mv::Task::GuiScope::Foreground});
             _task->setProgressMode(mv::Task::ProgressMode::Manual);
+            _task->setProgressTextFormatter([](mv::Task& task) {
+                return QStringLiteral("%1 — %2%").arg(task.getProgressDescription())
+                    .arg(static_cast<int>(task.getProgress() * 100.0f));
+            });
             _timer = new QTimer(_task);
             _timer->setInterval(100);
             QObject::connect(_timer, &QTimer::timeout, _task, [this] { publish(); });
@@ -31,11 +35,16 @@ public:
     bool running() const { return _timer && _timer->isActive(); }
     void finish() {
         if (!_task) return;
-        _timer->stop(); _task->setProgress(1, "Ready"); _task->setFinished();
+        _timer->stop();
+        _task->setProgressDescription(QStringLiteral("Results ready"));
+        _task->setProgress(1);
+        _task->setFinished();
     }
     void cancel() {
         if (!_task || !running()) return;
-        _timer->stop(); _task->setStatus(mv::Task::Status::Aborted);
+        _timer->stop();
+        _task->setProgressDescription(QStringLiteral("Cancelled"));
+        _task->setStatus(mv::Task::Status::Aborted);
     }
 private:
     void publish() {
