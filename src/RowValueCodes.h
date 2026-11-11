@@ -52,7 +52,7 @@ struct RowValueCodes {
                 code = static_cast<char>(ids[slot]);
                 ++frequencies[ids[slot]];
             }
-            if (offsets[row] & 0x80000000U) continue;
+            if ((offsets[row] & 0x80000000U) || count <= 2) continue;
             // Stable frequent codes compress across rows even when each row
             // has a different normalization factor and raw float values.
             std::array<std::uint16_t, 256> order{};
@@ -80,10 +80,12 @@ struct RowValueCodes {
         std::array<std::size_t, 256> frequencies{};
         for (std::size_t i = 0; i < count; ++i) ++frequencies[static_cast<unsigned char>(source[i])];
         std::size_t best = count + 1; unsigned bits = 8;
+        std::size_t escaped = count - frequencies[0];
+        std::size_t firstEscape = 1;
         for (const unsigned candidate : {1U, 2U, 4U}) {
             const auto escape = (1U << candidate) - 1;
-            std::size_t size = 1 + (count * candidate + 7) / 8;
-            for (std::size_t i = escape; i < 256; ++i) size += frequencies[i];
+            while (firstEscape < escape) escaped -= frequencies[firstEscape++];
+            const std::size_t size = 1 + (count * candidate + 7) / 8 + escaped;
             if (size < best) { best = size; bits = candidate; }
         }
         QByteArray result(static_cast<qsizetype>(best), 0);

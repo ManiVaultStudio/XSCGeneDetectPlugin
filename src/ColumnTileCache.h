@@ -94,20 +94,23 @@ private:
         for (std::size_t band = 0; band < rows; band += 16)
             for (std::size_t first = 0; first < columns; first += stripeWidth) {
                 const auto width = std::min(stripeWidth, columns - first);
-                for (std::size_t row = band; row < std::min(rows, band + 16); ++row) {
-                    if (useCodes) {
-                        for (std::size_t column = 0; column < width; ++column)
-                            layoutBytes[first * rows + column * rows + row] = packingData[row * columns + first + column];
-                    }
-                    else std::memcpy(layoutBytes + (first * rows + row * width) * packingSize,
-                        packingData + (row * columns + first) * packingSize, width * packingSize);
+                const auto end = std::min(rows, band + 16);
+                if (useCodes) {
+                    for (std::size_t column = 0; column < width; ++column)
+                        for (std::size_t row = band; row < end; ++row)
+                            layoutBytes[(first + column) * rows + row] = packingData[row * columns + first + column];
+                } else {
+                    for (std::size_t row = band; row < end; ++row)
+                        std::memcpy(layoutBytes + (first * rows + row * width) * packingSize,
+                            packingData + (row * columns + first) * packingSize, width * packingSize);
                 }
             }
+        QByteArray encoded(ZSTD_compressBound(rows * std::min(stripeWidth, columns) * packingSize + 1), Qt::Uninitialized);
         for (std::size_t first = 0; first < columns; first += stripeWidth) {
             const auto width = std::min(stripeWidth, columns - first);
             const auto sizeBytes = rows * width * packingSize;
             const auto source = layout.constData() + first * rows * packingSize;
-            QByteArray encoded;
+            std::size_t encodedSize = 0;
             std::uint8_t encoding = 0;
             const bool zero = std::all_of(source, source + sizeBytes, [](char value) { return value == 0; });
             if (zero && !coded.hasRawRows) encoding = 2;
@@ -116,13 +119,12 @@ private:
                 const auto input = useCodes ? compact.constData() : source;
                 const auto inputSize = useCodes ? static_cast<std::size_t>(compact.size()) : sizeBytes;
                 encoding = useCodes ? 6 : 0;
-                encoded.resize(static_cast<qsizetype>(ZSTD_compressBound(inputSize)));
                 const auto size = ZSTD_compressCCtx(context.value, encoded.data(), encoded.size(), input, inputSize, useCodes ? 1 : -3);
                 if (ZSTD_isError(size)) { disable(); return; }
-                encoded.resize(static_cast<qsizetype>(size));
+                encodedSize = size;
             }
-            blocks.push_back({packed.size(), static_cast<std::uint32_t>(encoded.size()), encoding});
-            packed.append(encoded);
+            blocks.push_back({packed.size(), static_cast<std::uint32_t>(encodedSize), encoding});
+            if (encodedSize) packed.append(encoded.constData(), static_cast<qsizetype>(encodedSize));
         }
         }
         // One append per physical tile instead of hundreds of thousands of
@@ -169,7 +171,7 @@ public:
         reader.ahead = reader.file.read(length); reader.aheadOffset = first;
         return reader.ahead.size() == length;
     }
-    QByteArray stripe(std::size_t tile, std::size_t rows, std::size_t columns, std::size_t column, Reader& reader) {
+    QByteArray stripe(std::size_t tile, std::size_t rows, std::size_t columns, std::size_t column, Reader& reader, bool singleColumn = false) {
         Block block;
         {
             const std::lock_guard<std::mutex> lock(_mutex);
@@ -177,19 +179,40 @@ public:
             block = _blocks.at(tile * _stripes + column / stripeWidth);
         }
         if (block.offset < 0) return {};
+        const auto first = column / stripeWidth * stripeWidth;
+        const auto width = std::min(stripeWidth, columns - first);
+        const auto decode = [&](const char* data) {
+            const auto dictionary = block.encoding >= 4 ? loadDictionary(tile, &reader) : QByteArray();
+            if (!singleColumn)
+                return decodeBlock(data, block.size, rows * width * _elementSize, block.encoding, rows, dictionary, first);
+            QByteArray result(static_cast<qsizetype>(rows * _elementSize), Qt::Uninitialized);
+            if (block.encoding == 6) {
+                const auto size = ZSTD_getFrameContentSize(data, block.size);
+                if (size > rows * width + 1) return QByteArray();
+                QByteArray packed(static_cast<qsizetype>(size), Qt::Uninitialized);
+                if (!decodeInto(data, block.size, size, packed.data())) return QByteArray();
+                const auto codes = RowValueCodes::unpack(packed, rows * width);
+                if (codes.isEmpty() || !RowValueCodes::decode(
+                    codes.mid((column - first) * rows, rows), dictionary, rows, 1, result.data(), true, column))
+                    return QByteArray();
+                return result;
+            }
+            const auto stripe = decodeBlock(data, block.size, rows * width * _elementSize, block.encoding, rows, dictionary, first);
+            if (stripe.isEmpty()) return QByteArray();
+            for (std::size_t row = 0; row < rows; ++row)
+                std::memcpy(result.data() + row * _elementSize,
+                    stripe.constData() + (row * width + column - first) * _elementSize, _elementSize);
+            return result;
+        };
         const auto relative = block.offset - reader.aheadOffset;
         if (reader.aheadOffset >= 0 && relative >= 0 && relative + block.size <= reader.ahead.size()) {
-            const auto first = column / stripeWidth * stripeWidth;
-            const auto dictionary = block.encoding >= 4 ? loadDictionary(tile, &reader) : QByteArray();
-            return decodeBlock(reader.ahead.constData() + relative, block.size, rows * std::min(stripeWidth, columns - first) * _elementSize, block.encoding, rows, dictionary, first);
+            return decode(reader.ahead.constData() + relative);
         }
         if (!reader.file.isOpen()) { reader.file.setFileName(fileName()); if (!reader.file.open(QIODevice::ReadOnly)) return {}; }
         if (!reader.file.seek(block.offset)) return {};
         const auto encoded = reader.file.read(block.size);
         if (encoded.size() != block.size) return {};
-        const auto first = column / stripeWidth * stripeWidth;
-        const auto dictionary = block.encoding >= 4 ? loadDictionary(tile, &reader) : QByteArray();
-        return decodeBlock(encoded.constData(), encoded.size(), rows * std::min(stripeWidth, columns - first) * _elementSize, block.encoding, rows, dictionary, first);
+        return decode(encoded.constData());
     }
     QByteArray stripe(std::size_t tile, std::size_t rows, std::size_t columns, std::size_t column, QFile* reader = nullptr) {
         if (column >= columns) return {};

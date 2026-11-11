@@ -69,6 +69,11 @@ int main(int argc, char** argv) {
         ColumnTileCache::Reader ahead;
         require(cache.prefetch(2, columns, ahead), "Dense analysis read-ahead must load one encoded tile");
         require(cache.stripe(2, rows, columns, 129, ahead) == cache.stripe(2, rows, columns, 129), "Read-ahead and direct stripe decode must agree");
+        for (const auto column : {0U, 65U, 129U}) {
+            const auto expected = cache.column(2, rows, columns, column);
+            require(!expected.isEmpty() && cache.stripe(2, rows, columns, column, ahead, true) == expected,
+                "Single-column decoding must preserve the exact values in every stripe");
+        }
         require(cache.fileName() == path, "Every tile/gene must use the same file");
     }
     require(!QFileInfo::exists(path), "Cache must be removed with its last owner");

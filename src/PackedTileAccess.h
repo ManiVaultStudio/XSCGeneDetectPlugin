@@ -85,7 +85,7 @@ public:
         return &reader->file;
     }
     static Lease readStripe(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t column,
-        ColumnTileCache::Reader* reader = nullptr) {
+        ColumnTileCache::Reader* reader = nullptr, bool singleColumn = false) {
         const auto tileColumns = (storage->columns() + storage->columnTileSize() - 1) / storage->columnTileSize();
         const auto index = static_cast<std::size_t>(tileRow * tileColumns + column / storage->columnTileSize());
         const auto& descriptor = storage->descriptors().at(index);
@@ -93,13 +93,14 @@ public:
             XSC_HOT_TRACE("gene.block-cache.read");
             const auto local = column - descriptor.columnOffset;
             readerFor(cache, reader);
-            auto bytes = reader ? cache->stripe(index, descriptor.rows, descriptor.columns, local, *reader)
+            auto bytes = reader ? cache->stripe(index, descriptor.rows, descriptor.columns, local, *reader, singleColumn)
                 : cache->stripe(index, descriptor.rows, descriptor.columns, local);
             if (!bytes.isEmpty()) {
                 auto entry = std::make_shared<Entry>(); entry->owner = storage; entry->descriptor = descriptor;
-                const auto first = local / ColumnTileCache::stripeWidth * ColumnTileCache::stripeWidth;
+                const auto first = singleColumn && reader ? local : local / ColumnTileCache::stripeWidth * ColumnTileCache::stripeWidth;
                 entry->descriptor.columnOffset = descriptor.columnOffset + first;
-                entry->descriptor.columns = std::min<std::uint64_t>(ColumnTileCache::stripeWidth, descriptor.columns - first);
+                entry->descriptor.columns = singleColumn && reader ? 1 :
+                    std::min<std::uint64_t>(ColumnTileCache::stripeWidth, descriptor.columns - first);
                 entry->bytes = std::move(bytes); entry->state = Entry::State::Ready;
                 XSC_HOT_TRACE("gene.block-cache.hit");
                 return Lease(entry);
@@ -110,7 +111,7 @@ public:
     }
     static Lease readColumn(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t column,
         ColumnTileCache::Reader* reader = nullptr) {
-        return readStripe(points, storage, tileRow, column, reader);
+        return readStripe(points, storage, tileRow, column, reader, true);
     }
     static Lease read(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t tileColumn) {
         XSC_TRACE("packed.tile.acquire");
