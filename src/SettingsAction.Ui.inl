@@ -665,7 +665,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateMainPointsDataset = [this]() -> void {
 
-        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
+        if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
             computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
@@ -756,7 +756,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _speciesExplorerInMap.setSelectedOptions(restoredSelection);
         }
 
-        if (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature())
+        if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
             computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
         }
@@ -1228,6 +1228,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         };
     connect(&_applyLogTransformation, &ToggleAction::toggled, this, updateApplyLogTransformation);
     const auto updateMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker = [this]() -> void {
+        // Project/workspace restoration may restore this internal blocker.
+        // Do not start a scan as a side effect of loading saved action state.
+        if (mv::projects().isOpeningProject())
+            return;
+
         if (!_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
         {
             // _startComputationTriggerAction.setDisabled(false);

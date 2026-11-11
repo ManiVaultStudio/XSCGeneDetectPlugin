@@ -867,7 +867,6 @@ void XSCGeneDetectPlugin::init()
     const auto triggerInit = [this]() -> void
         {
             _settingsAction.removeAllManagedTemporaryDatasets();
-            _settingsAction.getMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker().setChecked(false);
 
 
 
