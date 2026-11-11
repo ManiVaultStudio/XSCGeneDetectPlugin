@@ -27,7 +27,7 @@ int main()
     const std::vector<unsigned> requested{0,2,1};
     std::vector<float> mapped;
     for (const auto row : requested) mapped.push_back(raw[PointStreaming::logicalToSourceRow(false, row, 3, subset, 3)]);
-    if (mapped != std::vector<float>({30,30,10})) throw std::runtime_error("Eager subset values must preserve logical order and duplicates");
+    if (mapped != std::vector<float>({30,30,10})) throw std::runtime_error("Dense subset values must preserve logical order and duplicates");
     std::vector<unsigned> rows(2326579);
     std::iota(rows.begin(), rows.end(), 0);
     const auto full = jobsFor(rows, 284, rows.size());

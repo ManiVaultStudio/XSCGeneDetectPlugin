@@ -4574,7 +4574,7 @@ void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
                 job->coordinates = std::make_shared<std::vector<float>>(static_cast<std::size_t>(count) * width);
                 std::size_t firstRow = 0, offset = 0;
                 const auto backend = job->embedding->getStorageBackendType();
-                if (!backend || *backend == Points::StorageBackendType::Eager) {
+                if (!backend || *backend == Points::StorageBackendType::Dense) {
                     std::vector<int> dimensions(width);
                     std::iota(dimensions.begin(), dimensions.end(), 0);
                     job->embedding->populateDataForDimensions(*job->coordinates, dimensions);

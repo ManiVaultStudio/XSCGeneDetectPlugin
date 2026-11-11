@@ -9,9 +9,9 @@
 namespace PointStreaming {
 
 enum class GroupedReadPath { PhysicalTiles, SparseRanges, DenseRows };
-inline GroupedReadPath groupedReadPath(bool sparseColumns, bool eager, bool physicalTiles, bool detection) {
+inline GroupedReadPath groupedReadPath(bool sparseColumns, bool dense, bool physicalTiles, bool detection) {
     if (physicalTiles) return GroupedReadPath::PhysicalTiles;
-    return sparseColumns && !eager && !detection ? GroupedReadPath::SparseRanges : GroupedReadPath::DenseRows;
+    return sparseColumns && !dense && !detection ? GroupedReadPath::SparseRanges : GroupedReadPath::DenseRows;
 }
 
 template<typename Indices>

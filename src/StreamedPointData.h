@@ -141,20 +141,20 @@ inline std::shared_ptr<mv::pointdata::tiled::PointDataTiledStorage> tiledStorage
     return tiledBackend ? tiledBackend->getStorage() : nullptr;
 }
 
-struct EagerVisitProbe {
+struct DenseVisitProbe {
     template <typename Iterator>
     void operator()(Iterator, Iterator) const;
 };
 
 template <typename PointType, typename = void>
-struct HasDirectEagerAccess : std::false_type {};
+struct HasDirectDenseAccess : std::false_type {};
 
 template <typename PointType>
-struct HasDirectEagerAccess<PointType, std::void_t<
+struct HasDirectDenseAccess<PointType, std::void_t<
     decltype(std::declval<const PointType&>().isProxy()),
     decltype(std::declval<const PointType&>().isFull()),
     decltype(std::declval<const PointType&>().getStorageBackendType()),
-    decltype(std::declval<const PointType&>().constVisitFromBeginToEnd(EagerVisitProbe{})),
+    decltype(std::declval<const PointType&>().constVisitFromBeginToEnd(DenseVisitProbe{})),
     typename PointType::StorageBackendType>> : std::true_type {};
 
 template <typename View, typename = void>
@@ -189,11 +189,11 @@ void setNonOwningRangeView(View& view, const void* data, const std::uint64_t fir
         view.lifetime.reset();
 }
 
-template <typename PointType, typename Work, std::enable_if_t<HasDirectEagerAccess<PointType>::value, int> = 0>
-bool withEagerPointData(const PointType* points, Work&& work, bool allowSubset = false)
+template <typename PointType, typename Work, std::enable_if_t<HasDirectDenseAccess<PointType>::value, int> = 0>
+bool withDensePointData(const PointType* points, Work&& work, bool allowSubset = false)
 {
     if (points->isProxy() || (!allowSubset && !points->isFull()) ||
-        points->getStorageBackendType() != PointType::StorageBackendType::Eager)
+        points->getStorageBackendType() != PointType::StorageBackendType::Dense)
         return false;
 
     points->constVisitFromBeginToEnd([&](const auto begin, const auto end) {
@@ -204,8 +204,8 @@ bool withEagerPointData(const PointType* points, Work&& work, bool allowSubset =
     return true;
 }
 
-template <typename PointType, typename Work, std::enable_if_t<!HasDirectEagerAccess<PointType>::value, int> = 0>
-bool withEagerPointData(const PointType*, Work&&, bool = false)
+template <typename PointType, typename Work, std::enable_if_t<!HasDirectDenseAccess<PointType>::value, int> = 0>
+bool withDensePointData(const PointType*, Work&&, bool = false)
 {
     return false;
 }
@@ -685,8 +685,8 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     for (std::size_t w = 0; w < workers; ++w)
         states.push_back(make());
 
-    auto readBlock = [&](const std::size_t b, State& state, const void* eagerData = nullptr,
-                         const std::uint32_t eagerElementType = 0, const std::uint32_t eagerElementSize = 0) {
+    auto readBlock = [&](const std::size_t b, State& state, const void* denseData = nullptr,
+                         const std::uint32_t denseElementType = 0, const std::uint32_t denseElementSize = 0) {
         const std::size_t begin = b * rowsPerBlock;
         const std::size_t end   = std::min(rowCount, begin + rowsPerBlock);
 
@@ -775,21 +775,21 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             });
         };
 
-        // Eager point storage is already one contiguous row-major buffer. Build
+        // Dense point storage is already one contiguous row-major buffer. Build
         // a non-owning view for each fetched span while constVisitFromBeginToEnd
         // keeps the dataset locked. This avoids one temporary byte vector and
-        // shared allocation per row in PointData::visitEagerRange.
+        // shared allocation per row in PointData::visitDenseRange.
         auto readRange = [&](const std::uint64_t firstRow, const std::uint64_t count,
                              const PointDataAccessVisitor& receiver) {
-            if (!eagerData) {
+            if (!denseData) {
                 fetchPointData(points, FetchMode::Range2D, receiver,
                     0, firstRow, count, {}, 0, 0, columnCount);
                 return;
             }
 
             PointDataAccessView view{};
-            PointStreamingDetail::setNonOwningRangeView(view, eagerData, firstRow, count, columnCount,
-                dimensions, eagerElementType, eagerElementSize);
+            PointStreamingDetail::setNonOwningRangeView(view, denseData, firstRow, count, columnCount,
+                dimensions, denseElementType, denseElementSize);
             receiver(view);
         };
 
@@ -859,9 +859,9 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     std::mutex progressMutex;
     std::size_t completedBlocks = 0;
     const auto scanStart = std::chrono::steady_clock::now();
-    const auto processBlocks = [&](const void* eagerData, const std::uint32_t elementType,
+    const auto processBlocks = [&](const void* denseData, const std::uint32_t elementType,
                                    const std::uint32_t elementSize, const std::uint64_t pointCount) {
-        if (eagerData) {
+        if (denseData) {
             for (std::size_t i = 0; i < rowCount; ++i) {
                 if (sortedRowAt(i) >= pointCount)
                     throw std::out_of_range("PointStreaming: requested row ID is out of range");
@@ -869,7 +869,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
         }
         forEachBlockParallel(states, blockCount, [&](const std::size_t b, State& state) {
             runMeasuredJob([&] {
-                readBlock(b, state, eagerData, elementType, elementSize);
+                readBlock(b, state, denseData, elementType, elementSize);
             });
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
@@ -878,7 +878,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
         });
     };
 
-    if (!PointStreamingDetail::withEagerPointData(points, processBlocks))
+    if (!PointStreamingDetail::withDensePointData(points, processBlocks))
         processBlocks(nullptr, 0, 0, 0);
 
     const auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - scanStart).count();
@@ -1162,13 +1162,13 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
     uniqueColumns.erase(std::unique(uniqueColumns.begin(), uniqueColumns.end()), uniqueColumns.end());
     const std::uint64_t spanWidth = uniqueColumns.back() + 1;
     const bool sparseColumns = uniqueColumns.size() <= 256 && uniqueColumns.size() * 4 < spanWidth;
-    const bool eagerStorage = PointStreamingDetail::withEagerPointData(points,
+    const bool denseStorage = PointStreamingDetail::withDensePointData(points,
         [](const void*, std::uint32_t, std::uint32_t, std::uint64_t) {});
     // Sparse API reads repeatedly decompress/stage the same row-major tile
     // for each gene run. Physical tiles must use the single-pass path below.
     const auto tiledStorage = !points->isProxy() && points->isFull() ? PointStreamingDetail::tiledStorage(points) : nullptr;
     const bool physicalTiles = static_cast<bool>(tiledStorage);
-    if (groupedReadPath(sparseColumns, eagerStorage, physicalTiles, includeDetection) == GroupedReadPath::SparseRanges)
+    if (groupedReadPath(sparseColumns, denseStorage, physicalTiles, includeDetection) == GroupedReadPath::SparseRanges)
         return aggregateSparseDisjointRows(points, rows, groupCount, std::forward<GroupAt>(groupAt), columns, threads, progress);
 
     struct State { GroupAggregates result; SegmentColumns segment; std::unique_ptr<ColumnTileCache::Reader> reader; };
@@ -1380,10 +1380,10 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
     if (column < 0 || static_cast<std::uint64_t>(column) >= dimensions)
         throw std::out_of_range("PointStreaming: requested column is out of range");
 
-    // A full eager dataset is already resident as one typed row-major buffer.
+    // A full dense dataset is already resident as one typed row-major buffer.
     // Read the requested gene directly instead of asking visitColumns to create
     // one temporary view for every selected point.
-    const bool readDirectly = PointStreamingDetail::withEagerPointData(points,
+    const bool readDirectly = PointStreamingDetail::withDensePointData(points,
         [&](const void* data, const std::uint32_t elementType, const std::uint32_t elementSize, const std::uint64_t pointCount) {
             PointDataAccessView rowView{};
             for (std::size_t i = 0; i < rowIds.size(); ++i) {
