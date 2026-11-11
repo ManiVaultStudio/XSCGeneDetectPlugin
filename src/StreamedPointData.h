@@ -1187,7 +1187,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
     if (physicalTiles && std::is_sorted(rows.begin(), rows.end())) {
         const auto storage = tiledStorage;
         const auto cache = PackedTileAccess::columnsFor(storage);
-        if (cache && cache->enabled()) {
+        if (cache && cache->enabled() && uniqueColumns.size() * 4 < storage->columns()) {
             XSC_TRACE("analysis.gene-blocks.aggregate");
             std::vector<std::pair<std::size_t, std::size_t>> jobs;
             const auto rowAt = [&](std::size_t i) { return static_cast<std::uint64_t>(rows[i]); };
@@ -1203,13 +1203,6 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
             std::size_t completed = 0;
             forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
                 const auto [begin, end] = jobs[job];
-                if (uniqueColumns.size() * 4 >= storage->columns()) {
-                    const auto tileColumns = (storage->columns() + storage->columnTileSize() - 1) / storage->columnTileSize();
-                    // DE scans keep encoded bytes in read-ahead memory, not a
-                    // second reconstructed row-major matrix tile.
-                    PackedTileAccess::readerFor(cache, state.reader.get());
-                    if (tileColumns == 1) cache->prefetch(rowAt(begin) / storage->rowTileSize(), storage->columns(), *state.reader);
-                }
                 for (std::size_t next = 0; next < uniqueColumns.size();) {
                     if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(completed, jobs.size()); }
                     const auto tile = PackedTileAccess::readStripe(points, storage, rowAt(begin) / storage->rowTileSize(), uniqueColumns[next], state.reader.get());
@@ -1458,20 +1451,30 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
             return values;
         }
     }
-    const std::vector<std::uint64_t> rows(rowIds.begin(), rowIds.end());
     const std::uint64_t columnId = static_cast<std::uint64_t>(column);
     std::size_t position = 0;
-
-    fetchPointData(points, FetchMode::ColumnsForRows, [&](const PointDataAccessView& view) {
+    const auto read = [&](const PointDataAccessView& view) {
         if (cancelled && cancelled()) throw std::runtime_error("Cancelled");
-        for (std::uint64_t row = 0; row < view.rows; ++row, ++position) {
-            if (position < values.size())
-                values[position] = valueAt(view, row, 0); // the view holds only this column
-        }
-    }, 0, 0, 0, rows, 0, columnId, 1);
-
-    if (position != values.size())
-        throw std::runtime_error(QString("PointStreaming: received %1 rows for %2 requested rows (dataset %3, proxy %4, full %5)").arg(position).arg(values.size()).arg(points->getId()).arg(points->isProxy()).arg(points->isFull()).toStdString());
+        if (view.rows > values.size() - position)
+            throw std::runtime_error("PointStreaming: too many rows in the requested gene range");
+        for (std::uint64_t row = 0; row < view.rows; ++row)
+            values[position++] = valueAt(view, row, 0);
+    };
+    for (std::size_t begin = 0; begin < rowIds.size();) {
+        if (cancelled && cancelled()) throw std::runtime_error("Cancelled");
+        const auto first = static_cast<std::uint64_t>(rowIds[begin]);
+        if (first >= points->getNumPoints())
+            throw std::out_of_range("PointStreaming: requested row ID is out of range");
+        auto end = begin + 1;
+        while (end < rowIds.size() && end - begin < 4096 &&
+            static_cast<std::uint64_t>(rowIds[end]) == first + (end - begin))
+            ++end;
+        points->visitRange(first, end - begin, columnId, 1, read);
+        if (position != end)
+            throw std::runtime_error("PointStreaming: incomplete gene range");
+        if (progress) progress(position, rowIds.size());
+        begin = end;
+    }
 
     return values;
 }

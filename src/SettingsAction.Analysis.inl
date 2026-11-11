@@ -4579,14 +4579,17 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         _deStatsTiming = std::make_unique<xsc::timing::AsyncSpan>("de.statistics.total");
         _deStatisticsWatcher.setFuture(QtConcurrent::run(&_explorationPool, [batch, cancel, statisticsSnapshot, state, speciesCount,
             geneNames, cellTypes, ordered, direction, rank, topCount, minDetection, level, maxCells, minCells,
-            equalWeighting, overviewKey, progress]() {
+            equalWeighting, overviewKey, progress, workerLimit = std::max(1, _maxWorkerThreads.getValue())]() {
             XSC_TRACE("de.statistics.worker");
             progress->phase(QStringLiteral("Building differential expression overview"), 0.90f);
             if (*cancel) return;
             std::vector<SpeciesDeComparison> comparisons(speciesCount);
             std::vector<size_t> speciesIndices(speciesCount);
             std::iota(speciesIndices.begin(), speciesIndices.end(), static_cast<size_t>(0));
-            QtConcurrent::blockingMap(speciesIndices, [&](size_t& s) {
+            QThreadPool pool;
+            pool.setMaxThreadCount(workerLimit);
+            std::atomic_size_t completedSpecies{0};
+            QtConcurrent::blockingMap(&pool, speciesIndices, [&](size_t& s) {
                 if (*cancel) return;
                 const DeSpeciesStatistics& statistics = statisticsSnapshot->statistics[s];
                 const std::vector<float>& fdr = statisticsSnapshot->fdr[s];
@@ -4612,7 +4615,10 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                     gene.restDetection = restDetection[g];
                     comparison.topGenes.push_back(gene);
                 }
-                });
+                progress->advance(++completedSpecies, speciesCount, 0.90f, 0.94f);
+            });
+            if (*cancel) return;
+            progress->phase(QStringLiteral("Preparing differential expression heatmap"), 0.94f);
 
             // ---- 6. Result: one row per species (species tree order). Species with too few cells keep their row; their cells are grey (no value). ----
             SpeciesDeResult result;

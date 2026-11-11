@@ -11,10 +11,14 @@ struct OperationProgressState {
     std::mutex mutex;
     QString stage = "Queued";
     void phase(const QString& text, float base) {
-        { const std::lock_guard<std::mutex> lock(mutex); stage = text; }
-        done = 0; total = 0; advance(0, 0, base, base);
+        const std::lock_guard<std::mutex> lock(mutex);
+        stage = text;
+        done = 0; total = 0;
+        value = std::max(value.load(), std::clamp(base, 0.0f, 0.999f));
     }
     void advance(std::size_t completed, std::size_t count, float from, float to) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (count && completed > count) completed = count;
         auto previous = done.load();
         while (completed > previous && !done.compare_exchange_weak(previous, completed)) {}
         total = count;

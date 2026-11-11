@@ -1,3 +1,5 @@
+#include <QSaveFile>
+#include <QTextStream>
 #include "StreamedPointData.h"
 #include "XSCGeneDetectPlugin.h"
 
@@ -1847,7 +1849,7 @@ protected:
         QWidget::changeEvent(event);
     }
 
-    QRect plotRect() const { return QRect(_leftMargin, 16, std::max(10, width() - _leftMargin - 16), std::max(10, height() - 16 - _bottomMargin)); }
+    QRect plotRect() const { return QRect(_leftMargin, 16, std::max(10, width() - 2 * _leftMargin), std::max(10, height() - 16 - _bottomMargin)); }
 
     QPointF toPixel(double x, double y) const
     {
@@ -2488,6 +2490,32 @@ private:
     {
         auto* bar = new QHBoxLayout();
 
+        if (plot == _speciesPlot) {
+            auto* exportValues = new QPushButton("Save species CSV...");
+            bar->addWidget(exportValues);
+            connect(exportValues, &QPushButton::clicked, this, [this] {
+                if (_rows.isEmpty()) return;
+                const QString path = QFileDialog::getSaveFileName(this, "Save trait plot values",
+                    "trait_species.csv", "CSV files (*.csv)");
+                if (path.isEmpty()) return;
+                QSaveFile file(path);
+                if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    QTextStream output(&file);
+                    output.setRealNumberPrecision(17);
+                    output << "Species,Trait,Expression,Cells,Selected\n";
+                    for (const auto& row : _rows) {
+                        QString species = row.species;
+                        species.replace('"', "\"\"");
+                        output << '"' << species << "\"," << row.trait << ',' << row.expression
+                               << ',' << row.cells << ',' << (row.selected ? "yes" : "no") << '\n';
+                    }
+                    output.flush();
+                    if (output.status() == QTextStream::Ok && file.commit()) return;
+                }
+                _speciesInfo->setText("Could not save species CSV: " + file.errorString());
+            });
+        }
+
         bar->addWidget(new QLabel("Labels:"));
         auto* labels = new QComboBox();
         labels->addItems({ "On hover only", "Highlighted points", "All points (no overlaps)" });
@@ -2657,7 +2685,7 @@ protected:
 
     int leftMargin() const { return std::max(40, std::min(_rowLabelWidth + 14, width() * 2 / 5)); }
     int bottomMargin() const { return _columnLabels.isEmpty() ? 20 : 14 + std::max(40, std::min(_columnLabelWidth + 8, height() * 2 / 5)); }
-    QRect plotRect() const { return QRect(leftMargin(), 34, std::max(10, width() - leftMargin() - 16), std::max(10, height() - 34 - bottomMargin())); }
+    QRect plotRect() const { return QRect(leftMargin(), 34, std::max(10, width() - 2 * leftMargin()), std::max(10, height() - 34 - bottomMargin())); }
 
     /** Every how many rows a label is drawn: 1 when every row has room for its label (the labels never overlap). */
     int rowLabelStep() const
@@ -4242,7 +4270,8 @@ void XSCGeneDetectPlugin::refreshTraitColumnVisibility()
     if (!view || !view->model() || view->model()->columnCount() <= kTraitCorrelationColumn) return;
     const auto gene = _settingsAction.getSelectedGeneAction().getString();
     const auto& values = _settingsAction.getGeneTraitValues();
-    const bool ready = !values.empty() && (gene.isEmpty() || values.find(gene) != values.end());
+    const auto selected = values.find(gene);
+    const bool ready = selected != values.end() && std::isfinite(selected->second);
     const auto header = view->model()->headerData(kTraitCorrelationColumn, Qt::Horizontal).toString();
     const bool wanted = _settingsAction.getHiddenShowncolumns().getSelectedOptions().contains(header);
     const bool hidden = !ready || !wanted;

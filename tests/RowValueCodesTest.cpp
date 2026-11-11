@@ -20,8 +20,13 @@ int main(int argc, char** argv) {
     require(encoded.codes.size() + encoded.dictionary.size() < data.size() * 2, "Repeated float rows should shrink before compression");
     std::vector<std::uint32_t> dense(1024);
     for (std::size_t i = 0; i < dense.size(); ++i) dense[i] = static_cast<std::uint32_t>(i);
-    require(!RowValueCodes::encode(reinterpret_cast<const char*>(dense.data()), 1, dense.size(), 4).valid,
-        "More than 256 unique values must use the existing lossless fallback, never truncate a dictionary");
+    const auto raw = RowValueCodes::encode(reinterpret_cast<const char*>(dense.data()), 1, dense.size(), 4);
+    require(raw.valid && raw.hasRawRows, "High-entropy rows must retain raw bits");
+    QByteArray rawOutput(17 * 4, Qt::Uninitialized);
+    require(RowValueCodes::decode(raw.codes.mid(47, 17), raw.dictionary, 1, 17, rawOutput.data(), true, 47),
+        "A nonzero stripe must decode raw rows");
+    require(std::memcmp(rawOutput.constData(), dense.data() + 47, rawOutput.size()) == 0,
+        "Raw stripe must match source bits");
     auto bad = encoded.codes; bad[0] = static_cast<char>(255);
     require(!RowValueCodes::decode(bad, encoded.dictionary, rows, columns, output.data()), "Out-of-range codes must be rejected");
     for (const unsigned range : {1U, 2U, 3U, 4U, 16U, 256U}) {

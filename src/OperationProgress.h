@@ -39,10 +39,15 @@ private:
     void publish() {
         if (!_task || !_state) return;
         QString text;
-        { const std::lock_guard<std::mutex> lock(_state->mutex); text = _state->stage; }
-        const auto total = _state->total.load();
-        if (total) text += QString(" (%1 / %2)").arg(_state->done.load()).arg(total);
-        _task->setProgress(_state->value.load(), text);
+        float fraction;
+        {
+            const std::lock_guard<std::mutex> lock(_state->mutex);
+            text = _state->stage;
+            const auto total = _state->total.load();
+            if (total) text += QString(" (%1 / %2)").arg(_state->done.load()).arg(total);
+            fraction = _state->value.load();
+        }
+        _task->setProgress(fraction, text);
     }
     QPointer<mv::Task> _task;
     QPointer<QTimer> _timer;

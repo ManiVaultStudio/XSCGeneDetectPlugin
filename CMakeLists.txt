@@ -128,6 +128,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::WebEngineWidgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Concurrent )
 # Use the same bundled dependency target as the core application.
+include("${CMAKE_CURRENT_LIST_DIR}/CompressionDependencies.cmake")
+xsc_add_compression_dependencies()
 target_link_libraries(${PROJECT_NAME} PRIVATE QuaZip)
 target_link_libraries(${PROJECT_NAME} PRIVATE libzstd_static)
 
