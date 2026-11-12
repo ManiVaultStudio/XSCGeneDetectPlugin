@@ -9,6 +9,7 @@ void SettingsAction::clearTemporaryDatasetHandles()
     _filteredUMAPDatasetClusters = Dataset<Points>();
     _tsneDatasetExpressionColors = Dataset<Points>();
     _geneSimilarityPoints = Dataset<Points>();
+    _selectedPointsTSNEDatasetForGeneTable = Dataset<Points>();
 
     _tsneDatasetSpeciesColors = Dataset<Clusters>();
     _tsneDatasetClusterColors = Dataset<Clusters>();
@@ -125,7 +126,28 @@ void SettingsAction::removeDatasets(const QStringList& datasetIds)
     if (datasetIds.isEmpty())
         return;
     auto allDatasets = mv::data().getAllDatasets();
-    const QSet<QString> requestedIds(datasetIds.begin(), datasetIds.end());
+    QSet<QString> requestedIds(datasetIds.begin(), datasetIds.end());
+    // A restored picker can reference a dataset that used to be temporary.
+    // Protect its hierarchy and source dependencies while it is an input.
+    for (const auto* picker : { &_mainPointsDataset, &_embeddingDataset, &_speciesNamesDataset,
+                               &_bottomClusterNamesDataset, &_middleClusterNamesDataset,
+                               &_topClusterNamesDataset, &_filteringEditTreeDataset, &_referenceTreeDataset }) {
+        auto dataset = picker->getCurrentDataset();
+        QSet<QString> visited;
+        QList<Dataset<DatasetImpl>> dependencies{ dataset };
+        while (!dependencies.isEmpty()) {
+            dataset = dependencies.takeLast();
+            if (!dataset.isValid() || visited.contains(dataset.getDatasetId()))
+                continue;
+
+            const auto id = dataset.getDatasetId();
+            visited.insert(id);
+            requestedIds.remove(id);
+            dependencies.append(dataset->getParent());
+            if (dataset->isDerivedData())
+                dependencies.append(dataset->getNextSourceDataset<DatasetImpl>());
+        }
+    }
 
     // id -> dataset pointer (NO COPYING)
     QHash<QString, Dataset<DatasetImpl>> idToDataset;

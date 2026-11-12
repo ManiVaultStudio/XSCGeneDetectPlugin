@@ -593,7 +593,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateGeneFilteringTrigger = [this]() -> void
         {
-            if (_updateWorkflowRunning)
+            if (_updateWorkflowRunning || mv::projects().isOpeningProject())
                 return;
 
             _updateWorkflowRunning = true;
@@ -722,7 +722,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                 // Results store sorted indices. A selection notification may use the click order.
                 std::sort(selection.begin(), selection.end());
                 if (selection != _selectedIndicesFromStorage)
-                    _statusColorAction.setString("M");
+                {
+                    if (_statusColorAction.getString() != "M")
+                        _statusColorAction.setString("M");
+                    else if (!_selectedGene.getString().isEmpty())
+                        _removeRowSelection.trigger();
+                }
             }, Qt::QueuedConnection);
 
         }
@@ -1478,6 +1483,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     debounceTimer->setInterval(500); // 500 milliseconds wait time
 
     const auto debouncelambda = [this]() -> void { // Capture debounceTimer by 
+        if (mv::projects().isOpeningProject() || _updateWorkflowRunning)
+            return;
+
         _statusColorAction.setString("M");
         disableActions();
 
@@ -1495,7 +1503,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     const auto updateTopGenesSlider = [this, debounceTimer]() -> void { // Capture debounceTimer by reference
         //wait to see if any more updates are coming then call findTopNGenesPerCluster();
         // Restart the timer every time the value changes
-        debounceTimer->start();
+        if (!mv::projects().isOpeningProject())
+            debounceTimer->start();
         };
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, updateTopGenesSlider);
 

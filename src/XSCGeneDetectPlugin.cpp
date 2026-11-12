@@ -933,11 +933,6 @@ void XSCGeneDetectPlugin::init()
 
     const auto triggerInit = [this]() -> void
         {
-            _settingsAction.removeAllManagedTemporaryDatasets();
-
-
-
-
             auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
             mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
             mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
@@ -1046,6 +1041,35 @@ void XSCGeneDetectPlugin::init()
 
 
             _settingsAction.getProjectOpened() = true;
+
+            QTimer::singleShot(0, this, [this]() {
+                if (mv::projects().isOpeningProject())
+                    return;
+
+                _settingsAction.removeAllManagedTemporaryDatasets();
+
+                auto points = _settingsAction.getMainPointsDataset().getCurrentDataset<Points>();
+                const auto embedding = _settingsAction.getEmbeddingDataset().getCurrentDataset<Points>();
+                const auto species = _settingsAction.getSpeciesNamesDataset().getCurrentDataset();
+                const auto clusters = _settingsAction.getBottomClusterNamesDataset().getCurrentDataset();
+                if (!points.isValid() || !embedding.isValid() ||
+                    !species.isValid() || !clusters.isValid() ||
+                    !_settingsAction.getReferenceTreeDatasetAction().getCurrentDataset().isValid())
+                    return;
+
+                if (embedding->getParent() != points || species->getParent() != points || clusters->getParent() != points)
+                    return;
+
+                const auto pointCount = points->getNumPoints();
+                const auto& selection = points->getSelectionIndices();
+                if (pointCount == 0 || embedding->getNumPoints() == 0 || selection.empty() ||
+                    std::any_of(selection.begin(), selection.end(), [pointCount](auto index) {
+                        return index >= pointCount;
+                    }))
+                    return;
+
+                _settingsAction.getStartComputationTriggerAction().trigger();
+            });
 
         };
 
