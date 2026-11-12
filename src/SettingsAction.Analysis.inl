@@ -192,9 +192,11 @@ void SettingsAction::updateButtonTriggered()
     };
 
     const auto data = std::make_shared<UpdateWorkflowData>();
+    const auto worker = _updateWorkerState = std::make_shared<UpdateWorkerState>();
     auto workflow = std::make_unique<mv::workflow::WorkflowPlan>(QStringLiteral("Update selection statistics"));
 
-    workflow->addSequentialStage(QStringLiteral("Prepare selection update"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Prepare selection update"), [this, data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        if (worker->cancelled) return;
         XSC_TRACE("update.stage.Prepare selection update");
         showStatusMessage(QStringLiteral("Preparing selection update..."), QStringLiteral("#007bff"));
 
@@ -251,7 +253,9 @@ void SettingsAction::updateButtonTriggered()
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.015);
 
-    workflow->addSequentialStage(QStringLiteral("Index selected cells by species"), [data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Index selected cells by species"), [data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        const std::lock_guard lock(worker->scanMutex);
+        if (worker->cancelled) return;
         XSC_TRACE("update.stage.Index selected cells by species");
         if (!data->inputsReady) { context->setProgress(1.0); return; }
         std::sort(data->selectedRows.begin(), data->selectedRows.end());
@@ -284,7 +288,9 @@ void SettingsAction::updateButtonTriggered()
             && data->selectedMeansKey != data->cachedSelectedMeansKey;
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.015);
-    workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        const std::lock_guard lock(worker->scanMutex);
+        if (worker->cancelled) return;
         XSC_TRACE("update.stage.Scan species-wide baseline means");
         if (!data->inputsReady || !data->needsBaselineScan)
         {
@@ -317,7 +323,8 @@ void SettingsAction::updateButtonTriggered()
         }
         const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), groups, data->geneColumns,
             data->workerLimit, data->memoryBudgetBytes, false,
-            [context, progressTask, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [context, progressTask, worker, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
+                if (worker->cancelled) throw std::runtime_error("Selection update cancelled");
                 if (total > 0)
                     context->setProgress(static_cast<double>(completed) / static_cast<double>(total));
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
@@ -357,7 +364,9 @@ void SettingsAction::updateButtonTriggered()
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.86 : 0.01);
 
-    workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        const std::lock_guard lock(worker->scanMutex);
+        if (worker->cancelled) return;
         XSC_TRACE("update.stage.Scan selected gene means");
         if (!data->inputsReady || !data->needsSelectedScan || data->selectedScanFinished || data->geneColumns.empty())
         {
@@ -411,7 +420,8 @@ void SettingsAction::updateButtonTriggered()
                     for (std::size_t geneIndex = 0; geneIndex < into.sums[speciesIndex].size(); ++geneIndex)
                         into.sums[speciesIndex][geneIndex] += from.sums[speciesIndex][geneIndex];
             },
-            [context, task = QPointer<mv::Task>(context->getTask()), &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [context, worker, task = QPointer<mv::Task>(context->getTask()), &lastProgressPercent](std::size_t completed, std::size_t total) {
+                if (worker->cancelled) throw std::runtime_error("Selection update cancelled");
                 const double progress = total > 0 ? static_cast<double>(completed) / static_cast<double>(total) : 1.0;
                 context->setProgress(progress);
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
@@ -439,7 +449,8 @@ void SettingsAction::updateButtonTriggered()
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.01 : 0.86);
 
-    workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+        if (worker->cancelled) return;
         XSC_TRACE("update.stage.Publish selection datasets and update views");
         if (data->inputsReady)
         {
@@ -492,8 +503,10 @@ void SettingsAction::updateButtonTriggered()
     }
     if (auto task = future.getTask())
         task->setGuiScopes({ mv::Task::GuiScope::Foreground });
-    future.onFinished(this, [this, data, updateTiming](const mv::workflow::SharedWorkflowResult& result) {
+    future.onFinished(this, [this, data, worker, updateTiming](const mv::workflow::SharedWorkflowResult& result) {
         updateTiming->finish();
+        if (worker->cancelled) return;
+        _updateWorkerState.reset();
         stopCodeTimer("UpdateGeneFilteringTrigger");
         _updateWorkflowRunning = false;
         _pauseStatusUpdates = false;
@@ -521,7 +534,7 @@ void SettingsAction::updateButtonTriggered()
                 if (pointsDataset->getSelectionIndices() != _selectedIndicesFromStorage) pointsDataset->setSelectionIndices(_selectedIndicesFromStorage);
         }
         if (data->published && !data->staleInputs)
-            QTimer::singleShot(0, &_XSCGeneDetectPlugin, [this]() { _XSCGeneDetectPlugin.prepareExplorationForCurrentTable(); });
+            QTimer::singleShot(0, this, [this]() { _XSCGeneDetectPlugin.prepareExplorationForCurrentTable(); });
     });
 }
 
@@ -853,7 +866,6 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
                                     if (stopAction)
                                     {
                                         stopAction->trigger();
-                                        QApplication::processEvents();
                                     }
                                 }
 
@@ -965,9 +977,10 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
 
                                                     if (samplerActionAction)
                                                     {
-                                                        samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                                            QString clusterDatasetId = _speciesNamesDataset.getCurrentDataset().getDatasetId();
-                                                            return generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                                        samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<SettingsAction>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                                            if (!owner) return {};
+                                                            QString clusterDatasetId = owner->_speciesNamesDataset.getCurrentDataset().getDatasetId();
+                                                            return owner->generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                                             });
                                                     }
                                                 }
@@ -2803,7 +2816,6 @@ void SettingsAction::invalidateTraitResults()
     _traitMethodNote.clear(); _traitSignificanceBasis.clear();
     _traitContributionShown = false; _traitValueLabel.clear();
     publishTraitCorrelationToModel();
-    _XSCGeneDetectPlugin.refreshTraitPlot();
 }
 
 void SettingsAction::updateTraitReverseSearchFeature()
@@ -2886,6 +2898,7 @@ void SettingsAction::computeTraitCorrelation()
         cellTypes << _selectedClusterName;
     }
     if (traitName.isEmpty() || cellTypes.isEmpty()) {
+        _traitPublishedKey.clear();
         _traitProgress.cancel();
         // nothing to correlate with: do not leave the values of a previous trait in the table
         _geneTraitValuesComputed.clear();
@@ -3246,6 +3259,7 @@ void SettingsAction::computeTraitCorrelation()
     }
 
     if (usable.size() < kMinSpeciesForTraitCorrelation) {
+        _traitPublishedKey.clear();
         _traitProgress.cancel();
         _geneTraitValuesComputed.clear(); _geneTraitPValues.clear(); _geneTraitFdrValues.clear(); _geneTraitExtras.clear();
         _traitSampleSize = 0; _traitMatrix = TraitMatrix(); _traitMethodNote.clear();
@@ -3622,6 +3636,7 @@ void SettingsAction::computeTraitCorrelation()
 void SettingsAction::publishTraitCorrelationToModel()
 {
     XSC_TRACE("SettingsAction::publishTraitCorrelationToModel");
+    const StatusTick refreshPlot([this]() { _XSCGeneDetectPlugin.refreshTraitPlot(); });
     QVariant variant = _listModel.getVariant();
     auto* model = qobject_cast<QStandardItemModel*>(variant.value<QAbstractItemModel*>());
     if (!model || model->columnCount() <= kTraitCorrelationColumn || model->rowCount() == 0) {
@@ -3906,9 +3921,10 @@ void SettingsAction::findTopNGenesPerCluster() {
 
                                 if (samplerActionAction)
                                 {
-                                    samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                        QString clusterDatasetId = _speciesNamesDataset.getCurrentDataset().getDatasetId();
-                                        return generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                    samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<SettingsAction>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                        if (!owner) return {};
+                                        QString clusterDatasetId = owner->_speciesNamesDataset.getCurrentDataset().getDatasetId();
+                                        return owner->generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                         });
                                 }
                             }
@@ -4088,11 +4104,48 @@ void SettingsAction::showStatusMessage(const QString& text, const QString& backg
     _statusBarActionWidget->setStyleSheet("QStatusBar{padding-left:8px;background:" + backgroundColor + ";color:white;}");
 }
 
+void SettingsAction::shutdownBackgroundWork()
+{
+    if (_backgroundWorkStopped)
+        return;
+    _backgroundWorkStopped = true;
+    _explorationSuspended = true;
+    if (_updateWorkerState) _updateWorkerState->cancelled = true;
+    if (_traitCorrelationTimer) _traitCorrelationTimer->stop();
+    if (_deTimer) _deTimer->stop();
+    _traitWorkflow.setActive(false);
+    _deWorkflow.setActive(false);
+    _traitProgress.cancel();
+    _deProgress.cancel();
+    for (auto* watcher : { &_deStatisticsWatcher, &_traitStatisticsWatcher, &_deJobWatcher, &_traitJobWatcher })
+        disconnect(watcher, nullptr, this, nullptr);
+
+    _explorationPool.waitForDone();
+    if (_updateWorkerState) {
+        // The workflow also has GUI stages. Wait only for its current worker
+        // stage so the GUI thread can still return and let the executor finish.
+        const std::lock_guard lock(_updateWorkerState->scanMutex);
+    }
+
+    for (const auto& analysis : { _selectedTsneAnalysisPlugin, _geneTsneAnalysisPlugin }) {
+        if (!analysis)
+            continue;
+        const auto output = analysis->getOutputDataset();
+        if (!output.isValid())
+            continue;
+        auto* running = dynamic_cast<TriggerAction*>(output->findChildByPath("TSNE/TsneComputationAction/Running"));
+        auto* stop = dynamic_cast<TriggerAction*>(output->findChildByPath("TSNE/TsneComputationAction/Stop"));
+        if (running && running->isChecked() && stop)
+            stop->trigger();
+    }
+}
+
 void SettingsAction::cancelExplorationAnalysis()
 {
     XSC_TRACE("SettingsAction::cancelExplorationAnalysis");
     _explorationSuspended = true;
     _traitProgress.cancel(); _deProgress.cancel();
+    _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus(QStringLiteral("Differential expression awaiting update"));
     _deWorkflow.cancel(); _traitWorkflow.cancel();
     invalidateTraitResults();
     if (_deTimer) _deTimer->stop();
@@ -4106,7 +4159,6 @@ void SettingsAction::cancelExplorationAnalysis()
 void SettingsAction::prepareExplorationAnalysis()
 {
     _explorationSuspended = false;
-    _traitWorkflow.setActive(_traitWindowOpen || !_selectedGene.getString().isEmpty());
     _deWorkflow.resume(); _traitWorkflow.resume();
     _explorationPool.setMaxThreadCount(1);
     _explorationPool.setThreadPriority(QThread::LowPriority);
@@ -4120,10 +4172,14 @@ void SettingsAction::prepareExplorationAnalysis()
 
 void SettingsAction::setTraitAnalysisActive(bool active)
 {
-    if (!active && _traitWindowOpen) _traitWorkflow.cancel();
     _traitWindowOpen = active;
-    _traitWorkflow.setActive(active || !_selectedGene.getString().isEmpty());
-    if (_traitWorkflow.active) updateTraitReverseSearchFeature();
+    _traitWorkflow.setActive(active);
+    if (active) {
+        updateTraitReverseSearchFeature();
+    } else {
+        if (_traitCorrelationTimer) _traitCorrelationTimer->stop();
+        _traitProgress.cancel();
+    }
 }
 
 void SettingsAction::requestTraitForSelectedGene()
@@ -4153,6 +4209,9 @@ void SettingsAction::requestSpeciesDifferentialExpression()
         return;
     }
     if (_explorationSuspended) return;
+    _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus(_deResult.valid
+        ? QStringLiteral("Updating differential expression (previous results shown)")
+        : QStringLiteral("Computing differential expression"));
     if (_traitWorkflow.busy()) {
         _deWorkflow.pending = true;
         if (!_deProgress.running()) _deProgress.begin(this, QStringLiteral("Differential expression"));
@@ -4187,6 +4246,7 @@ void SettingsAction::onSpeciesDeJobsFinished()
     }
     if (failed) {
         _deProgress.cancel();
+        _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus(QStringLiteral("Update failed (results may be outdated)"));
         showStatusMessage(QStringLiteral("DE data could not be read. Run Update to retry."), QStringLiteral("#dc3545"));
         if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
         return;
@@ -4217,6 +4277,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         _deResult = SpeciesDeResult();
         _deResult.message = message;
         _deState = DeState();
+        _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus({});
         if (_speciesDeFinished) {
             _speciesDeFinished();
         }
@@ -4546,6 +4607,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             }
             if (!*cancel && fresh->key.isEmpty()) {
                 _deProgress.cancel();
+                _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus(QStringLiteral("Update failed (results may be outdated)"));
                 showStatusMessage(QStringLiteral("DE calculation could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
                 if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
                 return;
@@ -4585,6 +4647,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             }
             if (!*cancel && batch->key.isEmpty()) {
                 _deProgress.cancel();
+                _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus(QStringLiteral("Update failed (results may be outdated)"));
                 showStatusMessage(QStringLiteral("DE overview could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
                 if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
                 return;
@@ -4710,6 +4773,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         }));
         return;
     }
+    _XSCGeneDetectPlugin.setSpeciesDeUpdateStatus({});
     if (_dePublishedKey == overviewKey) {
         _deProgress.finish();
         if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }

@@ -23,6 +23,7 @@
 #include <QGuiApplication>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <QThreadPool>
 #include <functional>
 #include <algorithm>    
@@ -445,6 +446,7 @@ public: // Action getters
     void setTraitAnalysisActive(bool active);
     void requestTraitForSelectedGene();
     void cancelExplorationAnalysis();
+    void shutdownBackgroundWork();
     bool updateWorkflowRunning() const { return _updateWorkflowRunning; }
     /** Recompute changed inputs only while its analysis window is open. */
     void requestSpeciesDifferentialExpression();
@@ -791,6 +793,12 @@ protected:
     //bool _erroredOutFlag;
     bool _meanMapComputed = false;
     bool _updateWorkflowRunning = false;
+    bool _backgroundWorkStopped = false;
+    struct UpdateWorkerState {
+        std::atomic_bool cancelled = false;
+        std::mutex scanMutex;
+    };
+    std::shared_ptr<UpdateWorkerState> _updateWorkerState;
     QString _meanMapSignature;       /** datasets the cached species means were computed for */
     OptionAction                _clusterCountSortingType;
 

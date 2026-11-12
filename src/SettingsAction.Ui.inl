@@ -13,13 +13,7 @@ QString SettingsAction::currentMeanMapSignature() const
 SettingsAction::~SettingsAction()
 {
     XSC_TRACE("SettingsAction::~SettingsAction");
-    _deWorkflow.cancel(); _traitWorkflow.cancel();
-    // Join every worker before its datasets/cache disappear. A cancelled read
-    // can carry an exception in its future; it must not escape the destructor.
-    for (auto* watcher : { &_deStatisticsWatcher, &_traitStatisticsWatcher, &_deJobWatcher, &_traitJobWatcher }) {
-        try { watcher->waitForFinished(); }
-        catch (...) { }
-    }
+    shutdownBackgroundWork();
     // The two message boxes are never added to a layout, so nobody else owns them.
     delete _popupMessageInit;
     _popupMessageInit = nullptr;
@@ -987,9 +981,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
                                 if (samplerActionAction)
                                 {
-                                    samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                        QString clusterDatasetId = _speciesNamesDataset.getCurrentDataset().getDatasetId();
-                                        return generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                    samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<SettingsAction>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                        if (!owner) return {};
+                                        QString clusterDatasetId = owner->_speciesNamesDataset.getCurrentDataset().getDatasetId();
+                                        return owner->generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                         });
                                 }
                             }

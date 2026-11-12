@@ -760,9 +760,10 @@ void XSCGeneDetectPlugin::init()
 
                                     if (samplerActionAction)
                                     {
-                                        samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                            QString clusterDatasetId = _settingsAction.getSpeciesNamesDataset().getCurrentDataset().getDatasetId();
-                                            return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                        samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<XSCGeneDetectPlugin>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                            if (!owner) return {};
+                                            QString clusterDatasetId = owner->_settingsAction.getSpeciesNamesDataset().getCurrentDataset().getDatasetId();
+                                            return owner->_settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                             });
                                     }
 
@@ -1027,9 +1028,10 @@ void XSCGeneDetectPlugin::init()
 
                             if (samplerActionAction)
                             {
-                                samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                    QString clusterDatasetId = _settingsAction.getSpeciesNamesDataset().getCurrentDataset().getDatasetId();
-                                    return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<XSCGeneDetectPlugin>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                    if (!owner) return {};
+                                    QString clusterDatasetId = owner->_settingsAction.getSpeciesNamesDataset().getCurrentDataset().getDatasetId();
+                                    return owner->_settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                     });
                             }
 
@@ -1464,8 +1466,14 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             if (speciesNamesSet.find(species.getName()) != speciesNamesSet.end()) {
                 const auto& indices = species.getIndices();
 
-                selectedSpeciesIndices.insert(selectedSpeciesIndices.end(), indices.begin(), indices.end());
-                selectedFilteredUMAPDatasetColorsMap[species.getName()] = std::make_pair(species.getColor(), std::vector<int>(indices.begin(), indices.end()));
+                auto& [color, localIndices] = selectedFilteredUMAPDatasetColorsMap[species.getName()];
+                color = species.getColor();
+                for (const auto index : indices) {
+                    if (index >= allColors.size() || index >= embeddingSource->getNumPoints())
+                        continue;
+                    localIndices.push_back(static_cast<int>(selectedSpeciesIndices.size()));
+                    selectedSpeciesIndices.push_back(index);
+                }
             }
         }
 
@@ -1489,6 +1497,16 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
         {
             auto speciesDataId = _settingsAction.getFilteredUMAPDatasetPoints().getDatasetId();
             const bool geometryChanged = !reuseGeometry;
+            const auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
+            if (geometryChanged && scatterplotViewFactory) {
+                for (auto* plot : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
+                    if (plot->getGuiName() != "Scatterplot Embedding View")
+                        continue;
+                    // Dataset setters can synchronously refresh the renderer while row counts change.
+                    if (auto* colorBy = plot->findChildByPath<OptionAction>("Settings/Coloring/Color by"))
+                        colorBy->setCurrentIndex(0);
+                }
+            }
             if (geometryChanged) {
                 std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size() * numDimensions);
                 if (_embeddingCoordinates && _embeddingCoordinatesId == umapPointsDataset->getId() &&
@@ -1571,7 +1589,6 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 _settingsAction.populateClusterData(speciesClusterDataId, selectedFilteredUMAPDatasetColorsMap);
 
 
-            auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
             mv::gui::DatasetPickerAction* colorDatasetPickerAction = nullptr;
             mv::gui::DatasetPickerAction* pointDatasetPickerAction = nullptr;
             mv::gui::ViewPluginSamplerAction* samplerActionAction = nullptr;
@@ -1584,13 +1601,27 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                         if (pointDatasetPickerAction) {
 
 
-                            pointDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetPoints());
+                            const auto positions = _settingsAction.getFilteredUMAPDatasetPoints();
+                            const auto colors = _settingsAction.getFilteredUMAPDatasetColors();
+                            pointDatasetPickerAction->setCurrentDataset(positions);
+                            if (pointDatasetPickerAction->getCurrentDatasetId() != positions->getId() ||
+                                positions->getNumPoints() != colors->getNumPoints())
+                                continue;
 
                             colorDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Color"));
                             if (colorDatasetPickerAction)
                             {
 
-                                colorDatasetPickerAction->setCurrentDataset(_settingsAction.getFilteredUMAPDatasetColors());
+                                // Gene expression is a single scalar channel. Restore that mode
+                                // before activating the dataset, even if the picker already shows it.
+                                if (auto* colorSpace = plugin->findChildByPath<OptionAction>("Settings/Coloring/Color space"))
+                                    colorSpace->setCurrentText("Scalar (1D)");
+                                const bool alreadyPicked = colorDatasetPickerAction->getCurrentDatasetId() == colors->getId();
+                                colorDatasetPickerAction->setCurrentDataset(colors);
+                                if (colorDatasetPickerAction->getCurrentDatasetId() != colors->getId())
+                                    continue;
+                                if (alreadyPicked)
+                                    colorDatasetPickerAction->datasetPicked(colors);
                                 auto* scatterMap = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("Settings/Coloring/1D Color map"));
                                 auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
                                 if (legendViewFactory)
@@ -1639,9 +1670,10 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
 
                             if (samplerActionAction)
                             {
-                                samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                    QString clusterDatasetId = _settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
-                                    return _settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<XSCGeneDetectPlugin>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                    if (!owner) return {};
+                                    QString clusterDatasetId = owner->_settingsAction.getFilteredUMAPDatasetClusters().getDatasetId();
+                                    return owner->_settingsAction.generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                     });
                             }
                         }
@@ -3173,6 +3205,9 @@ public:
         bar->addStretch(1);
         _status = new QLabel();
         bar->addWidget(_status);
+        _updateStatus = new QLabel(this);
+        _updateStatus->hide();
+        bar->addWidget(_updateStatus);
         addResponsiveBar(layout, bar);
 
         const auto emitParameters = [this]() {
@@ -3370,6 +3405,14 @@ public:
     void setStatus(const QString& text) {
         const auto words = text.simplified().split(' ', Qt::SkipEmptyParts);
         _status->setText(words.mid(0, 4).join(' '));
+    }
+
+    void setUpdateStatus(const QString& status)
+    {
+        _updateStatus->setText(status);
+        _updateStatus->setVisible(!status.isEmpty());
+        _status->setVisible(status.isEmpty());
+        _tabs->setEnabled(status.isEmpty());
     }
 
     bool usesGroups() const { return _useGroups; }
@@ -3701,6 +3744,7 @@ private:
     QSpinBox* _topCount = nullptr;
     QComboBox* _rank = nullptr;
     QLabel* _status = nullptr;
+    QLabel* _updateStatus = nullptr;
     QTabWidget* _tabs = nullptr;
     HeatmapWidget* _heatmap = nullptr;
     QLabel* _info = nullptr;
@@ -4005,12 +4049,14 @@ private:
 
 XSCGeneDetectPlugin::~XSCGeneDetectPlugin()
 {
-    // Destroy demand-owning dialogs while SettingsAction still exists, so
-    // their destroyed callbacks cannot outlive the analysis state they cancel.
+    disconnect(&_geneClickWatcher, nullptr, this, nullptr);
+    cancelGeneExpressionCache(false);
+    _settingsAction.shutdownBackgroundWork();
+    _geneClickPool.waitForDone();
+    cancelGeneExpressionCache();
+
     delete _traitPlotDialog.data();
     delete _speciesDeDialog.data();
-    cancelGeneExpressionCache();
-    _geneClickPool.waitForDone();
 }
 
 void XSCGeneDetectPlugin::cancelGeneExpressionCache(bool clear)
@@ -4245,10 +4291,8 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
         onGeneRowChanged(current);
         });
 
-    // the open trait plot follows the correlation values (they are published as one dataChanged signal)
-    connect(model, &QAbstractItemModel::dataChanged, this, [this]() { refreshTraitPlot(); });
-
     emit model->layoutChanged();
+    refreshTraitPlot();
 }
 
 // ============================================================================================================
@@ -4338,6 +4382,12 @@ void XSCGeneDetectPlugin::showSpeciesDe()
 
     _speciesDeLastGene = QString();
     _settingsAction.setSpeciesDeActive(true);
+}
+
+void XSCGeneDetectPlugin::setSpeciesDeUpdateStatus(const QString& status)
+{
+    if (_speciesDeDialog)
+        static_cast<SpeciesDeDialog*>(_speciesDeDialog.data())->setUpdateStatus(status);
 }
 
 void XSCGeneDetectPlugin::refreshSpeciesDe()

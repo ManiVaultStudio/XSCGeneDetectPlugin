@@ -89,6 +89,7 @@ public:
 
     // ---- species differential expression window ----
     void showSpeciesDe();                                 /** open the window (and start computing) */
+    void setSpeciesDeUpdateStatus(const QString& status);
     void refreshSpeciesDe();                              /** a new result is available */
     void refreshSpeciesDeDetail(const QString& species);  /** volcano plot and table of one species against the others */
     void refreshSpeciesDeHighlights();                    /** the selected species / gene changed: highlight them (same blue everywhere) */
