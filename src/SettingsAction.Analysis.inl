@@ -160,9 +160,6 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
 void SettingsAction::updateButtonTriggered()
 {
     XSC_TRACE("SettingsAction::updateButtonTriggered");
-    if (_updateWorkflowRunning)
-        return;
-
     const auto updateTiming = std::make_shared<xsc::timing::AsyncSpan>("update.total");
     const bool baselineNeeded = !_meanMapComputed || _meanMapSignature != currentMeanMapSignature();
     struct UpdateWorkflowData
@@ -477,7 +474,6 @@ void SettingsAction::updateButtonTriggered()
     options.reporting.progress = true;
     options.reporting.finishedNotification = false;
 
-    _updateWorkflowRunning = true;
     startCodeTimer("UpdateGeneFilteringTrigger");
     mv::workflow::WorkflowResultFuture future;
     try
@@ -495,24 +491,19 @@ void SettingsAction::updateButtonTriggered()
         return;
     }
     if (auto task = future.getTask())
-    {
         task->setGuiScopes({ mv::Task::GuiScope::Foreground });
-        auto notification = new mv::util::Notification(QPointer<mv::Task>(task), nullptr);
-        QObject::connect(notification, &mv::util::Notification::finished, notification, &QObject::deleteLater);
-        notification->show();
-        notification->raise();
-    }
     future.onFinished(this, [this, data, updateTiming](const mv::workflow::SharedWorkflowResult& result) {
         updateTiming->finish();
         stopCodeTimer("UpdateGeneFilteringTrigger");
         _updateWorkflowRunning = false;
+        _pauseStatusUpdates = false;
 
         if (data->staleInputs)
         {
             showStatusMessage(QStringLiteral("Selection or datasets changed during the update. Run Update again."), QStringLiteral("#d99500"));
             _statusColorAction.setString("M");
         }
-        else if (!result || result->getStatus() != mv::workflow::WorkflowResultBase::Status::Success)
+        else if (!result || result->getStatus() != mv::workflow::WorkflowResultBase::Status::Success || !data->published)
         {
             showStatusMessage(QStringLiteral("Selection update failed."), QStringLiteral("#dc3545"));
             _statusColorAction.setString("E");
@@ -522,7 +513,6 @@ void SettingsAction::updateButtonTriggered()
             _statusColorAction.setString("C");
         }
 
-        _pauseStatusUpdates = false;
         enableActions();
         if (data->published && !data->staleInputs)
         {

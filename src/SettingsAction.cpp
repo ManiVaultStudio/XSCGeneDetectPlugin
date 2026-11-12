@@ -4,7 +4,6 @@
 #include "XSCGeneDetectPlugin.h"
 #include <Application.h>
 #include <Task.h>
-#include <util/Notification.h>
 #include <workflow/WorkflowOptions.h>
 #include<string>  
 #include <QFileDialog>

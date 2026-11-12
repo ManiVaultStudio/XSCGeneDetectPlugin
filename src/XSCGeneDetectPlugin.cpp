@@ -82,10 +82,10 @@ void applyLogTransformation(std::vector<float>& values) {
 
 #ifdef _WIN32
     std::transform(std::execution::par, values.begin(), values.end(), values.begin(),
-        [](float value) { return std::log(value + 1); });
+        [](float value) { return std::log1p(value); });
 #else
     std::transform(values.begin(), values.end(), values.begin(),
-        [](float value) { return std::log(value + 1); });
+        [](float value) { return std::log1p(value); });
 #endif
 
 }
@@ -770,10 +770,13 @@ void XSCGeneDetectPlugin::init()
                             }
                         }
                     }
-                    _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset()->setSelectionIndices(_settingsAction.getSelectedIndicesFromStorage());
-                    mv::events().notifyDatasetDataSelectionChanged(_settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset());
-
-                    _settingsAction.getStatusColorAction().setString("C");
+                    if (statusString != "M")
+                    {
+                        auto embedding = _settingsAction.getScatterplotEmbeddingPointsUMAPOption().getCurrentDataset();
+                        embedding->setSelectionIndices(_settingsAction.getSelectedIndicesFromStorage());
+                        mv::events().notifyDatasetDataSelectionChanged(embedding);
+                        _settingsAction.getStatusColorAction().setString("C");
+                    }
 
                 }
             }
@@ -1512,19 +1515,17 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             }
             float colorMinimum = std::numeric_limits<float>::infinity();
             float colorMaximum = -colorMinimum;
-            // Use the complete source column for the selected gene so that
-            // changing the visible species does not change the color scale.
-            for (const float value : allColors) {
-                if (!std::isfinite(value) || (logColors && value <= -1.0f)) continue;
+            for (const float value : resultContainerSpeciesColors) {
+                if (!std::isfinite(value)) continue;
                 colorMinimum = std::min(colorMinimum, value);
                 colorMaximum = std::max(colorMaximum, value);
             }
-            if (logColors && std::isfinite(colorMinimum)) {
-                colorMinimum = std::log(colorMinimum + 1.0f);
-                colorMaximum = std::log(colorMaximum + 1.0f);
+            if (!std::isfinite(colorMinimum) || !std::isfinite(colorMaximum)) {
+                colorMinimum = 0.0f;
+                colorMaximum = 0.0f;
             }
             const auto applyExpressionRange = [colorMinimum, colorMaximum](ColorMap1DAction* map) {
-                if (!map || !std::isfinite(colorMinimum)) return;
+                if (!map) return;
                 const auto axis = ColorMapAction::Axis::X;
                 map->getDataRangeAction(axis).setRange({colorMinimum, colorMaximum});
                 auto& range = map->getRangeAction(axis);

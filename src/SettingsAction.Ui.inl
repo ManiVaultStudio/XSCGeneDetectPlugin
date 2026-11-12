@@ -596,12 +596,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             if (_updateWorkflowRunning)
                 return;
 
+            _updateWorkflowRunning = true;
             _XSCGeneDetectPlugin.beginSelectionUpdate();
             disableActions();
             _pauseStatusUpdates = true;
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
-            //_erroredOutFlag = false;
-            QApplication::processEvents();
             // Late-created views keep the project-load blocker enabled. Release
             // it only for an explicit Update, without triggering expensive
             // picker-change precomputation while the setup dialog is closing.
@@ -672,6 +671,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_createRowMultiSelectTree, &TriggerAction::triggered, this, updateCreateRowMultiSelectTreeTrigger);
 
     const auto updateMainPointsDataset = [this]() -> void {
+        QObject::disconnect(_mainSelectionConnection);
+        _watchedMainPointsDataset = {};
 
         if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
@@ -705,11 +706,24 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
             // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
             // changing the dataset repeatedly never stacks up duplicate listeners.
-            QObject::disconnect(_mainSelectionConnection);
             _watchedMainPointsDataset = fullDataset;
-            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this]() -> void {
+            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this, datasetId = fullDataset.getDatasetId()] {
+                if (!_watchedMainPointsDataset.isValid() || _watchedMainPointsDataset.getDatasetId() != datasetId)
+                    return;
+
                 _toggleScatterplotSelection.setChecked(true);
-                });
+                if (_updateWorkflowRunning || mv::projects().isOpeningProject())
+                    return;
+
+                auto selection = _watchedMainPointsDataset->getSelectionIndices();
+                if (selection == _selectedIndicesFromStorage)
+                    return;
+
+                // Results store sorted indices. A selection notification may use the click order.
+                std::sort(selection.begin(), selection.end());
+                if (selection != _selectedIndicesFromStorage)
+                    _statusColorAction.setString("M");
+            }, Qt::QueuedConnection);
 
         }
         else
@@ -1223,11 +1237,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     connect(&_reverseSearchTraitSelectionString, &StringAction::stringChanged, this, updateReverseSearchTraitSelectionString);
 
-    const auto updateTopSelectedHierarchyStatus = [this]() -> void {
-
-
-
-        };
+    const auto updateTopSelectedHierarchyStatus = [this]() {
+        if (!mv::projects().isOpeningProject() && !_updateWorkflowRunning)
+            _statusColorAction.setString("M");
+    };
     connect(&_topSelectedHierarchyStatus, &StringAction::stringChanged, this, updateTopSelectedHierarchyStatus);
 
     const auto updateApplyLogTransformation = [this]() {
