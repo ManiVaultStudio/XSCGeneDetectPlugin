@@ -1031,23 +1031,6 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
     }
 }
 
-void SettingsAction::populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames)
-{
-    XSC_TRACE("SettingsAction::populatePointDataConcurrently");
-    (void)QtConcurrent::run([this, datasetId, pointVector, numPoints, numDimensions, dimensionNames]() {
-        auto pointDataset = mv::data().getDataset<Points>(datasetId);
-
-        if (pointDataset.isValid())
-        {
-            pointDataset->setSelectionIndices({});
-            if (!pointVector.empty() && numPoints > 0 && numDimensions > 0) {
-                pointDataset->setData(pointVector.data(), numPoints, numDimensions);
-                pointDataset->setDimensionNames(dimensionNames);
-                mv::events().notifyDatasetDataChanged(pointDataset);
-            }
-        }
-        });
-}
 void SettingsAction::enableActions()
 {
     XSC_TRACE("SettingsAction::enableActions");

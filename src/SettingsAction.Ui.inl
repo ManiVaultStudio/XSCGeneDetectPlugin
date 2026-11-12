@@ -615,54 +615,6 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
-    const auto updateCreateRowMultiSelectTreeTrigger = [this]() -> void {
-
-        if (_filteringEditTreeDataset.getCurrentDataset().isValid())
-        {
-            auto treeDataset = mv::data().getDataset<XSCTree>(_filteringEditTreeDataset.getCurrentDataset().getDatasetId());
-
-            QStringList selectedRowsStrList = _geneNamesConnection.getString().split("*%$@*@$%*");
-
-
-            if (treeDataset.isValid() && selectedRowsStrList.size() > 0)
-            {
-                //if (speciesSelectedIndicesCounter.size() > 0)
-                {
-                    //QJsonObject valueStringReference = createJsonTree(speciesSelectedIndicesCounter);
-                    //if (!valueStringReference.isEmpty())
-                    {
-                        //treeDataset->setTreeData(valueStringReference);
-                        //events().notifyDatasetDataChanged(treeDataset);
-                        //TODO:: add the tree to the tree dataset
-/*
-                        QString treeData = createJsonTreeFromNewick(QString::fromStdString(modifiedNewick), leafnames);
-                        if (!treeData.isEmpty())
-                        {
-
-                            QJsonObject valueStringReference = QJsonDocument::fromJson(treeData.toUtf8()).object();
-                            if (!valueStringReference.isEmpty())
-                            {
-                                treeDataset->setTreeData(valueStringReference);
-                                events().notifyDatasetDataChanged(treeDataset);
-                            }
-                        }
-                        */
-
-                    }
-                }
-
-
-            }
-
-
-
-
-        }
-
-
-        };
-
-    connect(&_createRowMultiSelectTree, &TriggerAction::triggered, this, updateCreateRowMultiSelectTreeTrigger);
 
     const auto updateMainPointsDataset = [this]() -> void {
         QObject::disconnect(_mainSelectionConnection);
@@ -900,22 +852,6 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Cell types");
                                                 }
-                                                /*
-                                                if (selectionColor)
-                                                {
-                                                    selectionColor->setColor(QColor(53, 126, 199));
-                                                }
-
-                                                if (selectionStringDelimiter)
-                                                {
-                                                    selectionStringDelimiter->setString(",");
-                                                }
-
-                                                if (selectionClustersString)
-                                                {
-                                                    selectionClustersString->setString(""); //TODO
-                                                }
-                                                */
                                             }
                                         }
                                         else if (selectedColorType == "Species")
@@ -932,22 +868,6 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Species");
                                                 }
-                                                /*
-                                                 if (selectionColor)
-                                                 {
-                                                     selectionColor->setColor(QColor(53, 126, 199));
-                                                 }
-
-                                                 if (selectionStringDelimiter)
-                                                 {
-                                                     selectionStringDelimiter->setString(",");
-                                                 }
-
-                                                 if (selectionClustersString)
-                                                 {
-                                                     selectionClustersString->setString(""); //TODO
-                                                 }
-                                                 */
                                             }
                                         }
                                         else if (selectedColorType == "Expression")
@@ -1247,7 +1167,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         if (mv::projects().isOpeningProject() || updateWorkflowRunning()) return;
         auto* table = getGeneTableView();
         if (table && table->currentIndex().isValid())
-            _XSCGeneDetectPlugin.onGeneRowChanged(table->currentIndex());
+            _XSCGeneDetectPlugin.refreshGeneColorMapping(table->currentIndex());
     };
     connect(&_applyLogTransformation, &ToggleAction::toggled, this, updateApplyLogTransformation);
     const auto updateMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker = [this]() -> void {

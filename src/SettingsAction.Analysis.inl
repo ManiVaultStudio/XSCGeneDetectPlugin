@@ -162,6 +162,8 @@ QString SettingsAction::filterData(QString& key, const QString& category, const 
 }
 void SettingsAction::updateButtonTriggered()
 {
+    if (_backgroundWorkStopped)
+        return;
     XSC_TRACE("SettingsAction::updateButtonTriggered");
     const auto updateTiming = std::make_shared<xsc::timing::AsyncSpan>("update.total");
     const bool baselineNeeded = !_meanMapComputed || _meanMapSignature != currentMeanMapSignature();
@@ -927,23 +929,6 @@ void SettingsAction::updateButtonTriggeredCore(const OperationProgress::State& o
                                                                                 {
                                                                                     chartTitle->setString("Cell types");
                                                                                 }
-                                                                                /*
-                                                                                auto selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
-                                                                                if (selectionColor)
-                                                                                {
-                                                                                    selectionColor->setColor(QColor(53, 126, 199));
-                                                                                }
-                                                                                auto selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
-                                                                                if (selectionStringDelimiter)
-                                                                                {
-                                                                                    selectionStringDelimiter->setString(",");
-                                                                                }
-                                                                                auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
-                                                                                if (selectionClustersString)
-                                                                                {
-                                                                                    selectionClustersString->setString(""); //TODO
-                                                                                }
-                                                                                */
                                                                             }
                                                                         }
                                                                     }
@@ -3890,24 +3875,6 @@ void SettingsAction::findTopNGenesPerCluster() {
                                                     {
                                                         chartTitle->setString("Cell types");
                                                     }
-                                                    /*
-                                                    auto selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
-                                                    if (selectionColor)
-                                                    {
-                                                        selectionColor->setColor(QColor(53, 126, 199));
-                                                    }
-                                                    auto selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
-                                                    if (selectionStringDelimiter)
-                                                    {
-                                                        selectionStringDelimiter->setString(",");
-                                                    }
-
-                                                    auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
-                                                    if (selectionClustersString)
-                                                    {
-                                                        selectionClustersString->setString(""); //TODO
-                                                    }
-                                                    */
                                                 }
                                             }
                                         }
@@ -4157,6 +4124,8 @@ void SettingsAction::cancelExplorationAnalysis()
 
 void SettingsAction::prepareExplorationAnalysis()
 {
+    if (_backgroundWorkStopped)
+        return;
     _explorationSuspended = false;
     _deWorkflow.resume(); _traitWorkflow.resume();
     _explorationPool.setMaxThreadCount(1);

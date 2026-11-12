@@ -55,7 +55,7 @@ public:
     /** This function is called by the core after the view plugin has been created */
     void init() override;
     void modifyListData();
-    void updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap);
+    void updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap, const QString& geneLabel = {});
     void updateTreeData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap);
     void updatePhylogeneticTree();
     void adjustTableWidths(const QString& value);
@@ -71,6 +71,7 @@ public:
 
     /** Called when the current row of the gene table changes (gene clicked). */
     void onGeneRowChanged(const QModelIndex& current);
+    void refreshGeneColorMapping(const QModelIndex& current);
     void beginSelectionUpdate();
     void prepareExplorationForCurrentTable();
     void refreshTraitColumnVisibility();
@@ -125,7 +126,9 @@ public: // Serialization
 protected:
 
     void prepareGeneExpressionCache();
-    void applyGeneRowChanged(const QModelIndex& current, bool expressionReady = false);
+    void shutdown();
+    bool _shuttingDown = false;
+    void applyGeneRowChanged(const QModelIndex& current, bool expressionReady = false, bool recolorOnly = false);
     void prepareGeneClick(const QPersistentModelIndex& current);
     void cancelGeneExpressionCache(bool clear = true);
     std::vector<float> geneExpressionValues(Points* points, const QString& gene, int column);

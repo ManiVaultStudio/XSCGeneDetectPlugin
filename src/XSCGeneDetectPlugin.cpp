@@ -577,6 +577,7 @@ void configureEmbeddingScatterplot(mv::plugin::Plugin& scatterplot)
 
 void XSCGeneDetectPlugin::init()
 {
+    connect(mv::Application::core(), &mv::CoreInterface::aboutToBeDestroyed, this, &XSCGeneDetectPlugin::shutdown);
     XSC_TRACE("XSCGeneDetectPlugin::init");
     _geneExpressionListener.setSupportedEventTypes({
         static_cast<std::uint32_t>(EventType::DatasetDataChanged),
@@ -626,63 +627,54 @@ void XSCGeneDetectPlugin::init()
 
 
 
-    const auto updateSelectedRowIndex = [this]() -> void
-        {
+    const auto updateTreeAction = [this]() {
+        auto* table = _settingsAction.getGeneTableView();
+        const bool haveRows = table && table->selectionModel() && !table->selectionModel()->selectedRows(0).empty();
+        const auto target = _settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset();
+        const auto source = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset();
+        _settingsAction.getCreateRowMultiSelectTree().setEnabled(haveRows && target.isValid() &&
+            source.isValid() && target != source);
+    };
+    connect(&_settingsAction.getSelectedRowIndexAction(), &StringAction::stringChanged, this, updateTreeAction);
+    connect(&_settingsAction.getFilteringEditTreeDatasetAction(), &DatasetPickerAction::currentDatasetChanged, this, updateTreeAction);
+    connect(&_settingsAction.getReferenceTreeDatasetAction(), &DatasetPickerAction::currentDatasetChanged, this, updateTreeAction);
+    connect(&_settingsAction.getCreateRowMultiSelectTree(), &TriggerAction::triggered, this, [this]() {
+        auto* table = _settingsAction.getGeneTableView();
+        auto source = _settingsAction.getReferenceTreeDatasetAction().getCurrentDataset<XSCTree>();
+        auto target = _settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset<XSCTree>();
+        if (!table || !table->selectionModel() || !source.isValid() || !target.isValid() || source == target)
+            return;
 
-            if (_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().isValid())
-            {
-                auto treeDataset = mv::data().getDataset<XSCTree>(_settingsAction.getFilteringEditTreeDatasetAction().getCurrentDataset().getDatasetId());
-
-                QStringList selectedRowsStrList = _settingsAction.getSelectedRowIndexAction().getString().split(",");
-                QList<int> selectedRows;
-                for (const QString& str : selectedRowsStrList) {
-                    selectedRows << str.toInt();
+        std::map<QString, SpeciesDetailsStats> combined;
+        std::map<QString, int> genesPerSpecies;
+        QStringList genes;
+        for (const auto& row : table->selectionModel()->selectedRows(0)) {
+            const auto statistics = convertToStatisticsMap(row.siblingAtColumn(3).data().toString());
+            if (statistics.empty())
+                continue;
+            genes << row.data().toString();
+            for (const auto& [species, stats] : statistics) {
+                auto [entry, inserted] = combined.try_emplace(species, stats);
+                auto& mean = entry->second;
+                const int count = ++genesPerSpecies[species];
+                if (!inserted) {
+                    mean.meanSelected += (stats.meanSelected - mean.meanSelected) / count;
+                    mean.meanNonSelected += (stats.meanNonSelected - mean.meanNonSelected) / count;
+                    if (mean.rank == 0 || (stats.rank > 0 && stats.rank < mean.rank))
+                        mean.rank = stats.rank;
                 }
-
-                if (selectedRows.size() == 1)
-                {
-                    int selectedRow = selectedRows[0];
-                    if (treeDataset.isValid() && _settingsAction.getGeneTableView() && selectedRow >= 0)
-                    {
-                        QString treeData = _settingsAction.getGeneTableView()->model()->index(selectedRow, 2).data().toString();
-                        //qDebug()<< "Tree data: " << treeData;
-                        if (!treeData.isEmpty())
-                        {
-
-                            QJsonObject valueStringReference = QJsonDocument::fromJson(treeData.toUtf8()).object();
-                            if (!valueStringReference.isEmpty())
-                            {
-                                treeDataset->setTreeData(valueStringReference);
-                                events().notifyDatasetDataChanged(treeDataset);
-                                //QString firstColumnValue = _settingsAction.getGeneTableView()->model()->index(selectedRow, 0).data().toString();
-                               // _settingsAction.getGeneNamesConnection().setString(firstColumnValue);
-                            }
-                        }
-                    }
-                }
-                if (selectedRows.size() > 1)
-                {
-                    _settingsAction.getCreateRowMultiSelectTree().setEnabled(true);
-                }
-                else
-                {
-                    _settingsAction.getCreateRowMultiSelectTree().setDisabled(true);
-                }
-                QStringList firstColumnValues;
-                if (auto* tableModel = _settingsAction.getGeneTableView()->model()) {
-                    for (int row : selectedRows) {
-                        firstColumnValues << tableModel->index(row, 0).data().toString();
-                    }
-                }
-                QString firstColumnValue = firstColumnValues.join("*%$@*@$%*");
-                //_settingsAction.getGeneNamesConnection().setString(firstColumnValue);
-
-
             }
+        }
+        if (combined.empty())
+            return;
 
-        };
-
-    connect(&_settingsAction.getSelectedRowIndexAction(), &StringAction::stringChanged, this, updateSelectedRowIndex);
+        auto tree = source->getTreeData();
+        if (tree.isEmpty())
+            return;
+        updateSpeciesData(tree, combined, genes.join(", "));
+        target->setTreeData(tree);
+        mv::events().notifyDatasetDataChanged(target);
+    });
 
     const auto updateSelectedGene = [this]() -> void
         {
@@ -755,23 +747,6 @@ void XSCGeneDetectPlugin::init()
                                                     {
                                                         chartTitle->setString("Cell types");
                                                     }
-                                                    /*
-                                                    auto selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
-                                                    if (selectionColor)
-                                                    {
-                                                        selectionColor->setColor(QColor(53, 126, 199));
-                                                    }
-                                                    auto selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
-                                                    if (selectionStringDelimiter)
-                                                    {
-                                                        selectionStringDelimiter->setString(",");
-                                                    }
-                                                    auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
-                                                    if (selectionClustersString)
-                                                    {
-                                                        selectionClustersString->setString(""); //TODO
-                                                    }
-                                                    */
                                                 }
                                             }
                                         }
@@ -967,34 +942,6 @@ void XSCGeneDetectPlugin::init()
 
                         /////////
 
-                        auto colormapScatterplot = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("Settings/Coloring/1D Color map"));;
-                        if (colormapScatterplot)
-                        {
-                            auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
-                            if (legendViewFactory)
-                            {
-                                for (auto legendPlugin : mv::plugins().getPluginsByFactory(legendViewFactory))
-                                {
-                                    if (legendPlugin->getGuiName() == "Legend View")
-                                    {
-                                        auto colormapLegend = dynamic_cast<ColorMap1DAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Color map"));
-                                        if (colormapLegend)
-                                        {
-                                            //TODO
-                                            //colormapScatterplot->publish("EvoViewer:ScatterplotColorMap");
-                                            //colormapScatterplot->setConnectionPermissionsToAll();
-                                            //colormapLegend->setConnectionPermissionsToAll();
-                                           // mv::actions().connectPrivateActions(colormapScatterplot, colormapLegend,"EvoViewer:ScatterplotColorMap");
-
-                                           //colormapLegend->connectToPublicActionByName("EvoViewer:ScatterplotColorMap");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-
-                        ///////
                         pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
                         if (pointDatasetPickerAction) {
                             pointDatasetPickerAction->setCurrentText("");
@@ -1024,23 +971,6 @@ void XSCGeneDetectPlugin::init()
                                             {
                                                 chartTitle->setString("Cell types");
                                             }
-                                            /*
-                                            auto selectionColor = dynamic_cast<ColorAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Selection color"));
-                                            if (selectionColor)
-                                            {
-                                                selectionColor->setColor(QColor(53, 126, 199));
-                                            }
-                                            auto selectionStringDelimiter = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Delimiter"));
-                                            if (selectionStringDelimiter)
-                                            {
-                                                selectionStringDelimiter->setString(",");
-                                            }
-                                            auto selectionClustersString = dynamic_cast<StringAction*>(legendPlugin->findChildByPath("ChartLegendViewPlugin Chart/Color Options/Cluster Selection string"));
-                                            if (selectionClustersString)
-                                            {
-                                                selectionClustersString->setString(""); //TODO
-                                            }
-                                            */
                                         }
                                     }
                                 }
@@ -1107,6 +1037,8 @@ void XSCGeneDetectPlugin::init()
 
 
     //make long strings in the cells visible and not ...shortened
+    _settingsAction.getGeneTableView()->setSelectionBehavior(QAbstractItemView::SelectRows);
+    _settingsAction.getGeneTableView()->setSelectionMode(QAbstractItemView::ExtendedSelection);
     _settingsAction.getGeneTableView()->setTextElideMode(Qt::ElideNone);
     _settingsAction.getGeneTableView()->setWordWrap(true);
     _settingsAction.getGeneTableView()->setAlternatingRowColors(false);
@@ -1603,8 +1535,6 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                 mv::events().notifyDatasetDataChanged(_settingsAction.getFilteredUMAPDatasetPoints());
             mv::events().notifyDatasetDataChanged(_settingsAction.getFilteredUMAPDatasetColors());
 
-            //std::map<QString, std::pair<QColor, std::vector<int>>> selectedFilteredUMAPDatasetColorsMap;
-            //TODO: populate the selectedFilteredUMAPDatasetColorsMap
 
 
             if (geometryChanged)
@@ -4092,6 +4022,14 @@ private:
 
 XSCGeneDetectPlugin::~XSCGeneDetectPlugin()
 {
+    shutdown();
+}
+
+void XSCGeneDetectPlugin::shutdown()
+{
+    if (_shuttingDown)
+        return;
+    _shuttingDown = true;
     disconnect(&_geneClickWatcher, nullptr, this, nullptr);
     cancelGeneExpressionCache(false);
     _settingsAction.shutdownBackgroundWork();
@@ -4159,7 +4097,7 @@ void XSCGeneDetectPlugin::beginSelectionUpdate()
 
 void XSCGeneDetectPlugin::prepareExplorationForCurrentTable()
 {
-    if (_settingsAction.updateWorkflowRunning()) return;
+    if (_shuttingDown || _settingsAction.updateWorkflowRunning()) return;
     auto value = _settingsAction.getListModelAction().getVariant();
     auto* model = qobject_cast<QStandardItemModel*>(value.value<QAbstractItemModel*>());
     if (!model) return;
@@ -4333,6 +4271,13 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     connect(geneTableView->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& current, const QModelIndex&) {
         onGeneRowChanged(current);
         });
+
+    connect(geneTableView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this, geneTableView]() {
+        QStringList rows;
+        for (const auto& row : geneTableView->selectionModel()->selectedRows(0))
+            rows << QString::number(row.row());
+        _settingsAction.getSelectedRowIndexAction().setString(rows.join(","));
+    });
 
     emit model->layoutChanged();
     refreshTraitPlot();
@@ -4690,7 +4635,7 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
 void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
 {
     XSC_TRACE("XSCGeneDetectPlugin::onGeneRowChanged");
-    if (_settingsAction.updateWorkflowRunning()) return;
+    if (_shuttingDown || _settingsAction.updateWorkflowRunning()) return;
     if (!current.isValid()) { cancelGeneExpressionCache(false); return; }
     const QPersistentModelIndex requested(current.siblingAtColumn(0));
     if (_pendingGeneRow == requested) {
@@ -4711,6 +4656,22 @@ void XSCGeneDetectPlugin::onGeneRowChanged(const QModelIndex& current)
         connect(_geneClickDebounce, &QTimer::timeout, this, [this]() { prepareGeneClick(_pendingGeneRow); });
     }
     _geneClickDebounce->start(30);
+}
+
+void XSCGeneDetectPlugin::refreshGeneColorMapping(const QModelIndex& current)
+{
+    const QPersistentModelIndex geneRow(current.siblingAtColumn(0));
+    if (!geneRow.isValid() || geneRow != _pendingGeneRow || _geneClickWatcher.isRunning() ||
+        !_geneClickJob || _geneClickJob->cancelled || !_geneClickJob->ready() ||
+        !_geneRequests.matches(_geneClickJob->serial))
+        return;
+
+    // Reuse the prepared cell values and the current species embedding.
+    if (!_embeddingVisibleRows.empty()) {
+        _pendingEmbeddingGene = geneRow.data().toString();
+        _pendingEmbeddingSpecies = _embeddingVisibleSpecies;
+    }
+    applyGeneRowChanged(geneRow, true, true);
 }
 
 void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
@@ -4853,7 +4814,7 @@ void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
     }));
 }
 
-void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool expressionReady)
+void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool expressionReady, bool recolorOnly)
 {
     XSC_TRACE("XSCGeneDetectPlugin::applyGeneRowChanged");
     if (!current.isValid()) return;
@@ -4865,7 +4826,6 @@ void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool e
         return;
     if (!expressionReady) {
     _settingsAction.getSelectedGeneAction().setString(gene);
-    _settingsAction.getSelectedRowIndexAction().setString(QString::number(current.row()));
     _settingsAction.getRemoveRowSelection().setEnabled(true);
     }
     //_settingsAction.enableDisableButtonsAutomatically();
@@ -4969,9 +4929,8 @@ void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool e
 
         }
     }
-    else
+    else if (!recolorOnly)
     {
-        //TODO: Add selected gene point selection to scatterplot
         unsigned int selectedGeneIndex = -1;
         if (_settingsAction.getGeneOrder().size() > 0 && _settingsAction.getSelectedPointsTSNEDatasetForGeneTable().isValid())
         {
@@ -5636,7 +5595,7 @@ void XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove()
     XSC_TRACE("XSCGeneDetectPlugin::selectedCellStatisticsStatusBarRemove");
     setSelectionDetailsModel(_settingsAction.getSelectionDetailsTable(), new QStandardItemModel());
 }
-void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap) {
+void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap, const QString& geneLabel) {
     XSC_TRACE("XSCGeneDetectPlugin::updateSpeciesData");
     // Check if the "name" key exists in the current node
     if (node.contains("name")) {
@@ -5649,7 +5608,7 @@ void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QS
             node["differential"] = std::round(differentialVal * 100.0) / 100.0; // Round to 2 decimal places
             int rank = it->second.rank;
             node["rank"] = rank;
-            node["gene"] = _settingsAction.getSelectedGeneAction().getString();
+            node["gene"] = geneLabel.isEmpty() ? _settingsAction.getSelectedGeneAction().getString() : geneLabel;
             QString clusterNames = "N/A";
             if (_settingsAction.getTsneDatasetClusterColors().isValid())
             {
@@ -5725,7 +5684,7 @@ void XSCGeneDetectPlugin::updateSpeciesData(QJsonObject& node, const std::map<QS
         QJsonArray children = node["children"].toArray();
         for (int i = 0; i < children.size(); ++i) {
             QJsonObject child = children[i].toObject();
-            updateSpeciesData(child, speciesExpressionMap); // Recursive call
+            updateSpeciesData(child, speciesExpressionMap, geneLabel); // Recursive call
             children[i] = child; // Update the modified object back into the array
         }
         node["children"] = children; // Update the modified array back into the parent JSON object
