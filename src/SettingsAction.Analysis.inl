@@ -1,4 +1,7 @@
 namespace {
+    constexpr float selectionScanStart = 0.01f;
+    constexpr float selectionScanEnd = 0.98f;
+
     /** Calls a function when it goes out of scope (reports one finished background read, also when it returned early). */
     struct StatusTick {
         explicit StatusTick(std::function<void()> callback) : done(std::move(callback)) {}
@@ -193,6 +196,7 @@ void SettingsAction::updateButtonTriggered()
 
     const auto data = std::make_shared<UpdateWorkflowData>();
     const auto worker = _updateWorkerState = std::make_shared<UpdateWorkerState>();
+    const auto progress = _selectionUpdateProgress.begin(this, QStringLiteral("Update selection statistics"));
     auto workflow = std::make_unique<mv::workflow::WorkflowPlan>(QStringLiteral("Update selection statistics"));
 
     workflow->addSequentialStage(QStringLiteral("Prepare selection update"), [this, data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
@@ -288,7 +292,7 @@ void SettingsAction::updateButtonTriggered()
             && data->selectedMeansKey != data->cachedSelectedMeansKey;
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, 0.015);
-    workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Scan species-wide baseline means"), [data, worker, progress](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
         const std::lock_guard lock(worker->scanMutex);
         if (worker->cancelled) return;
         XSC_TRACE("update.stage.Scan species-wide baseline means");
@@ -299,13 +303,7 @@ void SettingsAction::updateButtonTriggered()
         }
 
         qInfo() << "Computing gene mean expression map";
-        const QPointer<mv::Task> progressTask(context->getTask());
-        if (progressTask)
-        {
-            progressTask->setName(QStringLiteral("Compute gene mean expression map"));
-            progressTask->setProgressDescription(QStringLiteral("Reading expression tiles for species baselines"));
-        context->message(mv::util::SeverityLevel::Info, QStringLiteral("Reading expression tiles for species baselines"), {}, {});
-        }
+        progress->phase(QStringLiteral("Reading expression tiles for species baselines"), selectionScanStart);
         QElapsedTimer scanTimer;
         scanTimer.start();
         qInfo() << "[Baseline] scanning" << data->points->getNumPoints() << "cells," << data->geneColumns.size()
@@ -323,15 +321,12 @@ void SettingsAction::updateButtonTriggered()
         }
         const auto aggregated = PointStreaming::aggregateGroupedColumns(data->points.get(), groups, data->geneColumns,
             data->workerLimit, data->memoryBudgetBytes, false,
-            [context, progressTask, worker, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [progress, worker, &scanTimer, &lastProgressPercent](std::size_t completed, std::size_t total) {
                 if (worker->cancelled) throw std::runtime_error("Selection update cancelled");
-                if (total > 0)
-                    context->setProgress(static_cast<double>(completed) / static_cast<double>(total));
+                progress->advance(completed, total, selectionScanStart, selectionScanEnd);
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
                 if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total)
                 {
-                    if (progressTask)
-                        progressTask->setProgressDescription(QStringLiteral("Species baseline scan: %1 of %2 tiles (%3%)").arg(completed).arg(total).arg(percent));
                     qInfo() << "[Baseline]" << completed << "/" << total << "blocks (" << percent << "% ) at" << scanTimer.elapsed() << "ms";
                     lastProgressPercent = percent;
                 }
@@ -359,12 +354,10 @@ void SettingsAction::updateButtonTriggered()
             data->selectedScanFinished = true;
             qInfo() << "[Update] baseline and selected means prepared in one scan";
         }
-        if (progressTask)
-            progressTask->setProgressDescription(QStringLiteral("Baseline means ready; continuing selection update..."));
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.86 : 0.01);
 
-    workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Scan selected gene means"), [data, worker, progress](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
         const std::lock_guard lock(worker->scanMutex);
         if (worker->cancelled) return;
         XSC_TRACE("update.stage.Scan selected gene means");
@@ -402,6 +395,7 @@ void SettingsAction::updateButtonTriggered()
             qInfo() << "[Update] selected gene read: tile order, geometry" << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
 
         std::atomic<int> lastProgressPercent { -1 };
+        progress->phase(QStringLiteral("Reading expression tiles for selected gene means"), selectionScanStart);
         const auto stage1 = PointStreaming::reduceRows(data->points.get(), data->selectedRows, stage1Threads, static_cast<std::uint64_t>(totalGeneCount),
             [speciesCount, totalGeneCount]() {
                 Stage1State state;
@@ -420,18 +414,15 @@ void SettingsAction::updateButtonTriggered()
                     for (std::size_t geneIndex = 0; geneIndex < into.sums[speciesIndex].size(); ++geneIndex)
                         into.sums[speciesIndex][geneIndex] += from.sums[speciesIndex][geneIndex];
             },
-            [context, worker, task = QPointer<mv::Task>(context->getTask()), &lastProgressPercent](std::size_t completed, std::size_t total) {
+            [progress, worker, &lastProgressPercent](std::size_t completed, std::size_t total) {
                 if (worker->cancelled) throw std::runtime_error("Selection update cancelled");
-                const double progress = total > 0 ? static_cast<double>(completed) / static_cast<double>(total) : 1.0;
-                context->setProgress(progress);
+                progress->advance(completed, total, selectionScanStart, selectionScanEnd);
                 const int percent = total > 0 ? static_cast<int>(100 * completed / total) : 100;
                 int previous = lastProgressPercent.load();
                 if (percent >= previous + 10 || completed == total)
                 {
                     if (lastProgressPercent.compare_exchange_strong(previous, percent))
                     {
-                        if (task)
-                            task->setProgressDescription(QStringLiteral("Selected gene means: %1% (%2 / %3 blocks)").arg(percent).arg(completed).arg(total));
                         qInfo() << "[Update] selected gene read:" << completed << "/" << total << "blocks (" << percent << "% )";
                     }
                 }
@@ -449,7 +440,7 @@ void SettingsAction::updateButtonTriggered()
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::CurrentWorkerThread, baselineNeeded ? 0.01 : 0.86);
 
-    workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data, worker](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
+    workflow->addSequentialStage(QStringLiteral("Publish selection datasets and update views"), [this, data, worker, progress](const mv::workflow::WorkflowPlan::Job&, const mv::workflow::SharedWorkflowExecutionContext& context) {
         if (worker->cancelled) return;
         XSC_TRACE("update.stage.Publish selection datasets and update views");
         if (data->inputsReady)
@@ -475,14 +466,17 @@ void SettingsAction::updateButtonTriggered()
                 _selectedMeansCache.means = std::move(data->selectedMeans);
             }
 
-            updateButtonTriggeredCore(context);
+            const float publicationStart = data->needsBaselineScan || data->needsSelectedScan
+                ? selectionScanEnd : selectionScanStart;
+            progress->phase(QStringLiteral("Updating selection views"), publicationStart);
+            updateButtonTriggeredCore(progress, publicationStart);
             data->published = true;
         }
         context->setProgress(1.0);
     }, mv::workflow::WorkflowPlan::JobThreadAffinity::GuiThread, 0.10);
 
     mv::workflow::WorkflowOptions options;
-    options.reporting.progress = true;
+    options.reporting.progress = false;
     options.reporting.finishedNotification = false;
 
     startCodeTimer("UpdateGeneFilteringTrigger");
@@ -493,6 +487,7 @@ void SettingsAction::updateButtonTriggered()
     }
     catch (const std::exception& exception)
     {
+        _selectionUpdateProgress.cancel();
         stopCodeTimer("UpdateGeneFilteringTrigger");
         _updateWorkflowRunning = false;
         _pauseStatusUpdates = false;
@@ -501,8 +496,6 @@ void SettingsAction::updateButtonTriggered()
         enableActions();
         return;
     }
-    if (auto task = future.getTask())
-        task->setGuiScopes({ mv::Task::GuiScope::Foreground });
     future.onFinished(this, [this, data, worker, updateTiming](const mv::workflow::SharedWorkflowResult& result) {
         updateTiming->finish();
         if (worker->cancelled) return;
@@ -527,6 +520,11 @@ void SettingsAction::updateButtonTriggered()
         }
 
         enableActions();
+        if (result && result->getStatus() == mv::workflow::WorkflowResultBase::Status::Success &&
+            data->published && !data->staleInputs && _statusColorAction.getString() != "E")
+            _selectionUpdateProgress.finish();
+        else
+            _selectionUpdateProgress.cancel();
         if (data->published && !data->staleInputs)
         {
             auto pointsDataset = _mainPointsDataset.getCurrentDataset();
@@ -538,7 +536,7 @@ void SettingsAction::updateButtonTriggered()
     });
 }
 
-void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflowExecutionContext& publicationContext)
+void SettingsAction::updateButtonTriggeredCore(const OperationProgress::State& operationProgress, float publicationStart)
 {
     XSC_TRACE("SettingsAction::updateButtonTriggeredCore");
     if (_mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker.isChecked())
@@ -559,7 +557,7 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
         showStatusMessage(QStringLiteral("Updating selection"), QStringLiteral("#007bff"));
         removeTemporaryDatasets(); // remove only the previous update's queued dataset ids; keep linked reusable datasets
         qDebug() << "[Update] previous temporary datasets removed:" << updateTimer.elapsed() << "ms";
-        const auto logUpdateStage = [&updateTimer, &publicationContext](const char* stage) {
+        const auto logUpdateStage = [&updateTimer, &operationProgress, publicationStart](const char* stage) {
             qInfo() << "[Update]" << stage << "at" << updateTimer.elapsed() << "ms";
             const QString stageName = QString::fromLatin1(stage);
             double progress = 0.02;
@@ -572,7 +570,7 @@ void SettingsAction::updateButtonTriggeredCore(const mv::workflow::SharedWorkflo
             else if (stageName == QStringLiteral("selected versus rest statistics ready")) progress = 0.76;
             else if (stageName == QStringLiteral("expression statistics finished")) progress = 0.86;
             else if (stageName == QStringLiteral("top genes and gene table model finished")) progress = 0.96;
-            publicationContext->setProgress(progress);
+            operationProgress->phase(stageName, publicationStart + (1.0f - publicationStart) * static_cast<float>(progress));
         };
         auto pointsDataset = _mainPointsDataset.getCurrentDataset();
         auto embeddingDataset = _embeddingDataset.getCurrentDataset();
@@ -4109,6 +4107,7 @@ void SettingsAction::shutdownBackgroundWork()
     if (_backgroundWorkStopped)
         return;
     _backgroundWorkStopped = true;
+    _selectionUpdateProgress.cancel();
     _explorationSuspended = true;
     if (_updateWorkerState) _updateWorkerState->cancelled = true;
     if (_traitCorrelationTimer) _traitCorrelationTimer->stop();

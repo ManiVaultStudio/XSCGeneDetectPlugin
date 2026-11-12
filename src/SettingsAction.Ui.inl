@@ -325,7 +325,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _tsnePerplexity.setValue(30);
     _usePreComputedTSNE.setSerializationName("CSCGDV:Use Precomputed TSNE");
     _usePreComputedTSNE.setChecked(true);
-    _applyLogTransformation.setChecked(false);
+    _applyLogTransformation.setChecked(true);
     _applyLogTransformation.setToolTip(QStringLiteral(
         "Apply log(1 + expression) to gene coloring and its legend. Analysis statistics use the source expression values."));
     _toggleScatterplotSelection.setChecked(false);

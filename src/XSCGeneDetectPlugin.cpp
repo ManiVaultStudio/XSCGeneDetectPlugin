@@ -555,6 +555,26 @@ struct XSCGeneDetectPlugin::GeneClickJob
     std::shared_ptr<std::vector<float>> coordinates;
 };
 
+namespace {
+void configureEmbeddingScatterplot(mv::plugin::Plugin& scatterplot)
+{
+    auto* pointSize = scatterplot.findChildByPath<DecimalAction>("Settings/Plot/Point/Point size/Point size");
+    if (!pointSize)
+        pointSize = scatterplot.findChildByPath<DecimalAction>("Settings/Plot/Point size/Point size");
+    if (pointSize)
+        pointSize->setValue(3.0);
+
+    auto* notify = scatterplot.findChildByPath<ToggleAction>("Settings/Selection/Point Selection/Notify during selection");
+    if (!notify)
+        notify = scatterplot.findChildByPath<ToggleAction>("Settings/Selection/Notify during selection");
+    if (notify)
+        notify->setChecked(false);
+
+    if (auto* halo = scatterplot.findChildByPath<ToggleAction>("Settings/Selection/Halo"))
+        halo->setChecked(true);
+}
+}
+
 void XSCGeneDetectPlugin::init()
 {
     XSC_TRACE("XSCGeneDetectPlugin::init");
@@ -705,6 +725,7 @@ void XSCGeneDetectPlugin::init()
                     if (scatterplotViewFactory) {
                         for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                             if (plugin->getGuiName() == "Scatterplot Embedding View") {
+                                configureEmbeddingScatterplot(*plugin);
                                 pointDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Position"));
                                 if (pointDatasetPickerAction) {
                                     pointDatasetPickerAction->setCurrentText("");
@@ -942,6 +963,7 @@ void XSCGeneDetectPlugin::init()
             if (scatterplotViewFactory) {
                 for (auto plugin : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
                     if (plugin->getGuiName() == "Scatterplot Embedding View") {
+                        configureEmbeddingScatterplot(*plugin);
 
                         /////////
 
@@ -3298,17 +3320,17 @@ public:
         _groupCompareTimer->setSingleShot(true);
         _groupCompareTimer->setInterval(250);
         connect(_groupCompareTimer, &QTimer::timeout, this, [this]() {
-            if (onGroupsChosen)
+            if (_tabs->isEnabled() && onGroupsChosen)
                 onGroupsChosen(_groupA->selected(), _groupB->selected());
         });
         _groupA->onSelectionChanged = [this](const QStringList& selected) {
             _groupsManuallyEdited = true;
             _groupB->setDisabledSpecies(selected);
-            _groupCompareTimer->start();
+            scheduleGroupComparison();
         };
         _groupB->onSelectionChanged = [this](const QStringList&) {
             _groupsManuallyEdited = true;
-            _groupCompareTimer->start();
+            scheduleGroupComparison();
         };
         _useGroups = true;
 
@@ -3413,6 +3435,8 @@ public:
         _updateStatus->setVisible(!status.isEmpty());
         _status->setVisible(status.isEmpty());
         _tabs->setEnabled(status.isEmpty());
+        if (status.isEmpty() && _groupComparisonPending)
+            _groupCompareTimer->start();
     }
 
     bool usesGroups() const { return _useGroups; }
@@ -3442,11 +3466,17 @@ public:
         QStringList initiallyInA;
         for (const auto& species : available)
             if (selectedSpecies.contains(species)) initiallyInA << species;
-        _groupA->setSpecies(available, initiallyInA);
         QStringList initiallyInB;
         for (const auto& species : available)
             if (!initiallyInA.contains(species)) initiallyInB << species;
+        if (_groupsManuallyEdited) {
+            initiallyInA = _groupA->selected();
+            initiallyInB = _groupB->selected();
+        }
+        _groupA->setSpecies(available, initiallyInA);
         _groupB->setSpecies(available, initiallyInB);
+        _groupA->setSelectedSpecies(initiallyInA);
+        _groupB->setSelectedSpecies(initiallyInB);
         _groupB->setDisabledSpecies(_groupA->selected());
         updateHighlights();
     }
@@ -3454,8 +3484,11 @@ public:
     /** The species that are selected in the species explorer (rows shown in blue). */
     void setSelectedSpecies(const QSet<QString>& selectedSpecies)
     {
+        if (selectedSpecies == _selectedSpecies)
+            return;
         _selectedSpecies = selectedSpecies;
-        if (!_groupsManuallyEdited && !_result.species.isEmpty()) {
+        _groupsManuallyEdited = false;
+        if (!_result.species.isEmpty()) {
             QStringList available;
             QStringList selected;
             for (int row = 0; row < _result.species.size(); ++row) {
@@ -3472,8 +3505,7 @@ public:
             _groupA->setSelectedSpecies(selected);
             _groupB->setSelectedSpecies(remainder);
             _groupB->setDisabledSpecies(selected);
-            if (_groupCompareTimer)
-                _groupCompareTimer->start();
+            scheduleGroupComparison();
         }
         updateHighlights();
     }
@@ -3490,6 +3522,8 @@ public:
     void setDetail(const SpeciesDeDetail& detail, double significanceLevel)
     {
         XSC_TRACE("plot.setDetail");
+        _groupCompareTimer->stop();
+        _groupComparisonPending = false;
         _detail = detail;
         _table->setColumnCount(_useGroups ? 10 : 9);
         _table->setHorizontalHeaderLabels(_useGroups
@@ -3510,6 +3544,14 @@ public:
     }
 
 private:
+    void scheduleGroupComparison()
+    {
+        _groupComparisonPending = true;
+        _detailInfo->setText("Updating comparison (previous results shown)");
+        if (_tabs->isEnabled())
+            _groupCompareTimer->start();
+    }
+
     static QString prettyName(QString name)
     {
         name.replace("_", " ");
@@ -3731,6 +3773,7 @@ private:
     bool _useGroups = false;
     bool _groupsManuallyEdited = false;
     QTimer* _groupCompareTimer = nullptr;
+    bool _groupComparisonPending = false;
     SpeciesGroupPicker* _groupA = nullptr;
     SpeciesGroupPicker* _groupB = nullptr;
     SpeciesDeResult _result;

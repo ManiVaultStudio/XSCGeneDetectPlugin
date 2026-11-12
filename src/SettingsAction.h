@@ -693,7 +693,7 @@ private:
 
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
-    void updateButtonTriggeredCore(const mv::workflow::SharedWorkflowExecutionContext& publicationContext);
+    void updateButtonTriggeredCore(const OperationProgress::State& operationProgress, float publicationStart);
     void setModifiedTriggeredData(QVariant geneListTable);
 public: // Serialization
 
@@ -883,7 +883,7 @@ protected:
     QFutureWatcher<void> _deStatisticsWatcher;
     std::unique_ptr<xsc::timing::AsyncSpan> _deReadTiming, _traitReadTiming, _deStatsTiming, _traitStatsTiming;
     QThreadPool _explorationPool;
-    OperationProgress _traitProgress, _deProgress;
+    OperationProgress _traitProgress, _deProgress, _selectionUpdateProgress;
     std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
     struct TraitStatisticsBatch;
