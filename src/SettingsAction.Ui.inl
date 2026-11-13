@@ -1,9 +1,3 @@
-int SettingsAction::parallelWorkers(size_t pointsPerWorker) const
-{
-    XSC_TRACE("SettingsAction::parallelWorkers");
-    return memorySafeThreadCount(pointsPerWorker, _memoryBudgetMb.getValue(), _maxWorkerThreads.getValue());
-}
-
 QString SettingsAction::currentMeanMapSignature() const
 {
     XSC_TRACE("SettingsAction::currentMeanMapSignature");
@@ -13,13 +7,7 @@ QString SettingsAction::currentMeanMapSignature() const
 SettingsAction::~SettingsAction()
 {
     XSC_TRACE("SettingsAction::~SettingsAction");
-    _deWorkflow.cancel(); _traitWorkflow.cancel();
-    // Join every worker before its datasets/cache disappear. A cancelled read
-    // can carry an exception in its future; it must not escape the destructor.
-    for (auto* watcher : { &_deStatisticsWatcher, &_traitStatisticsWatcher, &_deJobWatcher, &_traitJobWatcher }) {
-        try { watcher->waitForFinished(); }
-        catch (...) { }
-    }
+    shutdownBackgroundWork();
     // The two message boxes are never added to a layout, so nobody else owns them.
     delete _popupMessageInit;
     _popupMessageInit = nullptr;
@@ -331,7 +319,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _tsnePerplexity.setValue(30);
     _usePreComputedTSNE.setSerializationName("CSCGDV:Use Precomputed TSNE");
     _usePreComputedTSNE.setChecked(true);
-    _applyLogTransformation.setChecked(false);
+    _applyLogTransformation.setChecked(true);
+    _applyLogTransformation.setToolTip(QStringLiteral(
+        "Apply log(1 + expression) to gene coloring and its legend. Analysis statistics use the source expression values."));
     _toggleScatterplotSelection.setChecked(false);
     _performGeneTableTsneAction.setChecked(false);
     _hiddenShowncolumns.setSerializationName("CSCGDV:Hidden Shown Columns");
@@ -591,15 +581,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     const auto updateGeneFilteringTrigger = [this]() -> void
         {
-            if (_updateWorkflowRunning)
+            if (_updateWorkflowRunning || mv::projects().isOpeningProject())
                 return;
 
+            _updateWorkflowRunning = true;
             _XSCGeneDetectPlugin.beginSelectionUpdate();
             disableActions();
             _pauseStatusUpdates = true;
             _speciesExplorerInMap.setSelectedOptions(QStringList{});
-            //_erroredOutFlag = false;
-            QApplication::processEvents();
             // Late-created views keep the project-load blocker enabled. Release
             // it only for an explicit Update, without triggering expensive
             // picker-change precomputation while the setup dialog is closing.
@@ -620,56 +609,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
-    const auto updateCreateRowMultiSelectTreeTrigger = [this]() -> void {
-
-        if (_filteringEditTreeDataset.getCurrentDataset().isValid())
-        {
-            auto treeDataset = mv::data().getDataset<XSCTree>(_filteringEditTreeDataset.getCurrentDataset().getDatasetId());
-
-            QStringList selectedRowsStrList = _geneNamesConnection.getString().split("*%$@*@$%*");
-
-
-            if (treeDataset.isValid() && selectedRowsStrList.size() > 0)
-            {
-                //if (speciesSelectedIndicesCounter.size() > 0)
-                {
-                    //QJsonObject valueStringReference = createJsonTree(speciesSelectedIndicesCounter);
-                    //if (!valueStringReference.isEmpty())
-                    {
-                        //treeDataset->setTreeData(valueStringReference);
-                        //events().notifyDatasetDataChanged(treeDataset);
-                        //TODO:: add the tree to the tree dataset
-/*
-                        QString treeData = createJsonTreeFromNewick(QString::fromStdString(modifiedNewick), leafnames);
-                        if (!treeData.isEmpty())
-                        {
-
-                            QJsonObject valueStringReference = QJsonDocument::fromJson(treeData.toUtf8()).object();
-                            if (!valueStringReference.isEmpty())
-                            {
-                                treeDataset->setTreeData(valueStringReference);
-                                events().notifyDatasetDataChanged(treeDataset);
-                            }
-                        }
-                        */
-
-                    }
-                }
-
-
-            }
-
-
-
-
-        }
-
-
-        };
-
-    connect(&_createRowMultiSelectTree, &TriggerAction::triggered, this, updateCreateRowMultiSelectTreeTrigger);
 
     const auto updateMainPointsDataset = [this]() -> void {
+        QObject::disconnect(_mainSelectionConnection);
+        _watchedMainPointsDataset = {};
 
         if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
@@ -703,11 +646,29 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
             // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
             // changing the dataset repeatedly never stacks up duplicate listeners.
-            QObject::disconnect(_mainSelectionConnection);
             _watchedMainPointsDataset = fullDataset;
-            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this]() -> void {
+            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this, datasetId = fullDataset.getDatasetId()] {
+                if (!_watchedMainPointsDataset.isValid() || _watchedMainPointsDataset.getDatasetId() != datasetId)
+                    return;
+
                 _toggleScatterplotSelection.setChecked(true);
-                });
+                if (_updateWorkflowRunning || mv::projects().isOpeningProject())
+                    return;
+
+                auto selection = _watchedMainPointsDataset->getSelectionIndices();
+                if (selection == _selectedIndicesFromStorage)
+                    return;
+
+                // Results store sorted indices. A selection notification may use the click order.
+                std::sort(selection.begin(), selection.end());
+                if (selection != _selectedIndicesFromStorage)
+                {
+                    if (_statusColorAction.getString() != "M")
+                        _statusColorAction.setString("M");
+                    else if (!_selectedGene.getString().isEmpty())
+                        _removeRowSelection.trigger();
+                }
+            }, Qt::QueuedConnection);
 
         }
         else
@@ -885,22 +846,6 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Cell types");
                                                 }
-                                                /*
-                                                if (selectionColor)
-                                                {
-                                                    selectionColor->setColor(QColor(53, 126, 199));
-                                                }
-
-                                                if (selectionStringDelimiter)
-                                                {
-                                                    selectionStringDelimiter->setString(",");
-                                                }
-
-                                                if (selectionClustersString)
-                                                {
-                                                    selectionClustersString->setString(""); //TODO
-                                                }
-                                                */
                                             }
                                         }
                                         else if (selectedColorType == "Species")
@@ -917,22 +862,6 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                                                 {
                                                     chartTitle->setString("Species");
                                                 }
-                                                /*
-                                                 if (selectionColor)
-                                                 {
-                                                     selectionColor->setColor(QColor(53, 126, 199));
-                                                 }
-
-                                                 if (selectionStringDelimiter)
-                                                 {
-                                                     selectionStringDelimiter->setString(",");
-                                                 }
-
-                                                 if (selectionClustersString)
-                                                 {
-                                                     selectionClustersString->setString(""); //TODO
-                                                 }
-                                                 */
                                             }
                                         }
                                         else if (selectedColorType == "Expression")
@@ -966,9 +895,10 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
                                 if (samplerActionAction)
                                 {
-                                    samplerActionAction->setHtmlViewGeneratorFunction([this](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
-                                        QString clusterDatasetId = _speciesNamesDataset.getCurrentDataset().getDatasetId();
-                                        return generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
+                                    samplerActionAction->setHtmlViewGeneratorFunction([owner = QPointer<SettingsAction>(this)](const ViewPluginSamplerAction::SampleContext& toolTipContext) -> QString {
+                                        if (!owner) return {};
+                                        QString clusterDatasetId = owner->_speciesNamesDataset.getCurrentDataset().getDatasetId();
+                                        return owner->generateTooltip(toolTipContext, clusterDatasetId, true, "GlobalPointIndices");
                                         });
                                 }
                             }
@@ -1221,17 +1151,18 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     connect(&_reverseSearchTraitSelectionString, &StringAction::stringChanged, this, updateReverseSearchTraitSelectionString);
 
-    const auto updateTopSelectedHierarchyStatus = [this]() -> void {
-
-
-
-        };
+    const auto updateTopSelectedHierarchyStatus = [this]() {
+        if (!mv::projects().isOpeningProject() && !_updateWorkflowRunning)
+            _statusColorAction.setString("M");
+    };
     connect(&_topSelectedHierarchyStatus, &StringAction::stringChanged, this, updateTopSelectedHierarchyStatus);
 
-    const auto updateApplyLogTransformation = [this]() -> void {
-        _statusColorAction.setString("M");
-
-        };
+    const auto updateApplyLogTransformation = [this]() {
+        if (mv::projects().isOpeningProject() || updateWorkflowRunning()) return;
+        auto* table = getGeneTableView();
+        if (table && table->currentIndex().isValid())
+            _XSCGeneDetectPlugin.refreshGeneColorMapping(table->currentIndex());
+    };
     connect(&_applyLogTransformation, &ToggleAction::toggled, this, updateApplyLogTransformation);
     const auto updateMapForHierarchyItemsChangeMethodStopForProjectLoadBlocker = [this]() -> void {
         // Project/workspace restoration may restore this internal blocker.
@@ -1461,6 +1392,9 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     debounceTimer->setInterval(500); // 500 milliseconds wait time
 
     const auto debouncelambda = [this]() -> void { // Capture debounceTimer by 
+        if (mv::projects().isOpeningProject() || _updateWorkflowRunning)
+            return;
+
         _statusColorAction.setString("M");
         disableActions();
 
@@ -1478,7 +1412,8 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     const auto updateTopGenesSlider = [this, debounceTimer]() -> void { // Capture debounceTimer by reference
         //wait to see if any more updates are coming then call findTopNGenesPerCluster();
         // Restart the timer every time the value changes
-        debounceTimer->start();
+        if (!mv::projects().isOpeningProject())
+            debounceTimer->start();
         };
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, updateTopGenesSlider);
 

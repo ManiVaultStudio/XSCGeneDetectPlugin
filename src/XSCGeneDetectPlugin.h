@@ -55,7 +55,7 @@ public:
     /** This function is called by the core after the view plugin has been created */
     void init() override;
     void modifyListData();
-    void updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap);
+    void updateSpeciesData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap, const QString& geneLabel = {});
     void updateTreeData(QJsonObject& node, const std::map<QString, SpeciesDetailsStats>& speciesExpressionMap);
     void updatePhylogeneticTree();
     void adjustTableWidths(const QString& value);
@@ -71,6 +71,7 @@ public:
 
     /** Called when the current row of the gene table changes (gene clicked). */
     void onGeneRowChanged(const QModelIndex& current);
+    void refreshGeneColorMapping(const QModelIndex& current);
     void beginSelectionUpdate();
     void prepareExplorationForCurrentTable();
     void refreshTraitColumnVisibility();
@@ -89,6 +90,7 @@ public:
 
     // ---- species differential expression window ----
     void showSpeciesDe();                                 /** open the window (and start computing) */
+    void setSpeciesDeUpdateStatus(const QString& status);
     void refreshSpeciesDe();                              /** a new result is available */
     void refreshSpeciesDeDetail(const QString& species);  /** volcano plot and table of one species against the others */
     void refreshSpeciesDeHighlights();                    /** the selected species / gene changed: highlight them (same blue everywhere) */
@@ -124,7 +126,9 @@ public: // Serialization
 protected:
 
     void prepareGeneExpressionCache();
-    void applyGeneRowChanged(const QModelIndex& current, bool expressionReady = false);
+    void shutdown();
+    bool _shuttingDown = false;
+    void applyGeneRowChanged(const QModelIndex& current, bool expressionReady = false, bool recolorOnly = false);
     void prepareGeneClick(const QPersistentModelIndex& current);
     void cancelGeneExpressionCache(bool clear = true);
     std::vector<float> geneExpressionValues(Points* points, const QString& gene, int column);

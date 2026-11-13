@@ -23,6 +23,7 @@
 #include <QGuiApplication>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <QThreadPool>
 #include <functional>
 #include <algorithm>    
@@ -445,6 +446,7 @@ public: // Action getters
     void setTraitAnalysisActive(bool active);
     void requestTraitForSelectedGene();
     void cancelExplorationAnalysis();
+    void shutdownBackgroundWork();
     bool updateWorkflowRunning() const { return _updateWorkflowRunning; }
     /** Recompute changed inputs only while its analysis window is open. */
     void requestSpeciesDifferentialExpression();
@@ -537,8 +539,7 @@ public: // Action getters
     void computeGeneMeanExpressionMap();
     void precomputeTreesFromHierarchy();
     //void computeGeneMeanExpressionMapExperimental();
-    void populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames);
-    void populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames);
+    void populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames, bool notify = true);
     void populateClusterData(QString& datasetId, std::map<QString, std::pair<QColor, std::vector<int>>>& clusterMap);
     QStringList getSystemModeColor();
     double* condensedDistanceMatrix(const std::vector<float>& items);
@@ -598,7 +599,6 @@ public: // Action getters
     /** Must be called whenever the cell selection that feeds the tables changes (invalidates cached means). */
 
     /** Worker count for tasks that each need roughly \p pointsPerWorker x 256 floats of scratch memory (respects the settings). */
-    int parallelWorkers(size_t pointsPerWorker) const;
 
     /** Number of genes ranked in \p species (length of its top-N ordering); 0 when unknown. */
     int speciesGeneListLength(const QString& species) const;
@@ -691,7 +691,7 @@ private:
 
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
-    void updateButtonTriggeredCore(const mv::workflow::SharedWorkflowExecutionContext& publicationContext);
+    void updateButtonTriggeredCore(const OperationProgress::State& operationProgress, float publicationStart);
     void setModifiedTriggeredData(QVariant geneListTable);
 public: // Serialization
 
@@ -791,6 +791,12 @@ protected:
     //bool _erroredOutFlag;
     bool _meanMapComputed = false;
     bool _updateWorkflowRunning = false;
+    bool _backgroundWorkStopped = false;
+    struct UpdateWorkerState {
+        std::atomic_bool cancelled = false;
+        std::mutex scanMutex;
+    };
+    std::shared_ptr<UpdateWorkerState> _updateWorkerState;
     QString _meanMapSignature;       /** datasets the cached species means were computed for */
     OptionAction                _clusterCountSortingType;
 
@@ -875,7 +881,7 @@ protected:
     QFutureWatcher<void> _deStatisticsWatcher;
     std::unique_ptr<xsc::timing::AsyncSpan> _deReadTiming, _traitReadTiming, _deStatsTiming, _traitStatsTiming;
     QThreadPool _explorationPool;
-    OperationProgress _traitProgress, _deProgress;
+    OperationProgress _traitProgress, _deProgress, _selectionUpdateProgress;
     std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
     struct TraitStatisticsBatch;

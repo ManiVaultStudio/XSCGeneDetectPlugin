@@ -9,6 +9,7 @@ void SettingsAction::clearTemporaryDatasetHandles()
     _filteredUMAPDatasetClusters = Dataset<Points>();
     _tsneDatasetExpressionColors = Dataset<Points>();
     _geneSimilarityPoints = Dataset<Points>();
+    _selectedPointsTSNEDatasetForGeneTable = Dataset<Points>();
 
     _tsneDatasetSpeciesColors = Dataset<Clusters>();
     _tsneDatasetClusterColors = Dataset<Clusters>();
@@ -125,7 +126,28 @@ void SettingsAction::removeDatasets(const QStringList& datasetIds)
     if (datasetIds.isEmpty())
         return;
     auto allDatasets = mv::data().getAllDatasets();
-    const QSet<QString> requestedIds(datasetIds.begin(), datasetIds.end());
+    QSet<QString> requestedIds(datasetIds.begin(), datasetIds.end());
+    // A restored picker can reference a dataset that used to be temporary.
+    // Protect its hierarchy and source dependencies while it is an input.
+    for (const auto* picker : { &_mainPointsDataset, &_embeddingDataset, &_speciesNamesDataset,
+                               &_bottomClusterNamesDataset, &_middleClusterNamesDataset,
+                               &_topClusterNamesDataset, &_filteringEditTreeDataset, &_referenceTreeDataset }) {
+        auto dataset = picker->getCurrentDataset();
+        QSet<QString> visited;
+        QList<Dataset<DatasetImpl>> dependencies{ dataset };
+        while (!dependencies.isEmpty()) {
+            dataset = dependencies.takeLast();
+            if (!dataset.isValid() || visited.contains(dataset.getDatasetId()))
+                continue;
+
+            const auto id = dataset.getDatasetId();
+            visited.insert(id);
+            requestedIds.remove(id);
+            dependencies.append(dataset->getParent());
+            if (dataset->isDerivedData())
+                dependencies.append(dataset->getNextSourceDataset<DatasetImpl>());
+        }
+    }
 
     // id -> dataset pointer (NO COPYING)
     QHash<QString, Dataset<DatasetImpl>> idToDataset;
@@ -1009,23 +1031,6 @@ void SettingsAction::exportTableViewToCSVPerGene(QTableView* tableView) {
     }
 }
 
-void SettingsAction::populatePointDataConcurrently(QString datasetId, const std::vector<float>& pointVector, int numPoints, int numDimensions, std::vector<QString> dimensionNames)
-{
-    XSC_TRACE("SettingsAction::populatePointDataConcurrently");
-    (void)QtConcurrent::run([this, datasetId, pointVector, numPoints, numDimensions, dimensionNames]() {
-        auto pointDataset = mv::data().getDataset<Points>(datasetId);
-
-        if (pointDataset.isValid())
-        {
-            pointDataset->setSelectionIndices({});
-            if (!pointVector.empty() && numPoints > 0 && numDimensions > 0) {
-                pointDataset->setData(pointVector.data(), numPoints, numDimensions);
-                pointDataset->setDimensionNames(dimensionNames);
-                mv::events().notifyDatasetDataChanged(pointDataset);
-            }
-        }
-        });
-}
 void SettingsAction::enableActions()
 {
     XSC_TRACE("SettingsAction::enableActions");
@@ -1182,7 +1187,7 @@ void SettingsAction::enableDisableButtonsAutomatically()
 }
 
 
-void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames)
+void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& pointVector, int& numPoints, int& numDimensions, std::vector<QString>& dimensionNames, bool notify)
 {
     XSC_TRACE("SettingsAction::populatePointData");
     auto pointDataset = mv::data().getDataset<Points>(datasetId);
@@ -1193,7 +1198,8 @@ void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& p
         if (pointVector.size() > 0 && numPoints > 0 && numDimensions > 0) {
             pointDataset->setData(pointVector.data(), numPoints, numDimensions);
             pointDataset->setDimensionNames(dimensionNames);
-            mv::events().notifyDatasetDataChanged(pointDataset);
+            if (notify)
+                mv::events().notifyDatasetDataChanged(pointDataset);
         }
 
     }

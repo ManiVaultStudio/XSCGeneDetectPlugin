@@ -69,6 +69,15 @@ int main(int argc, char** argv) {
         ColumnTileCache::Reader ahead;
         require(cache.prefetch(2, columns, ahead), "Dense analysis read-ahead must load one encoded tile");
         require(cache.stripe(2, rows, columns, 129, ahead) == cache.stripe(2, rows, columns, 129), "Read-ahead and direct stripe decode must agree");
+        const auto fullStripe = cache.stripe(2, rows, columns, 129, ahead);
+        ahead.selectedRows = {0, rows - 1};
+        const auto selectedStripe = cache.stripe(2, rows, columns, 129, ahead);
+        const auto stride = (columns - 128) * 4;
+        require(selectedStripe.size() == fullStripe.size(), "Sparse decode must preserve physical row offsets");
+        for (const auto row : ahead.selectedRows)
+            require(std::memcmp(selectedStripe.constData() + row * stride, fullStripe.constData() + row * stride, stride) == 0,
+                "Sparse decode must preserve selected values exactly");
+        ahead.selectedRows.clear();
         for (const auto column : {0U, 65U, 129U}) {
             const auto expected = cache.column(2, rows, columns, column);
             require(!expected.isEmpty() && cache.stripe(2, rows, columns, column, ahead, true) == expected,

@@ -3,7 +3,8 @@
 		<file>SpeciesIcons/african_green_monkey.svg</file>
 		<file>SpeciesIcons/arctic_ground_squirrel.svg</file>
 		<file>SpeciesIcons/armadillo.svg</file>
-		<file>SpeciesIcons/baboon.svg</file>
+		<file>SpeciesIcons/olive_baboon.svg</file>
+		<file alias="SpeciesIcons/baboon.svg">SpeciesIcons/olive_baboon.svg</file>
 		<file>SpeciesIcons/capuchin.svg</file>
 		<file>SpeciesIcons/cat.svg</file>
 		<file>SpeciesIcons/chimp.svg</file>
@@ -13,7 +14,8 @@
 		<file>SpeciesIcons/gorilla.svg</file>
 		<file>SpeciesIcons/gray_mouse_lemur.svg</file>
 		<file>SpeciesIcons/human.svg</file>
-		<file>SpeciesIcons/macaque_nemestrina.svg</file>
+		<file>SpeciesIcons/pig_tailed_macaque.svg</file>
+		<file alias="SpeciesIcons/macaque_nemestrina.svg">SpeciesIcons/pig_tailed_macaque.svg</file>
 		<file>SpeciesIcons/marmoset.svg</file>
 		<file>SpeciesIcons/mouse.svg</file>
 		<file>SpeciesIcons/naked_mole_rat.svg</file>
