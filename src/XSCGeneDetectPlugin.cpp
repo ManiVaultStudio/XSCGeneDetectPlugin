@@ -1,3 +1,4 @@
+#include "QtTooltipKit.h"
 #include <QSaveFile>
 #include <QTextStream>
 #include "StreamedPointData.h"
@@ -2650,9 +2651,9 @@ private:
         auto* zoomOut = new QPushButton(QString::fromUtf8("\xE2\x88\x92")); // minus sign
         auto* reset = new QPushButton("Reset view");
         auto* save = new QPushButton("Save image...");
-        zoomIn->setToolTip("Zoom in (mouse wheel; Shift: x axis only, Ctrl: y axis only)");
-        zoomOut->setToolTip("Zoom out");
-        reset->setToolTip("Show everything again (double click on the plot)");
+        qttooltipkit::set(*zoomIn, QObject::tr("Zoom in"), QObject::tr("Zoom in (mouse wheel; Shift: x axis only, Ctrl: y axis only)"));
+        qttooltipkit::set(*zoomOut, QObject::tr("Zoom out"), QObject::tr("Reduce magnification to see more of the plot."));
+        qttooltipkit::set(*reset, QObject::tr("Reset view"), QObject::tr("Show everything again (double click on the plot)"));
         for (QPushButton* button : { zoomIn, zoomOut }) {
             button->setFixedWidth(28);
         }
@@ -3143,17 +3144,17 @@ public:
         bar->addWidget(new QLabel("Genes:"));
         _direction = new QComboBox();
         _direction->addItems({ "Up in the species", "Down in the species", "Either direction" });
-        _direction->setToolTip("Show genes with higher expression in the selected species, lower expression, or either direction.");
+        qttooltipkit::set(*_direction, QObject::tr("Expression direction"), QObject::tr("Show genes with higher expression in the selected species, lower expression, or either direction."));
         bar->addWidget(_direction);
         bar->addWidget(new QLabel("Top per species:"));
         _topCount = new QSpinBox();
         _topCount->setRange(1, 100);
-        _topCount->setToolTip("Maximum number of genes shown in each species result.");
+        qttooltipkit::set(*_topCount, QObject::tr("Genes per species"), QObject::tr("Maximum number of genes shown in each species result."));
         bar->addWidget(_topCount);
         bar->addWidget(new QLabel("Rank by:"));
         _rank = new QComboBox();
         _rank->addItems({ "Effect size", "Moderated t" });
-        _rank->setToolTip("Choose how significant genes are ordered: by expression difference or by difference relative to variability.");
+        qttooltipkit::set(*_rank, QObject::tr("Ranking method"), QObject::tr("Choose how significant genes are ordered: by expression difference or by difference relative to variability."));
         bar->addWidget(_rank);
         bar->addStretch(1);
         _status = new QLabel();
@@ -3187,9 +3188,9 @@ public:
         auto* save = new QPushButton("Save image...");
         zoomIn->setFixedWidth(28);
         zoomOut->setFixedWidth(28);
-        zoomIn->setToolTip("Zoom in (mouse wheel; Shift: genes only, Ctrl: species only)");
-        zoomOut->setToolTip("Zoom out");
-        reset->setToolTip("Show everything again (double click on the heatmap)");
+        qttooltipkit::set(*zoomIn, QObject::tr("Zoom in"), QObject::tr("Zoom in (mouse wheel; Shift: genes only, Ctrl: species only)"));
+        qttooltipkit::set(*zoomOut, QObject::tr("Zoom out"), QObject::tr("Reduce magnification to see more of the plot."));
+        qttooltipkit::set(*reset, QObject::tr("Reset view"), QObject::tr("Show everything again (double click on the heatmap)"));
         for (QWidget* widget : { static_cast<QWidget*>(zoomIn), static_cast<QWidget*>(zoomOut), static_cast<QWidget*>(reset), static_cast<QWidget*>(save) })
             overviewBar->addWidget(widget);
         connect(zoomIn, &QPushButton::clicked, _heatmap, [this]() { _heatmap->zoomBy(0.8); });
@@ -3234,7 +3235,7 @@ public:
         groupBar->addWidget(new QLabel("Group A:")); groupBar->addWidget(_groupA);
         groupBar->addWidget(new QLabel("Group B:")); groupBar->addWidget(_groupB);
         auto* compareHelp = new QLabel("Auto compare");
-        compareHelp->setToolTip("Results refresh shortly after either group changes.");
+        qttooltipkit::set(*compareHelp, QObject::tr("Comparison refresh"), QObject::tr("Results refresh shortly after either group changes."));
         groupBar->addWidget(compareHelp);
         groupBar->addWidget(new QLabel("Labels:"));
         auto* labels = new QComboBox();

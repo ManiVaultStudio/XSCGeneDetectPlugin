@@ -1,3 +1,4 @@
+#include "QtTooltipKit.h"
 QString SettingsAction::currentMeanMapSignature() const
 {
     XSC_TRACE("SettingsAction::currentMeanMapSignature");
@@ -320,8 +321,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _usePreComputedTSNE.setSerializationName("CSCGDV:Use Precomputed TSNE");
     _usePreComputedTSNE.setChecked(true);
     _applyLogTransformation.setChecked(true);
-    _applyLogTransformation.setToolTip(QStringLiteral(
-        "Apply log(1 + expression) to gene coloring and its legend. Analysis statistics use the source expression values."));
+    qttooltipkit::set(_applyLogTransformation, _applyLogTransformation.text(), tr("Apply log(1 + expression) to gene coloring and its legend. Analysis statistics use the source expression values."));
     _toggleScatterplotSelection.setChecked(false);
     _performGeneTableTsneAction.setChecked(false);
     _hiddenShowncolumns.setSerializationName("CSCGDV:Hidden Shown Columns");
@@ -352,108 +352,114 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _selectedRowIndex.setString("");
     _scatterplotReembedColorOption.initialize({ "Species","Cluster","Expression" }, "Species");
     _typeofTopNGenes.initialize({ "Absolute","Negative","Positive" }, "Positive");
-    _typeofTopNGenes.setToolTip("Choose which genes appear in the ranked list: largest absolute difference, most lower, or most higher in the selected species.");
+    qttooltipkit::set(_typeofTopNGenes, _typeofTopNGenes.text(), tr("Choose which genes appear in the ranked list: largest absolute difference, most lower, or most higher in the selected species."));
     _traitPoolingMode.initialize({ "Pool cells", "Equal cell-type weighting" }, "Pool cells");
 
     _traitCorrelationMethod.initialize({ "Pearson", "Spearman (rank)", "Phylogenetic contrasts" }, "Pearson");
-    _traitCorrelationMethod.setToolTip("Correlation of the mean expression with the trait across species:\n"
+    qttooltipkit::set(_traitCorrelationMethod, _traitCorrelationMethod.text(), tr("Correlation of the mean expression with the trait across species:\n"
         "Pearson: linear correlation.\n"
         "Spearman (rank): rank based, robust to outlier species and skewed expression.\n"
         "Phylogenetic contrasts: Pearson on independent contrasts of the species tree; corrects for the shared ancestry of\n"
-        "related species, which otherwise inflates correlations (uses the reference tree).");
+        "related species, which otherwise inflates correlations (uses the reference tree)."));
 
     _traitSpeciesScope.initialize({ "Contribution of selected species", "Across selected species only" }, "Contribution of selected species");
-    _traitSpeciesScope.setToolTip("What the species picked in the species explorer mean for the Trait Correlation column:\n"
+    qttooltipkit::set(_traitSpeciesScope, _traitSpeciesScope.text(), tr("What the species picked in the species explorer mean for the Trait Correlation column:\n"
         "Contribution of selected species: the trend (correlation with the trait) is always taken across ALL species. The value is how strongly\n"
         "  the picked species follow it: the mean over them of z(gene expression) x z(trait). Works for one species up to all of them; with all species picked\n"
         "  it is exactly the correlation. Not defined for phylogenetic contrasts (those behave like the second option).\n"
-        "Across selected species only: the correlation is computed across the picked species themselves (at least 3; otherwise all species are used).");
+        "Across selected species only: the correlation is computed across the picked species themselves (at least 3; otherwise all species are used)."));
 
     _traitMinCells.setMinimum(1);
     _traitMinCells.setMaximum(1000);
     _traitMinCells.setValue(10);
     _traitMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _traitMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out of the trait correlation:\n"
+    qttooltipkit::set(_traitMinCells, _traitMinCells.text(), tr("Species with fewer cells of the selected cell type(s) are left out of the trait correlation:\n"
         "the mean expression of a handful of cells is too noisy to correlate.\n"
         "Pool cells: the cells of all selected cell types of a species are counted together.\n"
         "Equal cell-type weighting: every cell type needs this many cells, otherwise it is ignored for that species\n"
-        "(a cell type with a single cell would otherwise get the same weight as one with thousands).");
+        "(a cell type with a single cell would otherwise get the same weight as one with thousands)."));
 
     _traitGeneScope.initialize({ "Listed genes (fast)", "All genes (slower)" }, "Listed genes (fast)");
-    _traitGeneScope.setToolTip("Which genes are correlated with the trait:\n"
+    qttooltipkit::set(_traitGeneScope, _traitGeneScope.text(), tr("Which genes are correlated with the trait:\n"
         "Listed genes: the top-N genes of the gene table. Only their expression is read (a few hundred genes instead of all of them),\n"
         "  which makes the analysis many times faster. Significance (FDR) is then corrected over these genes.\n"
-        "All genes: every gene of the dataset (slow: all expression values of the cell type have to be read).");
+        "All genes: every gene of the dataset (slow: all expression values of the cell type have to be read)."));
 
     _traitFdrThreshold.setMinimum(0.001f);
     _traitFdrThreshold.setMaximum(0.5f);
     _traitFdrThreshold.setNumberOfDecimals(3);
     _traitFdrThreshold.setValue(0.05f);
-    _traitFdrThreshold.setToolTip("FDR below which a trait correlation is called significant (black outline, filter, CSV flag).");
+    qttooltipkit::set(_traitFdrThreshold, _traitFdrThreshold.text(), tr("FDR below which a trait correlation is called significant (black outline, filter, CSV flag)."));
 
     _maxWorkerThreads.setMinimum(1);
     _maxWorkerThreads.setMaximum(std::max(2, QThread::idealThreadCount() * 2));
     _maxWorkerThreads.setValue(std::max(1, QThread::idealThreadCount()));
     _maxWorkerThreads.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _maxWorkerThreads.setToolTip("Maximum number of parallel workers for the expression statistics (default: all cores).");
+    qttooltipkit::set(_maxWorkerThreads, _maxWorkerThreads.text(), tr("Maximum number of parallel workers for the expression statistics (default: all cores)."));
 
     _memoryBudgetMb.setMinimum(128);
     _memoryBudgetMb.setMaximum(32768);
     _memoryBudgetMb.setValue(1024);
     _memoryBudgetMb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _memoryBudgetMb.setToolTip("Scratch memory all parallel workers may use together while reading expression data.\n"
-        "Lower it if memory is tight (fewer workers run at once), raise it on large machines.");
+    qttooltipkit::set(_memoryBudgetMb, _memoryBudgetMb.text(), tr("Scratch memory all parallel workers may use together while reading expression data.\n"
+        "Lower it if memory is tight (fewer workers run at once), raise it on large machines."));
 
     // ---- species differential expression (each species against all the others) ----
     _deTopGenes.setMinimum(1);
     _deTopGenes.setMaximum(100);
     _deTopGenes.setValue(10);
     _deTopGenes.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _deTopGenes.setToolTip("Number of top differentially expressed genes shown for every species.");
+    qttooltipkit::set(_deTopGenes, _deTopGenes.text(), tr("Number of top differentially expressed genes shown for every species."));
 
     _deDirection.initialize({ "Up in the species", "Down in the species", "Either direction" }, "Up in the species");
-    _deDirection.setToolTip("Which genes are reported for a species: higher in it than in the other species, lower, or both.");
+    qttooltipkit::set(_deDirection, _deDirection.text(), tr("Which genes are reported for a species: higher in it than in the other species, lower, or both."));
 
     _deRankBy.initialize({ "Effect size", "Moderated t" }, "Effect size");
-    _deRankBy.setToolTip("How the genes are ranked (only genes with FDR below the significance level are ranked):\n"
+    qttooltipkit::set(_deRankBy, _deRankBy.text(), tr("How the genes are ranked (only genes with FDR below the significance level are ranked):\n"
         "Effect size: the difference between the species and the mean of the other species.\n"
-        "Moderated t: that difference relative to the spread among the other species (favours consistent differences).");
+        "Moderated t: that difference relative to the spread among the other species (favours consistent differences)."));
 
     _deMinDetection.setMinimum(0);
     _deMinDetection.setMaximum(100);
     _deMinDetection.setValue(10);
     _deMinDetection.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _deMinDetection.setToolTip("A gene is only reported when it is detected (value not 0) in at least this percentage of the cells of the group that has the higher expression.");
+    qttooltipkit::set(_deMinDetection, _deMinDetection.text(), tr("A gene is only reported when it is detected (value not 0) in at least this percentage of the cells of the group that has the higher expression."));
 
     _deMaxCells.setMinimum(0);
     _deMaxCells.setMaximum(1000000);
     _deMaxCells.setValue(3000);
     _deMaxCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _deMaxCells.setToolTip("Upper limit of cells that are read per species and cell type (0 = all cells). The cells are taken evenly from the whole set.\n"
-        "A few thousand cells give practically the same means and make the first computation much faster.");
+    qttooltipkit::set(_deMaxCells, _deMaxCells.text(), tr("Upper limit of cells that are read per species and cell type (0 = all cells). The cells are taken evenly from the whole set.\n"
+        "A few thousand cells give practically the same means and make the first computation much faster."));
 
     _deMinCells.setMinimum(1);
     _deMinCells.setMaximum(100000);
     _deMinCells.setValue(20);
     _deMinCells.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
-    _deMinCells.setToolTip("Species with fewer cells of the selected cell type(s) are left out: their mean expression is too noisy.");
+    qttooltipkit::set(_deMinCells, _deMinCells.text(), tr("Species with fewer cells of the selected cell type(s) are left out: their mean expression is too noisy."));
 
     _showSpeciesDe.setIcon(mv::util::StyledIcon("chart-bar"));
     _showSpeciesDe.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
-    _showSpeciesDe.setToolTip("Open the species differential expression window: every species against all the others, for the selected cell type(s).");
+    _showSpeciesDe.setIconByName("chart-bar");
+    qttooltipkit::set(_showSpeciesDe, tr("Differential expression"), tr("Compare gene expression across species using the selected cell types."));
 
     _traitSignificantOnly.setChecked(false);
-    _traitSignificantOnly.setToolTip("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table.");
-    _traitPoolingMode.setToolTip("How the expression of several selected cell types is combined per species:\n"
+    qttooltipkit::set(_traitSignificantOnly, _traitSignificantOnly.text(), tr("List only genes whose trait correlation is significant (FDR < 0.05) in the gene table."));
+    qttooltipkit::set(_traitPoolingMode, _traitPoolingMode.text(), tr("How the expression of several selected cell types is combined per species:\n"
         "Pool cells: all cells of the selected cell types are pooled (cell types with more cells weigh more).\n"
-        "Equal cell-type weighting: every selected cell type weighs the same, regardless of its cell count.");
+        "Equal cell-type weighting: every selected cell type weighs the same, regardless of its cell count."));
     _clusterCountSortingType.initialize({ "Count","Name","Hierarchy View" }, "Count");
     _topNGenesFilter.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
 
     QIcon updateIcon = mv::util::StyledIcon("play");
     _startComputationTriggerAction.setIcon(updateIcon);
     _startComputationTriggerAction.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
-    _startComputationTriggerAction.setToolTip("Update the gene list and statistics for the current selection.");
+    _startComputationTriggerAction.setIconByName("sync-alt");
+    qttooltipkit::set(_startComputationTriggerAction, tr("Update gene rankings"), tr("Calculate expression statistics and rank genes for the current cell selection."),
+        qttooltipkit::Options{
+            320, 10, std::numeric_limits<int>::max(), {{tr("First update"), {tr("Computes species-wide baselines across the expression matrix.")}}},
+            {}, tr("Change the cell selection before updating to rank genes for a different group.")
+        });
 
     QIcon exploreIcon = mv::util::StyledIcon("wpexplorer");
     _speciesExplorerInMapTrigger.setIcon(exploreIcon);
@@ -470,16 +476,17 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
     _saveIncludeParameters.setChecked(true);
     _saveIncludeParameters.setSerializationName("CSCGDV:Save Include Parameters");
-    _saveIncludeParameters.setToolTip("Write the analysis parameters (cell types, species, trait, method, ...) as lines starting with '#' on top of the CSV.\n"
-        "Read it with a comment character (pandas: comment='#', R: comment.char='#') or switch this off for a plain table.");
+    qttooltipkit::set(_saveIncludeParameters, _saveIncludeParameters.text(), tr("Write the analysis parameters (cell types, species, trait, method, ...) as lines starting with '#' on top of the CSV.\n"
+        "Read it with a comment character (pandas: comment='#', R: comment.char='#') or switch this off for a plain table."));
 
     _saveTraitMatrix.setIcon(mv::util::StyledIcon("save"));
     _saveTraitMatrix.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
-    _saveTraitMatrix.setToolTip("Save the species x genes expression matrix of the listed genes together with the trait values,\n"
-        "e.g. to repeat or extend the correlation analysis in R or Python.");
+    qttooltipkit::set(_saveTraitMatrix, _saveTraitMatrix.text(), tr("Save the species x genes expression matrix of the listed genes together with the trait values,\n"
+        "e.g. to repeat or extend the correlation analysis in R or Python."));
     _showTraitPlot.setIcon(mv::util::StyledIcon("chart-line"));
     _showTraitPlot.setDefaultWidgetFlags(TriggerAction::WidgetFlag::IconText);
-    _showTraitPlot.setToolTip("Compute trait correlations on demand for the configured gene scope, then explore the gene and species plots. Completed results are reused while the inputs stay unchanged.");
+    _showTraitPlot.setIconByName("chart-line");
+    qttooltipkit::set(_showTraitPlot, tr("Trait correlations"), tr("Calculate how mean expression varies with the selected trait across species, then explore the results."));
 
     QIcon saveSpeciesTableIcon = mv::util::StyledIcon("save");
     _saveSpeciesTable.setIcon(saveSpeciesTableIcon);
