@@ -32,16 +32,24 @@ void SettingsAction::fromVariantMap(const QVariantMap& variantMap)
     _createRowMultiSelectTree.fromParentVariantMap(variantMap);
     _listModel.fromParentVariantMap(variantMap);
     _selectedGene.fromParentVariantMap(variantMap);
-    _mainPointsDataset.fromParentVariantMap(variantMap);
-    _embeddingDataset.fromParentVariantMap(variantMap);
-    _speciesNamesDataset.fromParentVariantMap(variantMap);
-    _bottomClusterNamesDataset.fromParentVariantMap(variantMap);
-    _middleClusterNamesDataset.fromParentVariantMap(variantMap);
-    _topClusterNamesDataset.fromParentVariantMap(variantMap);
+    const auto restoreDataset = [&variantMap](mv::gui::DatasetPickerAction& picker) {
+        const auto saved = variantMap.value(picker.getSerializationName()).toMap();
+        if (saved.isEmpty())
+            return;
+        // A dataset picker saves an ID, so skip the generic option-text restore.
+        picker.mv::gui::WidgetAction::fromVariantMap(saved);
+        picker.setCurrentDataset(saved.value(QStringLiteral("Value")).toString());
+    };
+    restoreDataset(_mainPointsDataset);
+    restoreDataset(_embeddingDataset);
+    restoreDataset(_speciesNamesDataset);
+    restoreDataset(_bottomClusterNamesDataset);
+    restoreDataset(_middleClusterNamesDataset);
+    restoreDataset(_topClusterNamesDataset);
     _filteredGeneNamesVariant.fromParentVariantMap(variantMap);
     _topNGenesFilter.fromParentVariantMap(variantMap);
-    _filteringEditTreeDataset.fromParentVariantMap(variantMap);
-    _referenceTreeDataset.fromParentVariantMap(variantMap);
+    restoreDataset(_filteringEditTreeDataset);
+    restoreDataset(_referenceTreeDataset);
     _selectedRowIndex.fromParentVariantMap(variantMap);
     _performGeneTableTsneAction.fromParentVariantMap(variantMap);
     _tsnePerplexity.fromParentVariantMap(variantMap);
@@ -53,7 +61,7 @@ void SettingsAction::fromVariantMap(const QVariantMap& variantMap)
     _speciesExplorerInMap.fromParentVariantMap(variantMap);
     _topHierarchyClusterNamesFrequencyInclusionList.fromParentVariantMap(variantMap);
     _scatterplotReembedColorOption.fromParentVariantMap(variantMap);
-    _scatterplotEmbeddingPointsUMAPOption.fromParentVariantMap(variantMap);
+    restoreDataset(_scatterplotEmbeddingPointsUMAPOption);
     _selectedSpeciesVals.fromParentVariantMap(variantMap);
     _clusterOrderHierarchy.fromParentVariantMap(variantMap);
     _rightClickedCluster.fromParentVariantMap(variantMap);
