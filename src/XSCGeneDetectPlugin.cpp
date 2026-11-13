@@ -1040,6 +1040,18 @@ void XSCGeneDetectPlugin::init()
         };
 
     connect(&mv::projects(), &AbstractProjectManager::projectOpened, this, triggerInit);
+    connect(&mv::projects(), &AbstractProjectManager::projectOpened, this, [this]() {
+        // Workspace restore can reapply the dock lock. Enable closing once it finishes.
+        QTimer::singleShot(0, this, []() {
+            const auto* factory = mv::plugins().getPluginFactory("Tutorial");
+            if (!factory)
+                return;
+            for (auto* plugin : mv::plugins().getPluginsByFactory(factory)) {
+                if (auto* tutorial = dynamic_cast<mv::plugin::ViewPlugin*>(plugin))
+                    tutorial->getMayCloseAction().setChecked(true);
+            }
+        });
+    });
 
 
 
