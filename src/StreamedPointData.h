@@ -133,7 +133,7 @@ namespace PointStreamingDetail {
 
 inline std::shared_ptr<mv::pointdata::tiled::PointDataTiledStorage> tiledStorage(const Points* points)
 {
-    if (!points || points->isProxy())
+    if (!points)
         return {};
 
     const auto* backend = points->getStorageBackend();
@@ -151,7 +151,6 @@ struct HasDirectDenseAccess : std::false_type {};
 
 template <typename PointType>
 struct HasDirectDenseAccess<PointType, std::void_t<
-    decltype(std::declval<const PointType&>().isProxy()),
     decltype(std::declval<const PointType&>().isFull()),
     decltype(std::declval<const PointType&>().getStorageBackendType()),
     decltype(std::declval<const PointType&>().constVisitFromBeginToEnd(DenseVisitProbe{})),
@@ -192,7 +191,7 @@ void setNonOwningRangeView(View& view, const void* data, const std::uint64_t fir
 template <typename PointType, typename Work, std::enable_if_t<HasDirectDenseAccess<PointType>::value, int> = 0>
 bool withDensePointData(const PointType* points, Work&& work, bool allowSubset = false)
 {
-    if (points->isProxy() || (!allowSubset && !points->isFull()) ||
+    if ((!allowSubset && !points->isFull()) ||
         points->getStorageBackendType() != PointType::StorageBackendType::Dense)
         return false;
 
@@ -584,7 +583,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     // One job owns all selected cells in a tile row; it finishes one column
     // tile for those cells before moving to the next tile. This also prevents
     // different workers from repeatedly loading the same tile row.
-    const auto tiledStorage = !points->isProxy() && points->isFull() ? PointStreamingDetail::tiledStorage(points) : nullptr;
+    const auto tiledStorage = points->isFull() ? PointStreamingDetail::tiledStorage(points) : nullptr;
     if (tiledStorage) {
         if (tiledStorage->rowTileSize() == 0 || tiledStorage->columnTileSize() == 0)
             throw std::runtime_error("PointStreaming: invalid tile geometry");
@@ -1166,7 +1165,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
         [](const void*, std::uint32_t, std::uint32_t, std::uint64_t) {});
     // Sparse API reads repeatedly decompress/stage the same row-major tile
     // for each gene run. Physical tiles must use the single-pass path below.
-    const auto tiledStorage = !points->isProxy() && points->isFull() ? PointStreamingDetail::tiledStorage(points) : nullptr;
+    const auto tiledStorage = points->isFull() ? PointStreamingDetail::tiledStorage(points) : nullptr;
     const bool physicalTiles = static_cast<bool>(tiledStorage);
     if (groupedReadPath(sparseColumns, denseStorage, physicalTiles, includeDetection) == GroupedReadPath::SparseRanges)
         return aggregateSparseDisjointRows(points, rows, groupCount, std::forward<GroupAt>(groupAt), columns, threads, progress);
@@ -1399,8 +1398,7 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
     if (readDirectly)
         return values;
 
-    if (!points->isProxy()) {
-        if (const auto storage = PointStreamingDetail::tiledStorage(points); storage && (points->isFull() || PackedTileAccess::supportsSubset(storage))) {
+    if (const auto storage = PointStreamingDetail::tiledStorage(points); storage && (points->isFull() || PackedTileAccess::supportsSubset(storage))) {
             std::vector<std::pair<std::uint64_t, std::size_t>> requested;
             requested.reserve(rowIds.size());
             for (std::size_t i = 0; i < rowIds.size(); ++i) {
@@ -1449,7 +1447,6 @@ inline std::vector<float> fetchColumnValues(Points* points, int column, const Ro
                 }
             });
             return values;
-        }
     }
     const std::uint64_t columnId = static_cast<std::uint64_t>(column);
     std::size_t position = 0;

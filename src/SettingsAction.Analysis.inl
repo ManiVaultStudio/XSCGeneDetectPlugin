@@ -3154,7 +3154,7 @@ void SettingsAction::computeTraitCorrelation()
                 // Preserve the sparse-column reader for very small gene sets to avoid scanning empty columns.
                 const size_t geneSpan = requestedGenes.empty() ? 0 : static_cast<size_t>(requestedGenes.back()) + 1;
                 const auto source = datasetHandle->get();
-                const bool tiledSource = !source->isProxy() && source->isFull() && static_cast<bool>(PointStreamingDetail::tiledStorage(source));
+                const bool tiledSource = source->isFull() && static_cast<bool>(PointStreamingDetail::tiledStorage(source));
                 bool groupedRead = tiledSource || requestedGenes.size() >= 32 || requestedGenes.size() * 4 >= geneSpan;
                 if (!tiledSource && requestedGenes.size() == 1) groupedRead = false;
                 if (groupedRead) {

@@ -4580,7 +4580,7 @@ void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
                 const auto count = source.points->getNumPoints();
                 const auto cached = cache ? cache->read(source.id, job->gene, count) : GeneExpressionCache::Values();
                 if (cached) source.values = *cached;
-                if (!cached && sourceIndex > 0 && !source.points->isProxy() && !source.points->isFull()) {
+                if (!cached && sourceIndex > 0 && !source.points->isFull()) {
                     const auto& full = job->sources.front();
                     const auto storage = PointStreamingDetail::tiledStorage(source.points.get());
                     if (storage && full.points->isFull() && storage == PointStreamingDetail::tiledStorage(full.points.get()) && source.column == full.column) {
