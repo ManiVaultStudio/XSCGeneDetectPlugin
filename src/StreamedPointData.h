@@ -25,6 +25,7 @@
 #include "XSCDebug.h"
 #include "PointReadRanges.h"
 #include "PackedTileAccess.h"
+#include "ExpressionScanResources.h"
 
 #include <PointData/PointData.h>
 #include <PointData/storage/tiled/TiledPointsStorageBackend.h>
@@ -1154,8 +1155,8 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
     const std::uint64_t width = *std::max_element(columnIds.begin(), columnIds.end()) + 1;
     const std::size_t bytesPerAggregate = sizeof(double) + (includeDetection ? sizeof(std::uint64_t) : 0);
     const std::size_t stateBytes = groupCount * columns.size() * bytesPerAggregate + kTargetReadBytes;
-    const std::size_t available = budgetBytes > mappingBytes ? budgetBytes - mappingBytes : 0;
-    threads = std::max(1, std::min(threads, static_cast<int>(available / std::max<std::size_t>(1, stateBytes))));
+    const int requestedThreads = threads;
+    threads = ExpressionScanResources::workersForMemory(threads, budgetBytes, mappingBytes, stateBytes);
 
     std::vector<std::uint64_t> uniqueColumns = columnIds;
     std::sort(uniqueColumns.begin(), uniqueColumns.end());
@@ -1199,7 +1200,16 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
             }
             validateTileJobs(jobs, rows.size(), storage->rowTileSize(), storage->rows(), rowAt);
             std::vector<State> states;
-            const auto workers = std::min<std::size_t>(std::max(1, threads), jobs.size());
+            const auto tileBytes = std::min<std::uint64_t>(storage->rows(), storage->rowTileSize())
+                * std::min<std::uint64_t>(storage->columns(), storage->columnTileSize()) * storage->elementSize();
+            // Allow for the decoded tile, its encoded input, and column-cache scratch.
+            const auto tileWorkerBytes = groupCount * columns.size() * bytesPerAggregate
+                + 2 * tileBytes + 4 * ExpressionScanResources::MiB;
+            const auto tileWorkers = ExpressionScanResources::workersForMemory(requestedThreads,
+                budgetBytes, mappingBytes, tileWorkerBytes);
+            const auto workers = std::min<std::size_t>(tileWorkers, jobs.size());
+            qInfo() << "[Expression scan]" << workers << "workers for" << jobs.size() << "tile blocks, scratch budget"
+                    << budgetBytes / ExpressionScanResources::MiB << "MiB";
             for (std::size_t w = 0; w < workers; ++w) states.push_back(makeState());
             std::mutex progressMutex;
             std::size_t completed = 0;
@@ -1364,8 +1374,7 @@ inline GroupAggregates aggregateGroupedColumns(Points* points,
     const std::size_t mappingBytes=groupedIndexMemoryBytes(groups);
     const std::size_t bytesPerAggregate = sizeof(double) + (includeDetection ? sizeof(std::uint64_t) : 0);
     const std::size_t stateBytes=groups.size()*columns.size()*bytesPerAggregate+kTargetReadBytes;
-    const std::size_t available=budgetBytes>mappingBytes?budgetBytes-mappingBytes:0;
-    threads=std::max(1,std::min(threads,static_cast<int>(available/std::max<std::size_t>(1,stateBytes))));
+    threads = ExpressionScanResources::workersForMemory(threads, budgetBytes, mappingBytes, stateBytes);
     struct State { GroupAggregates result; SegmentColumns segment; };
     auto result=reduceRows(points,rows,threads,width,[&](){return State{empty,{}};},
         [&](State& state,std::size_t position,const PointDataAccessView& view,std::uint64_t row,std::uint64_t offset) {

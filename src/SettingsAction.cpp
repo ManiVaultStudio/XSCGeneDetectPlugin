@@ -351,21 +351,6 @@ namespace {
     }
 
     /**
-     * Number of worker threads that keeps the temporary expression buffers within a fixed memory budget.
-     * Each worker reading a gene chunk holds (points * kGeneChunkSize * 4 bytes), so very large cell sets must not
-     * be processed by every core at once.
-     * @param pointsPerWorker number of cells a single worker reads at a time
-     */
-    inline int memorySafeThreadCount(size_t pointsPerWorker, int budgetMegabytes = 1024, int maxThreads = 0) {
-        const double budgetBytes = static_cast<double>(std::max(64, budgetMegabytes)) * 1024.0 * 1024.0; // scratch buffers of all workers together
-        const double bytesPerWorker = static_cast<double>(PointStreaming::kTargetReadBytes) + 4.0 * 1024.0 * 1024.0; // bounded read plus reduction vectors
-        (void)pointsPerWorker;
-        const int availableThreads = maxThreads > 0 ? maxThreads : std::max(1, QThread::idealThreadCount());
-        const int budgetThreads = static_cast<int>(std::max(1.0, budgetBytes / bytesPerWorker));
-        return std::max(1, std::min(availableThreads, budgetThreads));
-    }
-
-    /**
      * Fill the trait correlation cell of the gene table: correlation (display + sorting), p-value, FDR, the other statistics
      * and a tooltip that explains how far the number can be trusted.
      */

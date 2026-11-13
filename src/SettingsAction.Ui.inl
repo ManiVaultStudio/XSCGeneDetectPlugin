@@ -1,9 +1,3 @@
-int SettingsAction::parallelWorkers(size_t pointsPerWorker) const
-{
-    XSC_TRACE("SettingsAction::parallelWorkers");
-    return memorySafeThreadCount(pointsPerWorker, _memoryBudgetMb.getValue(), _maxWorkerThreads.getValue());
-}
-
 QString SettingsAction::currentMeanMapSignature() const
 {
     XSC_TRACE("SettingsAction::currentMeanMapSignature");

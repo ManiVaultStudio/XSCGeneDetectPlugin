@@ -241,8 +241,8 @@ void SettingsAction::updateButtonTriggered()
         const auto geneCount = PointStreaming::usableGeneCount(data->dimensionNames.size(), data->points->getNumDimensions());
         data->geneColumns.resize(geneCount);
         std::iota(data->geneColumns.begin(), data->geneColumns.end(), 0);
-        data->workerLimit = std::max(1, _maxWorkerThreads.getValue());
-        data->memoryBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
+        data->workerLimit = ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue());
+        data->memoryBudgetBytes = ExpressionScanResources::memoryBudget(_memoryBudgetMb.getValue());
 
         const auto speciesClusters = species->getClusters();
         data->speciesRows.reserve(speciesClusters.size());
@@ -1358,9 +1358,9 @@ void SettingsAction::updateButtonTriggeredCore(const OperationProgress::State& o
                         using SpeciesGeneSums = std::vector<std::vector<double>>;
                         // Each thread holds one species x genes sum table; keep all of them within a fixed memory budget.
                         const std::size_t stage1TableBytes = static_cast<std::size_t>(speciesCount) * static_cast<std::size_t>(totalGeneCount) * sizeof(double);
-                        const std::size_t stage1BudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
+                        const std::size_t stage1BudgetBytes = ExpressionScanResources::memoryBudget(_memoryBudgetMb.getValue());
                         XSC_LOG("stage 1: selected cells", _selectedIndicesFromStorage.size(), "species", speciesCount, "genes", totalGeneCount);
-                        const int stage1Threads = std::max(1, std::min({ std::max(1, _maxWorkerThreads.getValue()),
+                        const int stage1Threads = std::max(1, std::min({ ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue()),
                             static_cast<int>(std::thread::hardware_concurrency()),
                             static_cast<int>(stage1BudgetBytes / (stage1TableBytes + PointStreaming::kTargetReadBytes)) }));
                         struct Stage1State {
@@ -2301,7 +2301,7 @@ void SettingsAction::computeGeneMeanExpressionMap()
                     << allGeneIndices.size() << "genes across" << groups.size() << "species";
             int lastProgressPercent = -1;
             const auto aggregated = PointStreaming::aggregateGroupedColumns(mainPointDatasetFull.get(), groups, allGeneIndices,
-                std::max(1, _maxWorkerThreads.getValue()), static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20, false,
+                ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue()), ExpressionScanResources::memoryBudget(_memoryBudgetMb.getValue()), false,
                 [&](std::size_t completed, std::size_t total) {
                     const int percent = static_cast<int>(100 * completed / total);
                     if (lastProgressPercent < 0 || percent >= lastProgressPercent + 5 || completed == total) {
@@ -3102,11 +3102,6 @@ void SettingsAction::computeTraitCorrelation()
     {
         auto missingJobs = missingEntryJobs(everySpecies);
         if (!missingJobs.empty()) {
-            size_t largestPointSet = 0;
-            for (const auto& job : missingJobs) {
-                largestPointSet = std::max(largestPointSet, std::min(job.speciesPoints->size(), job.cellTypePoints->size()));
-            }
-
             _traitJobs = std::make_shared<std::vector<TraitEntryJob>>(std::move(missingJobs));
             _traitJobDataset = mainPointsDataset;
             _traitWorkflow.beginRead();
@@ -3114,13 +3109,15 @@ void SettingsAction::computeTraitCorrelation()
             const auto jobs = _traitJobs;
             const auto cancel = _traitReadCancel = _traitWorkflow.cancellation();
             const Dataset<Points>* datasetHandle = &_traitJobDataset; // member: stays valid while the job runs
-            const int workers = parallelWorkers(largestPointSet);
-            const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
+            const int workers = ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue());
+            const std::size_t scratchBudgetBytes = ExpressionScanResources::memoryBudget(_memoryBudgetMb.getValue());
+            const int fallbackWorkers = ExpressionScanResources::workersForMemory(workers, scratchBudgetBytes, 0,
+                PointStreaming::kTargetReadBytes + 4 * ExpressionScanResources::MiB);
 
             showStatusMessage(QStringLiteral("Reading trait data"), QStringLiteral("#007bff"));
 
             _traitReadTiming = std::make_unique<xsc::timing::AsyncSpan>("trait.read.total");
-            _traitJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, scratchBudgetBytes, cancel, progress]() {
+            _traitJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, fallbackWorkers, scratchBudgetBytes, cancel, progress]() {
             XSC_TRACE("trait.read.worker");
                 progress->phase(QStringLiteral("Reading species expression means"), 0.02f);
                 std::vector<int> geneToSlot(PointStreaming::usableGeneCount(
@@ -3192,7 +3189,7 @@ void SettingsAction::computeTraitCorrelation()
                 }
                 if (!groupedRead) {
                     QThreadPool pool;
-                    pool.setMaxThreadCount(workers);
+                    pool.setMaxThreadCount(fallbackWorkers);
                     std::atomic_size_t completedJobs{0};
                     QtConcurrent::blockingMap(&pool, *jobs, [&](TraitEntryJob& job) {
                         if (*cancel) return;
@@ -3426,7 +3423,7 @@ void SettingsAction::computeTraitCorrelation()
         auto batch = std::make_shared<TraitStatisticsBatch>();
         const auto cancel = _traitWorkflow.cancellation();
         const auto selected = plan.selected;
-        const int mathWorkers = std::max(1, _maxWorkerThreads.getValue());
+        const int mathWorkers = ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue());
         _traitWorkflow.beginCompute();
         disconnect(&_traitStatisticsWatcher, nullptr, this, nullptr);
         connect(&_traitStatisticsWatcher, &QFutureWatcher<void>::finished, this, [this, batch, cancel]() {
@@ -4348,14 +4345,6 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         }
 
         if (!missing.empty()) {
-            size_t largestPointSet = 0;
-            for (const auto& job : missing) {
-                largestPointSet = std::max(largestPointSet, std::min(job.speciesPoints->size(), job.cellTypePoints->size()));
-            }
-            if (maxCells > 0) {
-                largestPointSet = std::min(largestPointSet, static_cast<size_t>(maxCells));
-            }
-
             _deJobs = std::make_shared<std::vector<DeEntryJob>>(std::move(missing));
             _deJobDataset = mainPointsDataset;
             _deWorkflow.beginRead();
@@ -4363,8 +4352,10 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             const auto jobs = _deJobs;
             const auto cancel = _deReadCancel = _deWorkflow.cancellation();
             const Dataset<Points>* datasetHandle = &_deJobDataset;
-            const int workers = parallelWorkers(largestPointSet);
-            const std::size_t scratchBudgetBytes = static_cast<std::size_t>(std::max(64, _memoryBudgetMb.getValue())) << 20;
+            const int workers = ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue());
+            const std::size_t scratchBudgetBytes = ExpressionScanResources::memoryBudget(_memoryBudgetMb.getValue());
+            const int fallbackWorkers = ExpressionScanResources::workersForMemory(workers, scratchBudgetBytes, 0,
+                PointStreaming::kTargetReadBytes + 4 * ExpressionScanResources::MiB);
             std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(geneCount, mainPointsDataset->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
@@ -4373,7 +4364,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             // Build each species/cell-type row group once, then stream their union together.
             // Separate jobs reread/decompress the same matrix tiles for every pair.
             _deReadTiming = std::make_unique<xsc::timing::AsyncSpan>("de.read.total");
-            _deJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, maxCells, geneCount, allGeneIndices, scratchBudgetBytes, cancel, progress]() {
+            _deJobWatcher.setFuture(QtConcurrent::run(&_explorationPool, [this, jobs, datasetHandle, workers, fallbackWorkers, maxCells, geneCount, allGeneIndices, scratchBudgetBytes, cancel, progress]() {
             XSC_TRACE("de.read.worker");
                 progress->phase(QStringLiteral("Reading differential expression means"), 0.02f);
                 std::vector<std::vector<std::uint64_t>> groupedPoints;
@@ -4432,7 +4423,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                     groupedPoints.clear();
                     groupedPoints.shrink_to_fit();
                     QThreadPool pool;
-                    pool.setMaxThreadCount(workers);
+                    pool.setMaxThreadCount(fallbackWorkers);
                     std::vector<size_t> jobIndices(jobs->size());
                     std::iota(jobIndices.begin(), jobIndices.end(), size_t(0));
                     QtConcurrent::blockingMap(&pool, jobIndices, [&](size_t& jobIndex) {
@@ -4626,7 +4617,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         _deStatsTiming = std::make_unique<xsc::timing::AsyncSpan>("de.statistics.total");
         _deStatisticsWatcher.setFuture(QtConcurrent::run(&_explorationPool, [batch, cancel, statisticsSnapshot, state, speciesCount,
             geneNames, cellTypes, ordered, direction, rank, topCount, minDetection, level, maxCells, minCells,
-            equalWeighting, overviewKey, progress, workerLimit = std::max(1, _maxWorkerThreads.getValue())]() {
+            equalWeighting, overviewKey, progress, workerLimit = ExpressionScanResources::cpuLimit(_maxWorkerThreads.getValue())]() {
             XSC_TRACE("de.statistics.worker");
             progress->phase(QStringLiteral("Building differential expression overview"), 0.90f);
             if (*cancel) return;

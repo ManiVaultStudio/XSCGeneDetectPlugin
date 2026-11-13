@@ -1452,15 +1452,6 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
             auto speciesDataId = _settingsAction.getFilteredUMAPDatasetPoints().getDatasetId();
             const bool geometryChanged = !reuseGeometry;
             const auto scatterplotViewFactory = mv::plugins().getPluginFactory("Scatterplot View");
-            if (geometryChanged && scatterplotViewFactory) {
-                for (auto* plot : mv::plugins().getPluginsByFactory(scatterplotViewFactory)) {
-                    if (plot->getGuiName() != "Scatterplot Embedding View")
-                        continue;
-                    // Dataset setters can synchronously refresh the renderer while row counts change.
-                    if (auto* colorBy = plot->findChildByPath<OptionAction>("Settings/Coloring/Color by"))
-                        colorBy->setCurrentIndex(0);
-                }
-            }
             if (geometryChanged) {
                 std::vector<float> resultContainerSpeciesUMAP(selectedSpeciesIndices.size() * numDimensions);
                 if (_embeddingCoordinates && _embeddingCoordinatesId == umapPointsDataset->getId() &&
@@ -1556,8 +1547,9 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                             const auto positions = _settingsAction.getFilteredUMAPDatasetPoints();
                             const auto colors = _settingsAction.getFilteredUMAPDatasetColors();
                             pointDatasetPickerAction->setCurrentDataset(positions);
-                            if (pointDatasetPickerAction->getCurrentDatasetId() != positions->getId() ||
-                                positions->getNumPoints() != colors->getNumPoints())
+                            if (pointDatasetPickerAction->getCurrentDatasetId() != positions->getId())
+                                pointDatasetPickerAction->datasetPicked(positions);
+                            if (positions->getNumPoints() != colors->getNumPoints())
                                 continue;
 
                             colorDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(plugin->findChildByPath("Settings/Datasets/Color"));
@@ -1570,9 +1562,7 @@ bool XSCGeneDetectPlugin::showGeneInSpeciesEmbedding(const QString& gene, const 
                                     colorSpace->setCurrentText("Scalar (1D)");
                                 const bool alreadyPicked = colorDatasetPickerAction->getCurrentDatasetId() == colors->getId();
                                 colorDatasetPickerAction->setCurrentDataset(colors);
-                                if (colorDatasetPickerAction->getCurrentDatasetId() != colors->getId())
-                                    continue;
-                                if (alreadyPicked)
+                                if (alreadyPicked || colorDatasetPickerAction->getCurrentDatasetId() != colors->getId())
                                     colorDatasetPickerAction->datasetPicked(colors);
                                 auto* scatterMap = dynamic_cast<ColorMap1DAction*>(plugin->findChildByPath("Settings/Coloring/1D Color map"));
                                 auto legendViewFactory = mv::plugins().getPluginFactory("ChartLegend View");
@@ -4685,16 +4675,6 @@ void XSCGeneDetectPlugin::prepareGeneClick(const QPersistentModelIndex& current)
     job->serial = _geneRequests.current();
     job->row = current;
     job->progress = _geneColorProgress.begin(this, QStringLiteral("Color gene: %1").arg(gene));
-    // Do not display the previous gene's expression under the new gene's
-    // selection while its cold read is running. Geometry stays in place.
-    for (const auto& colors : { _settingsAction.getTsneDatasetExpressionColors(), _settingsAction.getFilteredUMAPDatasetColors() }) {
-        if (!colors.isValid() || colors->getNumPoints() == 0) continue;
-        std::vector<float> neutral(colors->getNumPoints(), 0.0f);
-        QString id = colors->getId();
-        int count = static_cast<int>(neutral.size()), dimensions = 1;
-        std::vector<QString> names{QStringLiteral("Preparing %1").arg(gene)};
-        _settingsAction.populatePointData(id, neutral, count, dimensions, names);
-    }
     const auto mainPicker = _settingsAction.getMainPointsDataset().getCurrentDataset();
     const auto main = mainPicker.isValid() ? mv::data().getDataset<Points>(mainPicker.getDatasetId()) : mv::Dataset<Points>();
     const auto selected = _settingsAction.getSelectedPointsDataset();
@@ -4921,7 +4901,6 @@ void XSCGeneDetectPlugin::applyGeneRowChanged(const QModelIndex& current, bool e
                     std::vector<QString> columnGeneEmbd = { gene };
                     //
                     _settingsAction.populatePointData(datasetIdEmb, resultContainerColorPoints, rowSizeEmbd, columnSizeEmbd, columnGeneEmbd);
-
                 }
             }
 

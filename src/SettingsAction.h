@@ -599,7 +599,6 @@ public: // Action getters
     /** Must be called whenever the cell selection that feeds the tables changes (invalidates cached means). */
 
     /** Worker count for tasks that each need roughly \p pointsPerWorker x 256 floats of scratch memory (respects the settings). */
-    int parallelWorkers(size_t pointsPerWorker) const;
 
     /** Number of genes ranked in \p species (length of its top-N ordering); 0 when unknown. */
     int speciesGeneListLength(const QString& species) const;
