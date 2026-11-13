@@ -570,6 +570,17 @@ void configureEmbeddingScatterplot(mv::plugin::Plugin& scatterplot)
     if (notify)
         notify->setChecked(false);
 
+    auto* selectionColor = scatterplot.findChildByPath<ColorAction>("Settings/Selection/Point Selection/Color");
+    if (!selectionColor)
+        selectionColor = scatterplot.findChildByPath<ColorAction>("Settings/Selection/Point Selection/Overlay color");
+    if (selectionColor) {
+        const QColor selectionBlue(53, 126, 199);
+        if (selectionColor->getColor() == selectionBlue)
+            selectionColor->colorChanged(selectionBlue); // Refresh after the renderer resets its outline.
+        else
+            selectionColor->setColor(selectionBlue);
+    }
+
     if (auto* halo = scatterplot.findChildByPath<ToggleAction>("Settings/Selection/Halo"))
         halo->setChecked(true);
 }
