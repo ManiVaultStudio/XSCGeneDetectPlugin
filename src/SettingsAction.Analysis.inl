@@ -305,7 +305,7 @@ void SettingsAction::updateButtonTriggered()
         }
 
         qInfo() << "Computing gene mean expression map";
-        progress->phase(QStringLiteral("Reading expression tiles for species baselines"), selectionScanStart);
+        progress->phase(QStringLiteral("Calculating species baselines"), selectionScanStart);
         QElapsedTimer scanTimer;
         scanTimer.start();
         qInfo() << "[Baseline] scanning" << data->points->getNumPoints() << "cells," << data->geneColumns.size()
@@ -397,7 +397,7 @@ void SettingsAction::updateButtonTriggered()
             qInfo() << "[Update] selected gene read: tile order, geometry" << storage->rowTileSize() << "rows x" << storage->columnTileSize() << "columns";
 
         std::atomic<int> lastProgressPercent { -1 };
-        progress->phase(QStringLiteral("Reading expression tiles for selected gene means"), selectionScanStart);
+        progress->phase(QStringLiteral("Calculating selected-cell means"), selectionScanStart);
         const auto stage1 = PointStreaming::reduceRows(data->points.get(), data->selectedRows, stage1Threads, static_cast<std::uint64_t>(totalGeneCount),
             [speciesCount, totalGeneCount]() {
                 Stage1State state;
@@ -4359,7 +4359,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
             std::vector<int> allGeneIndices(PointStreaming::usableGeneCount(geneCount, mainPointsDataset->getNumDimensions()));
             std::iota(allGeneIndices.begin(), allGeneIndices.end(), 0);
 
-            showStatusMessage(QStringLiteral("Reading DE data"), QStringLiteral("#007bff"));
+            showStatusMessage(QStringLiteral("Reading expression for species comparison"), QStringLiteral("#007bff"));
 
             // Build each species/cell-type row group once, then stream their union together.
             // Separate jobs reread/decompress the same matrix tiles for every pair.
@@ -4448,7 +4448,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
                             });
                     });
                 }
-                QMetaObject::invokeMethod(this, [this, cancel]() { if (*cancel) return; showStatusMessage(QStringLiteral("DE data ready"), QStringLiteral("#007bff")); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(this, [this, cancel]() { if (*cancel) return; showStatusMessage(QStringLiteral("Expression data loaded"), QStringLiteral("#007bff")); }, Qt::QueuedConnection);
             }));
             return; // continues in onSpeciesDeJobsFinished()
         }
@@ -4741,7 +4741,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
     _deState = std::move(state);
     _deResult = _deOverview->result;
     _dePublishedKey = overviewKey;
-    showStatusMessage(QString("DE ready: %1 species, %2 genes").arg(speciesCount).arg(_deResult.heatmapGenes.size()), QStringLiteral("#28a745"));
+    showStatusMessage(QString("Comparison ready: %1 species, %2 genes").arg(speciesCount).arg(_deResult.heatmapGenes.size()), QStringLiteral("#28a745"));
     if (_speciesDeFinished) {
         _speciesDeFinished();
     }

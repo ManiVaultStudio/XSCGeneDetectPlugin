@@ -185,7 +185,7 @@ class XSCGeneDetectPluginFactory : public ViewPluginFactory
 public:
 
     /** Default constructor */
-    XSCGeneDetectPluginFactory() {}
+    XSCGeneDetectPluginFactory() { setIconByName("chart-bar"); }
 
     /** Destructor */
     ~XSCGeneDetectPluginFactory() override {}

@@ -2433,8 +2433,7 @@ public:
         speciesLayout->addWidget(_speciesInfo);
         _tabs->addTab(speciesPage, "Expression vs trait");
         _tabs->setTabToolTip(_tabs->indexOf(speciesPage),
-            "Each dot is a species. The axes compare its trait value with the selected gene's mean expression. "
-            "The line summarizes the trend; use this view to see whether expression tends to rise or fall with the trait.");
+            qttooltipkit::markup(tr("Species trend"), tr("Each dot is a species. The axes show trait value and mean expression.\nThe line summarizes the overall trend."), {}));
 
         // hover <-> table
         _speciesPlot->setDetailProvider([this](const Point& point) {
@@ -2463,8 +2462,7 @@ public:
         volcanoLayout->addWidget(_volcanoInfo);
         _tabs->addTab(volcanoPage, "Volcano (all analysed genes)");
         _tabs->setTabToolTip(_tabs->indexOf(volcanoPage),
-            "Each dot is an analysed gene. Horizontal position shows its trait correlation; higher dots have stronger statistical evidence after FDR correction. "
-            "Use this view to find genes with the clearest trait relationships.");
+            qttooltipkit::markup(tr("Trait evidence"), tr("Each dot is a gene. Horizontal position shows trait correlation.\nHigher points have stronger evidence after false discovery rate correction."), {}));
         wireGenePlot(_volcanoPlot);
 
         // ---- tab 3: conservation vs trait ----
@@ -2479,8 +2477,7 @@ public:
         conservationLayout->addWidget(_conservationInfo);
         _tabs->addTab(conservationPage, "Conservation vs trait");
         _tabs->setTabToolTip(_tabs->indexOf(conservationPage),
-            "Each dot is a gene. The axes compare how consistently it appears across species with its trait correlation. "
-            "Use this view to spot trait-linked genes whose signal is also shared across species.");
+            qttooltipkit::markup(tr("Conservation and trait"), tr("Compare how often each gene appears across species with its trait correlation."), {}));
         wireGenePlot(_conservationPlot);
 
         auto* rankingPage = new QWidget(_tabs);
@@ -2492,7 +2489,7 @@ public:
         rankingLayout->addWidget(_rankingPlot, 1);
         _tabs->addTab(rankingPage, "Ranked correlations");
         _tabs->setTabToolTip(_tabs->indexOf(rankingPage),
-            "Genes ranked from the most negative to the most positive correlation. Click a point to select its gene.");
+            qttooltipkit::markup(tr("Correlation ranking"), tr("Genes run from most negative to most positive correlation.\nClick a point to select its gene."), {}));
         wireGenePlot(_rankingPlot);
 
         connect(_tabs, &QTabWidget::currentChanged, this, [this](int) {
@@ -3219,10 +3216,10 @@ public:
         _info->setWordWrap(true);
         _info->setTextInteractionFlags(Qt::TextSelectableByMouse);
         overviewLayout->addWidget(_info);
-        _tabs->addTab(overviewPage, "Overview (every species against the others)");
+        _tabs->addTab(overviewPage, "Species overview");
         _tabs->setTabToolTip(_tabs->indexOf(overviewPage),
-            "Rows are species and columns are the top differing genes. Color shows each species' mean-expression difference from the comparison species. "
-            "Use this view to compare patterns across many species at once.");
+            qttooltipkit::markup(tr("Species overview"),
+            tr("Rows show species and columns show genes. Color shows the mean expression difference compared with the other species."), {}));
 
         _heatmap->setDetailProvider([this](int row, int column) { return heatmapTooltip(row, column); });
         _heatmap->setOnCellClicked([this](int row, int column) {
@@ -3286,16 +3283,14 @@ public:
         _volcano->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
         detailPlots->addTab(_volcano, "Volcano");
         detailPlots->setTabToolTip(detailPlots->indexOf(_volcano),
-            "Each dot is a gene. Horizontal position shows the mean-expression difference between the groups; higher dots have stronger FDR evidence. "
-            "Use this view to find genes with the largest, best-supported differences.");
+            qttooltipkit::markup(tr("Expression difference"), tr("Horizontal position shows the difference in mean expression between groups.\nHigher points have stronger evidence after false discovery rate correction."), {}));
         _detectionPlot = new ZoomablePlotWidget(detailPlots);
         _detectionPlot->setShowTrendLine(false);
         _detectionPlot->setPointSize(6);
         _detectionPlot->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
         detailPlots->addTab(_detectionPlot, "Detection vs effect");
         detailPlots->setTabToolTip(detailPlots->indexOf(_detectionPlot),
-            "Each dot is a gene. Vertical position shows the percentage-point difference in cells where the gene is detected; horizontal position shows its mean-expression difference. "
-            "Use this view to tell whether a group difference involves more cells expressing the gene.");
+            qttooltipkit::markup(tr("Detection and expression"), tr("Horizontal position shows the mean expression difference. Vertical position shows the detection difference in percentage points."), {}));
         splitter->addWidget(detailPlots);
         _table = new QTableWidget(splitter);
         _table->setColumnCount(9);
@@ -3315,7 +3310,7 @@ public:
         detailLayout->addWidget(_detailInfo);
         _tabs->addTab(detailPage, "Details / species groups");
         _tabs->setTabToolTip(_tabs->indexOf(detailPage),
-            "Choose species groups to compare. The plots and table show gene-level expression effects, detection rates and statistical evidence for that comparison.");
+            qttooltipkit::markup(tr("Species group comparison"), tr("Choose two species groups to compare expression, detection, and statistical evidence."), {}));
 
         connect(labels, &QComboBox::currentIndexChanged, this, [this](int index) {
             const auto mode = index == 0 ? ZoomablePlotWidget::LabelMode::None : (index == 1 ? ZoomablePlotWidget::LabelMode::Highlighted : ZoomablePlotWidget::LabelMode::All);
@@ -3474,8 +3469,8 @@ public:
             ? QStringList{ "Gene", "Difference", "Group A", "Group A SD", "Group B", "Group B SD", "Moderated t", "FDR", "Detected in A (%)", "Detected in B (%)" }
             : QStringList{ "Gene", "Difference", "Species", "Others", "Others SD", "Moderated t", "FDR", "Detected in species (%)", "Detected in others (%)" });
         if (_useGroups) {
-            _table->horizontalHeaderItem(3)->setToolTip("Sample SD across the species-level mean expression values in Group A. This describes variation between species, not between cells; it is n/a when Group A has only one species.");
-            _table->horizontalHeaderItem(5)->setToolTip("Sample SD across the species-level mean expression values in Group B. This describes variation between species, not between cells; it is n/a when Group B has only one species.");
+            _table->horizontalHeaderItem(3)->setToolTip("Spread of species mean expression in Group A. Available for two or more species.");
+            _table->horizontalHeaderItem(5)->setToolTip("Spread of species mean expression in Group B. Available for two or more species.");
         }
         _level = significanceLevel;
         _detailInfo->setText(detail.valid
