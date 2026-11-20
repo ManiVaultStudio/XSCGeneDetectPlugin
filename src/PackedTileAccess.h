@@ -34,21 +34,26 @@ class PackedTileAccess {
         std::size_t bytes = 0;
         std::shared_ptr<Storage> columnOwner;
         std::shared_ptr<ColumnTileCache> columns;
+        std::uint64_t columnBudget = 0;
     };
     static Cache& sharedCache() { static Cache cache; return cache; }
 public:
-    static void configureColumns(const std::shared_ptr<Storage>& storage, std::size_t memoryBudget) {
+    static void configureColumns(const std::shared_ptr<Storage>& storage, std::size_t memoryBudget, std::uint64_t maxDiskBytes) {
         if (!storage || !storage->hasPackedTileSource()) return;
         auto& cache = sharedCache();
         const std::lock_guard<std::mutex> lock(cache.mutex);
-        if (cache.columnOwner == storage && cache.columns) return;
-        const auto available = QStorageInfo(EvoViewerTemp::directory().absolutePath()).bytesAvailable();
         const auto raw = storage->rows() * storage->columns() * storage->elementSize();
-        const auto disk = std::min<std::uint64_t>({raw, 6'000'000'000ULL, static_cast<std::uint64_t>(memoryBudget) * 32,
-            available > 0 ? static_cast<std::uint64_t>(available) / 3 : 0});
+        const auto budget = std::min<std::uint64_t>({raw, maxDiskBytes, static_cast<std::uint64_t>(memoryBudget) * 32});
+        if (cache.columnOwner == storage && cache.columnBudget == budget && cache.columns) return;
+        cache.columns.reset();
+        cache.columnOwner.reset();
+        if (!budget) return;
+        const auto available = QStorageInfo(EvoViewerTemp::directory().absolutePath()).bytesAvailable();
+        const auto disk = std::min<std::uint64_t>(budget, available > 0 ? static_cast<std::uint64_t>(available) / 3 : 0);
         if (!disk) return;
         cache.columns = std::make_shared<ColumnTileCache>(storage->descriptors().size(), storage->columnTileSize(), storage->elementSize(), disk);
         cache.columnOwner = storage;
+        cache.columnBudget = budget;
     }
     static void clearColumns() {
         auto& cache = sharedCache(); const std::lock_guard<std::mutex> lock(cache.mutex);

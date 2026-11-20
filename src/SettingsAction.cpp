@@ -356,7 +356,7 @@ namespace {
      */
     inline void setTraitCorrelationItemData(QStandardItem* item, double value, double p, double q, const GeneTraitExtras& extras, int sampleSize, const QString& methodNote, const QString& significanceBasis) {
         if (sampleSize == 0) {
-            item->setData(QStringLiteral("—"), Qt::DisplayRole); item->setData(QVariant(), Qt::UserRole);
+            item->setData(QStringLiteral("n/a"), Qt::DisplayRole); item->setData(QVariant(), Qt::UserRole);
             item->setData(1.0, kTraitPValueRole); item->setData(1.0, kTraitFdrRole);
             item->setData(1.0, kTraitSignificanceFdrRole); item->setData(QVariant(), kTraitStatsRole);
             const QString pending = QStringLiteral("No result for this gene. Click it to compute correlation on demand; the column appears when the selected gene is ready.");

@@ -83,6 +83,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitFdrThreshold(this, "Significance level (FDR)"),
     _maxWorkerThreads(this, "Parallel workers"),
     _memoryBudgetMb(this, "Memory budget for parallel workers (MB)"),
+    _maxCacheSizeGb(this, "Max gene-block cache size (GB)"),
     _deTopGenes(this, "Top genes per species"),
     _deDirection(this, "Direction"),
     _deRankBy(this, "Rank genes by"),
@@ -339,6 +340,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _traitFdrThreshold.setSerializationName("CSCGDV:Trait FDR Threshold");
     _maxWorkerThreads.setSerializationName("CSCGDV:Max Worker Threads");
     _memoryBudgetMb.setSerializationName("CSCGDV:Memory Budget MB");
+    _maxCacheSizeGb.setSerializationName("CSCGDV:Max Gene Block Cache GB");
     _deTopGenes.setSerializationName("CSCGDV:DE Top Genes");
     _deDirection.setSerializationName("CSCGDV:DE Direction");
     _deRankBy.setSerializationName("CSCGDV:DE Rank By");
@@ -379,7 +381,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         "Equal cell-type weighting: every cell type needs this many cells, otherwise it is ignored for that species\n"
         "(a cell type with a single cell would otherwise get the same weight as one with thousands)."));
 
-    _traitGeneScope.initialize({ "Listed genes (fast)", "All genes (slower)" }, "Listed genes (fast)");
+    _traitGeneScope.initialize({ "Listed genes (fast)", "All genes (slower)" }, "All genes (slower)");
     qttooltipkit::set(_traitGeneScope, _traitGeneScope.text(), tr("Which genes are correlated with the trait:\n"
         "Listed genes: the top-N genes of the gene table. Only their expression is read (a few hundred genes instead of all of them),\n"
         "  which makes the analysis many times faster. Significance (FDR) is then corrected over these genes.\n"
@@ -403,6 +405,14 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _memoryBudgetMb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
     qttooltipkit::set(_memoryBudgetMb, _memoryBudgetMb.text(), tr("Scratch memory all parallel workers may use together while reading expression data.\n"
         "Lower it if memory is tight (fewer workers run at once), raise it on large machines."));
+
+    _maxCacheSizeGb.setMinimum(0);
+    _maxCacheSizeGb.setMaximum(1024);
+    _maxCacheSizeGb.setValue(6);
+    _maxCacheSizeGb.setDefaultWidgetFlags(IntegralAction::WidgetFlag::SpinBox);
+    qttooltipkit::set(_maxCacheSizeGb, _maxCacheSizeGb.text(), tr("Maximum disk space for the gene-block cache. "
+        "The actual limit also depends on the dataset size, memory budget and free disk space. "
+        "Set to 0 to disable the gene-block cache. Changes apply when the cache is next prepared."));
 
     // ---- species differential expression (each species against all the others) ----
     _deTopGenes.setMinimum(1);

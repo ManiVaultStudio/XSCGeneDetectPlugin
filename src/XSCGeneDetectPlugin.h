@@ -134,6 +134,7 @@ protected:
     std::vector<float> geneExpressionValues(Points* points, const QString& gene, int column);
     std::shared_ptr<GeneExpressionCache> _geneExpressionCache;
     QString _geneCacheSignature;
+    bool _geneCacheMemoryOnly = false;
     OperationProgress _geneColorProgress;
     mv::EventListener _geneExpressionListener;
     struct GeneClickJob;

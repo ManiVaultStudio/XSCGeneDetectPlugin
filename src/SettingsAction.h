@@ -281,6 +281,18 @@ struct SpeciesDeDetail {
     QVector<int> top;                        /** indices of the top genes, best first */
 };
 
+struct SpeciesDePlotData {
+    struct Row {
+        QString species;
+        const std::vector<float>* mean;
+        const std::vector<float>* detection;
+        const std::vector<float>* difference;
+        const std::vector<float>* fdr;
+    };
+    const std::vector<QString>* genes = nullptr;
+    std::vector<Row> rows;
+};
+
 /** Small formulas shared by the tables, tooltips and exports. */
 namespace GeneStats {
 
@@ -328,8 +340,18 @@ struct TraitMatrix {
     std::vector<int> cells;                             /** cells per species that entered the mean (of the selected cell types) */
     std::unordered_map<QString, size_t> geneIndex;      /** gene name -> column of \p expression */
     QString traitName;
+    QString methodName;
+    QJsonObject referenceTree;
     bool empty() const { return species.empty(); }
 };
+
+struct TraitFocus {
+    struct Point { QString species; double trait; double expression; };
+    QString gene, traitName;
+    std::vector<Point> points;
+};
+
+enum class ChartUpdateState { Stale, Updating, Ready };
 
 /** Additional statistics of the trait correlation of one gene (NaN = not available). */
 struct GeneTraitExtras {
@@ -431,6 +453,7 @@ public: // Action getters
     DecimalAction& getTraitFdrThreshold() { return _traitFdrThreshold; }  /** FDR below which a trait correlation counts as significant */
     IntegralAction& getMaxWorkerThreads() { return _maxWorkerThreads; }    /** upper limit of parallel workers */
     IntegralAction& getMemoryBudgetMb() { return _memoryBudgetMb; }        /** scratch memory the parallel workers may use together */
+    IntegralAction& getMaxCacheSizeGb() { return _maxCacheSizeGb; }
     // ---- species differential expression (one species against the others) ----
     IntegralAction& getDeTopGenes() { return _deTopGenes; }
     OptionAction& getDeDirection() { return _deDirection; }
@@ -464,7 +487,31 @@ public: // Action getters
     TriggerAction& getSaveTraitMatrix() { return _saveTraitMatrix; }   /** save the species x genes expression matrix with the trait */
     TriggerAction& getShowTraitPlot() { return _showTraitPlot; }       /** plot the expression of the selected gene against the trait */
     const TraitMatrix& getTraitMatrix() const { return _traitMatrix; }
+    ChartUpdateState traitChartState() const
+    {
+        if (_explorationSuspended) return ChartUpdateState::Stale;
+        if (_traitWorkflow.busy() || (_traitWorkflow.pending && _deWorkflow.busy()) || (_traitCorrelationTimer && _traitCorrelationTimer->isActive()))
+            return ChartUpdateState::Updating;
+        return !_traitPublishedKey.isEmpty() && !_traitMatrix.empty() ? ChartUpdateState::Ready : ChartUpdateState::Stale;
+    }
+    ChartUpdateState speciesDeChartState() const
+    {
+        if (_explorationSuspended) return ChartUpdateState::Stale;
+        if (_deWorkflow.busy() || (_deWorkflow.pending && _traitWorkflow.busy()) || (_deTimer && _deTimer->isActive()))
+            return ChartUpdateState::Updating;
+        return !_dePublishedKey.isEmpty() && _deResult.valid ? ChartUpdateState::Ready : ChartUpdateState::Stale;
+    }
+    const TraitMatrix& getAllSpeciesTraitMatrix() const
+    {
+        return _traitMatrix.empty() || _traitAllSpeciesMatrix.empty() ? _traitMatrix : _traitAllSpeciesMatrix;
+    }
+    SpeciesDePlotData speciesDePlotData() const;
+    QJsonObject numericTraitData(QString traitName);
+    const TraitFocus& getTraitFocus() const { return _traitFocus; }
+    std::pair<std::vector<double>, size_t> traitSubsetCorrelations(
+        const std::vector<size_t>& species, const std::vector<size_t>& geneColumns) const;
     const std::unordered_map<QString, float>& getGeneTraitValues() const { return _geneTraitValuesComputed; }
+    bool traitContributionShown() const { return _traitContributionShown; }
     const std::unordered_map<QString, GeneTraitExtras>& getGeneTraitExtras() const { return _geneTraitExtras; }
     const std::unordered_map<QString, float>& getGeneTraitPValues() const { return _geneTraitPValues; }
     ToggleAction& getSaveIncludeParameters() { return _saveIncludeParameters; } /** write the analysis parameters as '#' comment lines on top of the CSV */
@@ -673,6 +720,7 @@ private:
     };
     /** The pooled per species values of the last computation (kept for the detail view). */
     struct DeState {
+        QString statisticsKey;
         std::vector<QString> species;
         std::vector<std::vector<float>> means;       // [species][gene]
         std::vector<std::vector<float>> detection;   // [species][gene]
@@ -831,6 +879,7 @@ protected:
     DecimalAction             _traitFdrThreshold;     /** significance level of the trait correlation (default 0.05) */
     IntegralAction            _maxWorkerThreads;      /** parallel workers (default: all cores) */
     IntegralAction            _memoryBudgetMb;        /** scratch memory budget of the parallel workers (default 1024 MB) */
+    IntegralAction            _maxCacheSizeGb;
     IntegralAction            _deTopGenes;            /** species differential expression: genes shown per species */
     OptionAction              _deDirection;           /** up in the species / down in the species / either */
     OptionAction              _deRankBy;              /** effect size or moderated t */
@@ -884,6 +933,8 @@ protected:
     OperationProgress _traitProgress, _deProgress, _selectionUpdateProgress;
     std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
+    TraitFocus _traitFocus;
+    TraitMatrix _traitAllSpeciesMatrix;
     struct TraitStatisticsBatch;
     std::shared_ptr<TraitStatisticsBatch> _traitStatistics;
     QFutureWatcher<void> _traitStatisticsWatcher;

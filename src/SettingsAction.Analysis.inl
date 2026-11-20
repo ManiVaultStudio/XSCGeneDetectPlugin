@@ -2792,6 +2792,10 @@ void SettingsAction::applyClusterLabelSelectionStyles()
 void SettingsAction::invalidateTraitResults()
 {
     _traitPublishedKey.clear();
+    if (!_traitFocus.gene.isEmpty()) {
+        _traitFocus = {};
+        _XSCGeneDetectPlugin.refreshTraitPlot();
+    }
     if (_traitSampleSize == 0 && _geneTraitValuesComputed.empty()) return;
     _geneTraitValuesComputed.clear(); _geneTraitPValues.clear();
     _geneTraitFdrValues.clear(); _geneTraitExtras.clear();
@@ -2841,6 +2845,7 @@ void SettingsAction::onTraitJobsFinished()
         return;
     }
     if (failed) {
+        _traitPublishedKey.clear();
         _traitProgress.cancel();
         QString reason = QStringLiteral("The expression read did not finish.");
         try {
@@ -2856,6 +2861,43 @@ void SettingsAction::onTraitJobsFinished()
     }
 
     computeTraitCorrelation(); // all means are cached now (or the selection changed meanwhile and new ones are read)
+}
+
+QJsonObject SettingsAction::numericTraitData(QString traitName)
+{
+    QString metaOptions;
+    auto phytv = mv::plugins().getPluginFactory("XSCPhyTVu");
+    if (phytv)
+    {
+        for (auto phytvwPlugin : mv::plugins().getPluginsByFactory(phytv))
+        {
+            // Display names can change when a project is restored or a view is
+            // renamed. Use the linked reference tree to identify the view.
+            auto referencePicker = phytvwPlugin->findChildByPath<DatasetPickerAction>("XSCPhyTVuPlugin Chart/Chart Options/Reference tree");
+            if (referencePicker && referencePicker->getCurrentDataset().isValid() &&
+                _referenceTreeDataset.getCurrentDataset().isValid() &&
+                referencePicker->getCurrentDataset().getDatasetId() != _referenceTreeDataset.getCurrentDataset().getDatasetId())
+                continue;
+
+            auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
+            if (!traitDatasetPickerAction)
+                continue;
+
+            auto traitDataset = traitDatasetPickerAction->getCurrentDataset();
+            if (!traitDataset.isValid())
+                continue;
+
+            auto data = mv::data().getDataset<XSCTreeMeta>(traitDataset->getId());
+            if (data.isValid())
+            {
+                auto dataString = data->getTreeMetaData();
+                metaOptions = filterData(traitName, "Numeric", dataString);
+                if (!QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject().isEmpty())
+                    break;
+            }
+        }
+    }
+    return QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject();
 }
 
 void SettingsAction::computeTraitCorrelation()
@@ -2881,6 +2923,8 @@ void SettingsAction::computeTraitCorrelation()
         cellTypes << _selectedClusterName;
     }
     if (traitName.isEmpty() || cellTypes.isEmpty()) {
+        _traitFocus = {};
+        _XSCGeneDetectPlugin.refreshTraitPlot();
         _traitPublishedKey.clear();
         _traitProgress.cancel();
         // nothing to correlate with: do not leave the values of a previous trait in the table
@@ -2927,39 +2971,7 @@ void SettingsAction::computeTraitCorrelation()
         : _traitProgress.begin(this, QStringLiteral("Trait correlation: %1").arg(traitName));
 
     // ---- 2. Trait value per species (metadata of the Phylogenetic Tree View) ----------------------------
-    QString metaOptions;
-    auto phytv = mv::plugins().getPluginFactory("XSCPhyTVu");
-    if (phytv)
-    {
-        for (auto phytvwPlugin : mv::plugins().getPluginsByFactory(phytv))
-        {
-            // Display names can change when a project is restored or a view is
-            // renamed. Use the linked reference tree to identify the view.
-            auto referencePicker = phytvwPlugin->findChildByPath<DatasetPickerAction>("XSCPhyTVuPlugin Chart/Chart Options/Reference tree");
-            if (referencePicker && referencePicker->getCurrentDataset().isValid() &&
-                _referenceTreeDataset.getCurrentDataset().isValid() &&
-                referencePicker->getCurrentDataset().getDatasetId() != _referenceTreeDataset.getCurrentDataset().getDatasetId())
-                continue;
-
-            auto traitDatasetPickerAction = dynamic_cast<DatasetPickerAction*>(phytvwPlugin->findChildByPath("XSCPhyTVuPlugin Chart/Metadata Options/Trait dataset"));
-            if (!traitDatasetPickerAction)
-                continue;
-
-            auto traitDataset = traitDatasetPickerAction->getCurrentDataset();
-            if (!traitDataset.isValid())
-                continue;
-
-            auto data = mv::data().getDataset<XSCTreeMeta>(traitDataset->getId());
-            if (data.isValid())
-            {
-                auto dataString = data->getTreeMetaData();
-                metaOptions = filterData(traitName, "Numeric", dataString);
-                if (!QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject().isEmpty())
-                    break;
-            }
-        }
-    }
-    const QJsonObject traitObject = QJsonDocument::fromJson(metaOptions.toUtf8()).object()["data"].toObject();
+    const auto traitObject = numericTraitData(traitName);
 
     // ---- 3. Cache: valid as long as the underlying datasets stay the same ----------------------------------
     Dataset<Clusters> speciesDataset = _speciesNamesDataset.getCurrentDataset();
@@ -3038,7 +3050,7 @@ void SettingsAction::computeTraitCorrelation()
         };
 
     // The (species, cell type) pairs with genes whose mean expression is not cached yet. Only those genes are read.
-    const auto missingEntryJobs = [&](const std::vector<QString>& speciesList) {
+    const auto missingEntryJobs = [&](const std::vector<QString>& speciesList, const std::vector<int>& requestedGenes) {
         std::vector<TraitEntryJob> jobs;
         for (const QString& species : speciesList) {
             for (const QString& cellType : cellTypes) {
@@ -3053,7 +3065,7 @@ void SettingsAction::computeTraitCorrelation()
                     if (cached->second.cellCount == 0) {
                         continue; // no cells of this cell type in the species: nothing to read
                     }
-                    for (const int gene : geneDims) {
+                    for (const int gene : requestedGenes) {
                         if (!cached->second.known[static_cast<size_t>(gene)]) {
                             job.genes.push_back(gene);
                         }
@@ -3066,7 +3078,7 @@ void SettingsAction::computeTraitCorrelation()
                     job.entry = cached->second;
                 }
                 else {
-                    job.genes = geneDims;
+                    job.genes = requestedGenes;
                     job.entry.means.assign(usableGenes, 0.0f);
                     job.entry.known.assign(usableGenes, 0);
                 }
@@ -3100,7 +3112,35 @@ void SettingsAction::computeTraitCorrelation()
     // Reading expression data is the slow part. When pairs are missing it runs in the BACKGROUND, so the interface stays
     // responsive; the computation continues in onTraitJobsFinished() with everything cached. Only the listed genes are read.
     {
-        auto missingJobs = missingEntryJobs(everySpecies);
+        std::vector<TraitEntryJob> missingJobs;
+        const auto focus = std::find(allGeneNames.begin(), allGeneNames.begin() + usableGenes, selectedGeneName);
+        if (_traitWindowOpen && focus != allGeneNames.begin() + usableGenes) {
+            const int column = static_cast<int>(focus - allGeneNames.begin());
+            missingJobs = missingEntryJobs(everySpecies, { column });
+            if (missingJobs.empty()) {
+                TraitFocus next;
+                next.gene = selectedGeneName;
+                next.traitName = traitName;
+                for (const auto& species : everySpecies) {
+                    if (!isUsableSpecies(species)) continue;
+                    double sum = 0.0;
+                    int weight = 0;
+                    for (const auto& cellType : cellTypes) {
+                        const auto& entry = _traitCache.entries.at(entryKey(species, cellType));
+                        if (entry.cellCount <= 0 || (equalWeighting && entry.cellCount < minCells)) continue;
+                        const int partWeight = equalWeighting ? 1 : entry.cellCount;
+                        sum += static_cast<double>(entry.means[column]) * partWeight;
+                        weight += partWeight;
+                    }
+                    if (weight > 0 && std::isfinite(sum))
+                        next.points.push_back({ species, traitPerSpecies.at(species), sum / weight });
+                }
+                _traitFocus = std::move(next);
+                _XSCGeneDetectPlugin.refreshTraitPlot();
+            }
+        }
+        if (missingJobs.empty())
+            missingJobs = missingEntryJobs(everySpecies, geneDims);
         if (!missingJobs.empty()) {
             _traitJobs = std::make_shared<std::vector<TraitEntryJob>>(std::move(missingJobs));
             _traitJobDataset = mainPointsDataset;
@@ -3312,12 +3352,14 @@ void SettingsAction::computeTraitCorrelation()
     // The reference tree of the phylogenetic tree view. It is needed for the phylogenetic contrasts AND for the significance
     // of the other methods: related species are not independent, which makes plain p-values too optimistic.
     std::vector<PicNode> treeNodes;
+    QJsonObject traitReferenceTree;
     int treeRoot = 0;
     size_t speciesInTree = 0;
     const auto buildTree = [&]() {
         treeNodes.clear();
         treeRoot = 0;
         speciesInTree = 0;
+        traitReferenceTree = {};
         const auto treePicker = _referenceTreeDataset.getCurrentDataset();
         if (!treePicker.isValid()) {
             return;
@@ -3331,7 +3373,8 @@ void SettingsAction::computeTraitCorrelation()
         for (size_t i = 0; i < population.size(); ++i) {
             speciesIndex[population[i]] = static_cast<int>(i);
         }
-        treeRoot = appendPicNodes(referenceTree->getTreeData(), speciesIndex, treeNodes);
+        traitReferenceTree = referenceTree->getTreeData();
+        treeRoot = appendPicNodes(traitReferenceTree, speciesIndex, treeNodes);
 
         double totalBranchLength = 0.0;
         for (const auto& node : treeNodes) {
@@ -3434,6 +3477,7 @@ void SettingsAction::computeTraitCorrelation()
                 return;
             }
             if (!*cancel && batch->key.isEmpty()) {
+                _traitPublishedKey.clear();
                 _traitProgress.cancel();
                 showStatusMessage(QStringLiteral("Trait calculation could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
                 if (_deWorkflow.active) requestSpeciesDifferentialExpression();
@@ -3542,6 +3586,8 @@ void SettingsAction::computeTraitCorrelation()
     }
     else if (method == TraitMethod::Spearman) {
         methodName = QString("Spearman rank correlation across %1 species").arg(sampleSize);
+        if (!phyloSeparate)
+            methodName += "\nSpearman significance uses a Student t approximation.";
     }
     else {
         methodName = QString("Pearson correlation across %1 species").arg(sampleSize);
@@ -3601,8 +3647,33 @@ void SettingsAction::computeTraitCorrelation()
     }
     _traitMatrix.traitName = traitName;
     _traitMatrix.cells = cellsPerSpecies;
+    _traitAllSpeciesMatrix = {};
+    if (usable.size() != population.size()) {
+        auto& all = _traitAllSpeciesMatrix;
+        all.traitName = traitName;
+        all.species = usable;
+        for (const auto& species : usable) {
+            all.trait.push_back(traitPerSpecies.at(species));
+            std::vector<double> sums(geneCount);
+            int weight = 0;
+            for (const auto& cellType : cellTypes) {
+                const auto& entry = _traitCache.entries.at(entryKey(species, cellType));
+                if (entry.cellCount <= 0 || (equalWeighting && entry.cellCount < minCells)) continue;
+                const int partWeight = equalWeighting ? 1 : entry.cellCount;
+                for (size_t g = 0; g < geneCount; ++g)
+                    sums[g] += static_cast<double>(entry.means[geneDims[g]]) * partWeight;
+                weight += partWeight;
+            }
+            auto& row = all.expression.emplace_back();
+            row.reserve(geneCount);
+            for (const double sum : sums) row.push_back(static_cast<float>(sum / weight));
+        }
+    }
 
     const QString methodShortName = (method == TraitMethod::Phylogenetic) ? "phylogenetic contrasts" : (method == TraitMethod::Spearman ? "Spearman" : "Pearson");
+    _traitMatrix.methodName = methodShortName;
+    if (method == TraitMethod::Phylogenetic)
+        _traitMatrix.referenceTree = std::move(traitReferenceTree);
     _traitValueLabel = QString(plan.contribution ? "Trait contribution of selected species (%1)" : "Trait correlation (%1)").arg(methodShortName);
 
     publishTraitCorrelationToModel();
@@ -3611,6 +3682,65 @@ void SettingsAction::computeTraitCorrelation()
         QStringLiteral("#28a745"));
     _traitProgress.finish();
     if (_deWorkflow.active) requestSpeciesDifferentialExpression();
+}
+
+std::pair<std::vector<double>, size_t> SettingsAction::traitSubsetCorrelations(
+    const std::vector<size_t>& species, const std::vector<size_t>& geneColumns) const
+{
+    const auto& matrix = _traitMatrix;
+    const bool phylogenetic = matrix.methodName == "phylogenetic contrasts";
+    const bool spearman = matrix.methodName == "Spearman";
+    std::vector<double> result(geneColumns.size(), std::numeric_limits<double>::quiet_NaN());
+    const size_t minimum = phylogenetic ? 3 : kMinSpeciesForTraitCorrelation;
+    if (species.size() < minimum) return { std::move(result), species.size() };
+
+    std::vector<double> traits;
+    std::map<QString, int> speciesIndices;
+    for (size_t i = 0; i < species.size(); ++i) {
+        traits.push_back(matrix.trait[species[i]]);
+        if (phylogenetic) speciesIndices[matrix.species[species[i]]] = static_cast<int>(i);
+    }
+    PicPlan plan;
+    std::vector<double> scratch, traitContrasts, geneContrasts;
+    if (phylogenetic) {
+        std::vector<PicNode> nodes;
+        const int root = appendPicNodes(matrix.referenceTree, speciesIndices, nodes);
+        if (root < 0 || nodes.empty()) return { std::move(result), 0 };
+        if (std::none_of(nodes.begin(), nodes.end(), [](const PicNode& node) { return node.branchLength > 0.0; }))
+            for (auto& node : nodes) node.branchLength = 1.0;
+        plan = buildPicPlan(nodes, root, std::vector<char>(species.size(), 1));
+        if (plan.speciesInPlan < minimum || plan.ops.size() < 2)
+            return { std::move(result), plan.speciesInPlan };
+        computePicContrasts(plan, traits, scratch, traitContrasts);
+    } else if (spearman) {
+        traits = averageRanks(traits);
+    }
+
+    const auto varies = [&](const std::vector<double>& values) {
+        const double* first = nullptr;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (phylogenetic && plan.leafSlots[i] < 0) continue;
+            if (!first) first = &values[i];
+            else if (values[i] != *first) return true;
+        }
+        return false;
+    };
+    const size_t used = phylogenetic ? plan.speciesInPlan : species.size();
+    if (!varies(traits)) return { std::move(result), used };
+    std::vector<double> values(species.size());
+    for (size_t g = 0; g < geneColumns.size(); ++g) {
+        for (size_t i = 0; i < species.size(); ++i)
+            values[i] = matrix.expression[species[i]][geneColumns[g]];
+        if (!varies(values)) continue;
+        if (phylogenetic) {
+            computePicContrasts(plan, values, scratch, geneContrasts);
+            result[g] = correlationThroughOrigin(geneContrasts, traitContrasts);
+        } else {
+            if (spearman) values = averageRanks(values);
+            result[g] = pearsonOfVectors(values, traits);
+        }
+    }
+    return { std::move(result), used };
 }
 
 void SettingsAction::publishTraitCorrelationToModel()
@@ -4738,6 +4868,7 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
         return;
     }
+    state.statisticsKey = statisticsKey;
     _deState = std::move(state);
     _deResult = _deOverview->result;
     _dePublishedKey = overviewKey;
@@ -4747,6 +4878,19 @@ void SettingsAction::computeSpeciesDifferentialExpression()
     }
     _deProgress.finish();
     if (_traitWorkflow.pending) { _traitWorkflow.pending = false; updateTraitReverseSearchFeature(); }
+}
+
+SpeciesDePlotData SettingsAction::speciesDePlotData() const
+{
+    SpeciesDePlotData data;
+    if (!_deStats || !_deResult.valid || _deStats->key != _deState.statisticsKey
+        || _deStats->statistics.size() != _deState.species.size())
+        return data;
+    data.genes = &_deState.geneNames;
+    for (size_t i = 0; i < _deState.species.size(); ++i)
+        data.rows.push_back({ _deState.species[i], &_deState.means[i], &_deState.detection[i],
+            &_deStats->statistics[i].delta, &_deStats->fdr[i] });
+    return data;
 }
 
 SpeciesDeDetail SettingsAction::computeSpeciesDeDetail(const QString& species)
@@ -4780,7 +4924,8 @@ SpeciesDeDetail SettingsAction::computeSpeciesDeGroups(const QStringList& groupA
     for (const auto& row : _deState.means) meanPointers.push_back(&row);
     DeSpeciesStatistics computed;
     std::vector<float> computedFdr, restDetection(geneCount, 0.0f), focusDetection(geneCount, 0.0f);
-    const bool cached = a.size() == 1 && group.size() + 1 == _deState.species.size() && _deStats;
+    const bool cached = a.size() == 1 && group.size() >= 2 && group.size() + 1 == _deState.species.size()
+        && _deStats && _deStats->key == _deState.statisticsKey;
     if (!cached) {
         computed = a.size() == 1 && group.size() >= 2 ? focusAgainstGroup(meanPointers, focus, group) : groupsAgainstGroups(meanPointers, a, group);
         computedFdr = benjaminiHochberg(computed.pValue);

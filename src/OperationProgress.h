@@ -18,7 +18,7 @@ public:
             _task = new mv::Task(parent, name, {mv::Task::GuiScope::Foreground});
             _task->setProgressMode(mv::Task::ProgressMode::Manual);
             _task->setProgressTextFormatter([](mv::Task& task) {
-                return QStringLiteral("%1 — %2%").arg(task.getProgressDescription())
+                return QStringLiteral("%1 (%2%)").arg(task.getProgressDescription())
                     .arg(static_cast<int>(task.getProgress() * 100.0f));
             });
             _timer = new QTimer(_task);

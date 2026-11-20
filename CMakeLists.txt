@@ -47,6 +47,7 @@ set(PLUGIN_SOURCES
     src/SettingsAction.cpp
     src/SettingsAction.Ui.inl
     src/SettingsAction.Analysis.inl
+    src/TraitExploration.inl
     src/SettingsAction.Data.inl
     src/SettingsAction.Tree.inl
     src/SettingsAction.Serialization.inl
