@@ -84,23 +84,22 @@ static bool significantDeEffect(float effect, float fdr, double threshold)
 void SpeciesDeDialog::updateReadingGuide()
 {
     static const QStringList tips{
-        "Inspect the outlined species–gene cell. Compare its signed expression difference with nearby rows.",
-        "Start with the highest point, which has the smallest adjusted p-value. Then check the size and direction of its expression difference.",
-        "Inspect a marked large detection shift. Compare its direction with the expression effect on the horizontal axis.",
-        "Compare the longest bar on each side. Click a bar to see all upregulated or downregulated genes behind that count.",
-        "Start with the tallest intersection bar. Follow its intersection number to the membership matrix, then click for the full gene list.",
-        "Compare the strongest positive and negative expression differences. Hover to check each gene’s FDR and comparison.",
-        "Compare dot size and color separately. A large dot means detection in many cells; color shows mean abundance.",
-        "Inspect a marked significant effect and its average expression. Compare genes at low and high average expression.",
-        "Compare the most positive and negative species effects for this gene. Check each point’s FDR before interpreting a difference.",
-        "Start with the widest marked box. Compare its middle half and median with those of other species.",
-        "Read down a gene column from low to high trait values. Inspect an outlined expression value in the context of its neighbors.",
-        "Compare the marked species at the ends of the trait range and look for a pattern across the other points."
+        "Read down one gene column to see which species have higher or lower expression relative to their own comparison groups. A value near zero means the species mean is close to the mean of the other species. Check the cell tooltip for its adjusted p-value before treating a large difference as statistically supported.",
+        "Read horizontally for the size and direction of the expression difference. Points right of zero favor Group A. Read vertically for statistical evidence, with higher points representing smaller adjusted p-values. The horizontal line marks the selected false discovery rate threshold.",
+        "Find a point far above or below zero. It marks a gene with a large change in the percentage of cells expressing it. Then check the horizontal axis. A strong detection shift with a small mean-expression difference can occur when a gene is expressed weakly in many cells.",
+        "Compare bars on the same side across species. Left counts genes with lower mean expression and right counts genes with higher mean expression. Counts depend on the false discovery rate threshold. Click a bar to see the genes behind it.",
+        "Start with the tallest bar and find the column with the same intersection number. A filled cell marks a species included in that exact set. For example, an intersection containing two species excludes genes that also passed the threshold in a third species. Click the bar to see the gene list.",
+        "Compare genes at the two ends of the ranking. Positive differences favor Group A and negative differences favor Group B. Ranking is by signed expression difference among genes that pass the adjusted p-value filter. Hover to check the adjusted p-value and group comparison.",
+        "Compare dot size and color separately. A large dot means many cells express the gene. Its color shows the mean expression, so a large dot can still have a low mean. Compare the same gene column across species to see which quantity changes.",
+        "Compare genes near and far from the horizontal zero line. Distance from zero shows the size of the difference, and its sign shows which group has the higher mean. Scan left to right to see whether the biggest differences occur at low or high average expression. Color marks results that pass the adjusted p-value threshold.",
+        "Compare species above and below zero for the same gene. Each point uses the other species as its reference, so every point has a different comparison group. The horizontal order follows the tree. Hover for the adjusted p-value behind each effect.",
+        "Compare the centers and widths of the boxes. The center is the median across tested genes, the box contains the middle half, and the whiskers extend to the smallest and largest effects. A wide box means gene effects vary within that species comparison.",
+        "Read down one gene column from lower to higher trait values. Look for a gradual color change or a change limited to a few species. Hover to check the original mean expression and trait value. The ordering helps reveal a pattern, while the cells show expression values.",
+        "Follow the points from low to high trait values and look for a consistent expression pattern. Check whether a single species drives the pattern. Point color summarizes the species-versus-rest differential expression test for that gene. The horizontal and vertical positions show the trait and mean expression."
     };
     const int mode = _navigation->currentRow();
     if (mode < 0) return;
     auto* label = mode == 0 ? _overviewGuide : mode <= 2 ? _detailGuide : _extraGuide;
-    label->setVisible(_showGuide);
     label->setText("Start here: " + tips.value(mode));
     auto* heatmap = mode == 0 ? _heatmap : _extraHeatmap;
     auto* plot = mode == 1 ? _volcano : mode == 2 ? _detectionPlot : _extraPlot;
@@ -356,7 +355,9 @@ void SpeciesDeDialog::renderExtra()
         updateReadingGuide();
         return;
     }
-    _extraGroupControls->setVisible(mode == 5 || mode == 7);
+    const bool hasGroups = mode == 5 || mode == 7;
+    _extraGroupButton->setVisible(hasGroups);
+    _extraGroupControls->setVisible(hasGroups && _extraGroupButton->isChecked());
     _extraInfo->setDataExplanation(deDataExplanation(mode));
     _extraHeatmap->setShowAllRowLabels(mode == 4 || mode == 6);
     const auto data = plotData ? plotData() : SpeciesDePlotData{};
@@ -391,7 +392,7 @@ void SpeciesDeDialog::renderExtra()
         point.id = _extraTips.size();
         point.colorFraction = color;
         point.highlighted = (!gene.isEmpty() && gene == _focusGene) || _selectedSpecies.contains(species);
-        _extraTips << text + "<br><br>" + question.toHtmlEscaped();
+        _extraTips << text;
         _extraGenes << gene;
         _extraSpecies << species;
         points.push_back(point);
@@ -409,6 +410,7 @@ void SpeciesDeDialog::renderExtra()
     };
     if (!data.genes || data.rows.empty()) {
         _extraInfo->setText("Waiting for differential-expression results.\nBiological relevance: " + question);
+        _extraPlot->setEmptyMessage("Run differential expression analysis to populate this chart.");
         _extraPlot->setData({}, {}, {});
         if (heatmap) setHeatmap({}, {}, {}, "Differential expression");
         updateReadingGuide();
@@ -599,7 +601,7 @@ void SpeciesDeDialog::renderExtra()
                     + QString("<br>Mean expression: %1<br>Detected cells: %2%").arg(number(mean), number(100 * detected))
                     + (mode == 6 ? QString() : QString("<br>%1: %2").arg(trait.toHtmlEscaped(), number(value)));
                 if (mode == 11) add(value, mean, row.species, tip, genes[g], row.species, pass(row, g) ? 0.9 : 0.3);
-                else { means.push_back(mean); fractions.push_back(detected); tips << tip + "<br><br>" + question.toHtmlEscaped(); }
+                else { means.push_back(mean); fractions.push_back(detected); tips << tip; }
             }
             expression.push_back(means);
             detection.push_back(fractions);
@@ -612,11 +614,17 @@ void SpeciesDeDialog::renderExtra()
         xTitle = trait;
         yTitle = "Mean expression";
         if (mode == 6) info = "Dot color encodes mean expression. Dot area encodes the fraction of expressing cells.";
-        else if (ordered.empty()) info = "Select a numeric trait in the Gene Identification settings. Species must have matching trait metadata.";
+        else if (ordered.empty()) info = trait.isEmpty()
+            ? "Select a numeric trait in the Gene Identification settings."
+            : "No tested species have a numeric value for this trait. Check the trait metadata.";
         else if (mode == 10) info = "Species with numeric trait values are ordered by trait. Colors represent mean expression of candidate DE genes.";
         else info = focus < genes.size() ? QString("%1 across species with numeric trait values.").arg(_focusGene) : "Select a gene in the gene table or another plot.";
     }
     _extraInfo->setText(info + "\nBiological relevance: " + question);
-    if (!heatmap || mode == 4) _extraPlot->setData(points, xTitle, yTitle);
+    if (!heatmap || mode == 4) {
+        const bool showExplanation = points.isEmpty() && (mode == 5 || mode == 7 || mode == 8 || mode == 11);
+        _extraPlot->setEmptyMessage(showExplanation ? info : QString());
+        _extraPlot->setData(points, xTitle, yTitle);
+    }
     updateReadingGuide();
 }

@@ -98,40 +98,44 @@ public:
         auto* exportData = new QPushButton("Export data", this);
         exportData->setToolTip("Save the chart explanation, analysis settings and underlying values.");
         auto* save = new QPushButton("Save image…", this);
-        auto* guideToggle = new QToolButton(this);
-        guideToggle->setText("Reading guide");
-        guideToggle->setCheckable(true);
-        guideToggle->setChecked(true);
-        guideToggle->setToolTip("Show a starting point and mark examples in amber.");
-        controls->addWidget(guideToggle);
+        auto* helpButton = new QPushButton("Chart help", this);
+        helpButton->setToolTip("Open the chart overview, data explanation, and reading guide.");
         controls->addWidget(reset);
+        controls->addWidget(helpButton);
         controls->addWidget(exportData);
         controls->addWidget(save);
         layout->addLayout(controls);
-        _description = new ChartTextLabel(ChartTextLabel::Section::Overview, this);
-        layout->addWidget(_description);
-        _relevance = new ChartTextLabel(ChartTextLabel::Section::Relevance, this);
-        layout->addWidget(_relevance);
-        _guide = new ChartTextLabel(ChartTextLabel::Section::Guide, this);
-        layout->addWidget(_guide);
-        auto* selectionHelp = new QLabel("Click to select. Ctrl-click to add or remove. Right-click to pin details.", this);
-        selectionHelp->setWordWrap(true);
-        layout->addWidget(selectionHelp);
+        _description = new ChartHelpText(this);
+        _relevance = new ChartHelpText(this);
+        _guide = new ChartHelpText(this);
+        _help = new ChartHelpDialog(this, _showGuide);
+        for (auto* text : { _description, _relevance, _guide })
+            _help->watch(text);
+        _help->updateContent = [this] {
+            if (const auto* item = _plots->currentItem())
+                _help->setContent(item->text(), *_description, *_guide, _relevance->relevanceText(),
+                    "Click to select. Ctrl-click to add or remove. Right-click to pin details.");
+        };
+        _help->onHighlightsChanged = [this](bool checked) {
+            _showGuide = checked;
+            updateReadingGuide();
+        };
+        connect(helpButton, &QPushButton::clicked, _help, &ChartHelpDialog::openHelp);
         _plot = new ZoomablePlotWidget(this);
         _plot->setWidePlot(true);
         _plot->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
         _heatmap = new HeatmapWidget(this);
-        controls->insertWidget(3, _heatmap->colorMap().createWidget(this, 0));
+        controls->insertWidget(2, _heatmap->colorMap().createWidget(this, 0));
         _plot->setColorMapImage(_heatmap->colorMap().getColorMapImage());
         connect(&_heatmap->colorMap(), &ColorMapAction::imageChanged, _plot, &ZoomablePlotWidget::setColorMapImage);
         layout->addWidget(_plot, 1);
         layout->addWidget(_heatmap, 1);
         _plot->setDetailProvider([this](const Point& point) {
-            if (point.series < 0) return tooltip(_details.value(point.id).toHtmlEscaped().replace('\n', "<br>"));
+            if (point.series < 0) return _details.value(point.id).toHtmlEscaped().replace('\n', "<br>");
             const auto& gene = _genes[point.series];
-            return tooltip(QString("<b>%1</b><br>%2 · %3: %4<br>Mean expression: %5<br>Trait correlation: %6")
+            return QString("<b>%1</b><br>%2 · %3: %4<br>Mean expression: %5<br>Trait correlation: %6")
                 .arg(gene.name.toHtmlEscaped(), _matrix->species[point.species].toHtmlEscaped(),
-                    _matrix->traitName.toHtmlEscaped(), number(_matrix->trait[point.species]), number(point.y), number(gene.correlation)));
+                    _matrix->traitName.toHtmlEscaped(), number(_matrix->trait[point.species]), number(point.y), number(gene.correlation));
         });
         _plot->setOnClick([this](int index) {
             const auto point = _plot->pointData(index);
@@ -142,12 +146,12 @@ public:
                 onSpeciesClicked(name, additive);
             }
             if (point.species < 0 && gene.isEmpty() && currentMode() == Distribution)
-                pinHoverDetails(_plot, tooltip(_details.value(point.id).toHtmlEscaped().replace('\n', "<br>")));
+                pinHoverDetails(_plot, _details.value(point.id).toHtmlEscaped().replace('\n', "<br>"));
             selectGene(gene, additive);
         });
         _heatmap->setDetailProvider([this](int row, int column) {
-            return tooltip(QString("<b>%1 · %2</b><br>Value: %3").arg(_rowLabels.value(row).toHtmlEscaped(),
-                _heatmapGenes.value(column).toHtmlEscaped(), number(_heatmap->valueAt(row, column))));
+            return QString("<b>%1 · %2</b><br>Value: %3").arg(_rowLabels.value(row).toHtmlEscaped(),
+                _heatmapGenes.value(column).toHtmlEscaped(), number(_heatmap->valueAt(row, column)));
         });
         _heatmap->setOnCellClicked([this](int row, int column) {
             const auto gene = _heatmapGenes.value(column);
@@ -180,10 +184,6 @@ public:
             else _heatmap->resetView();
         });
         connect(exportData, &QPushButton::clicked, this, [this] { exportCurrentChart(); });
-        connect(guideToggle, &QToolButton::toggled, this, [this](bool checked) {
-            _showGuide = checked;
-            updateReadingGuide();
-        });
         connect(save, &QPushButton::clicked, this, [this] {
             const auto path = QFileDialog::getSaveFileName(this, "Save trait plot", "trait_plot.png", "PNG image (*.png)");
             if (!path.isEmpty())
@@ -269,11 +269,6 @@ private:
     }
     static QString relevance(int plot);
     static QString dataExplanation(Plot mode);
-    QString tooltip(const QString& details) const
-    {
-        return details + "<br><br>" + _description->text().toHtmlEscaped()
-            + "<br><br>" + _relevance->text().toHtmlEscaped();
-    }
 
     static QString number(double value) { return std::isfinite(value) ? QString::number(value, 'g', 5) : QStringLiteral("n/a"); }
 
@@ -438,10 +433,11 @@ private:
     QStringList _checkedGenes;
     bool _updatingGeneOptions = false;
     bool _geneOptionsEdited = false;
-    ChartTextLabel* _description = nullptr;
-    ChartTextLabel* _relevance = nullptr;
-    ChartTextLabel* _guide = nullptr;
-    bool _showGuide = true;
+    ChartHelpText* _description = nullptr;
+    ChartHelpText* _relevance = nullptr;
+    ChartHelpText* _guide = nullptr;
+    ChartHelpDialog* _help = nullptr;
+    bool _showGuide = false;
     ZoomablePlotWidget* _plot = nullptr;
     HeatmapWidget* _heatmap = nullptr;
 };
@@ -583,24 +579,24 @@ void TraitPlotDialog::updateReadingGuide()
 {
     using Point = ZoomablePlotWidget::Point;
     static const QStringList tips{
-        "Compare the highlighted median and middle half at opposite ends of the trait gradient. Inspect individual genes to see what drives the spread.",
-        "Scan for a gene column that changes color from top to bottom. The outlined cell is an example to inspect.",
-        "Start with the tallest bin, then compare how much of the distribution falls on either side of zero.",
-        "Start at both ends of the ranking. The marked genes have the most positive and most negative correlations.",
-        "Compare the species at the two ends of PC1. Check whether the trait colors change across the plot.",
-        "Inspect an outlined off-diagonal pair of genes. Similar color blocks away from the diagonal suggest coordinated expression.",
-        "Start with the highlighted high-expression endpoint. Follow its gene line across species and compare it with nearby profiles.",
-        "Compare the outlined contribution with nearby species and genes. Opposite colors indicate opposite contributions.",
-        "Start with the species that has the widest middle half of gene contributions. Compare the boxes and their centers.",
-        "Inspect the gene with the widest middle half, then compare its median and whiskers with other genes.",
-        "Start with the longest signed arm. Compare the two directions and check the zero-count share in the tooltip.",
-        "Read adjacent species rows together. Compare their contribution profiles around the outlined cell.",
-        "Inspect the gene with the greatest variation. Check its mean contribution to see whether variability accompanies a consistent direction.",
-        "Compare expression at the marked low and high trait values. Check how the remaining species follow the fitted line."
+        "Compare the median and middle half of expression at opposite ends of the species order. The species are sorted by trait value but equally spaced, so horizontal gaps represent steps between species. Inspect individual dots to see which genes drive a shift in the summary.",
+        "Read down one gene column from low to high trait values. Each gene is standardized across species, so the colors show how far each species is above or below that gene’s usual expression. Compare patterns across columns to see whether genes change together along the trait gradient.",
+        "Start with the tallest bar and read its correlation interval. Bars near zero contain genes with weak associations by the selected method. Bars toward either end contain stronger positive or negative associations. The bar height counts genes and does not describe their average expression.",
+        "Inspect both ends of the ranking. Positive coefficients indicate expression tends to rise with the trait, and negative coefficients indicate it tends to fall. Check how many species contributed to the estimate before comparing rankings across selections.",
+        "Read each axis label to see how much expression variation that component captures. Nearby species have similar scores on the two displayed components. Look for a gradual change in trait color across the plot. The trait supplies the colors, while expression determines the positions.",
+        "Compare cells away from the diagonal because diagonal cells compare each gene with itself. Positive values mean two genes tend to vary together across species. Negative values mean they tend to vary in opposite directions. Gray cells indicate a correlation could not be calculated for a constant profile.",
+        "Follow one gene’s line from low to high trait values and compare it with other profiles. Each point is an observed species mean. A segment connects neighboring observations in trait order and helps trace the profile between points.",
+        "Read across a species row to see how it contributes to different gene–trait associations. A positive contribution means the standardized expression and trait values have the same sign. A negative contribution means their signs differ. For Spearman correlation the same rule applies to standardized ranks.",
+        "Compare both the width and center of each species box. A wide box means the species contributes differently across genes. A median near zero can occur alongside a wide spread, so read the center and the middle half together.",
+        "Compare the centers of the gene boxes to see which association direction is typical, then check their spread across species. The whiskers reach the observed minimum and maximum. A box spanning zero shows that the middle half includes contributions on both sides or at zero.",
+        "Compare the positive and negative bars for each gene. The two percentages can sum to less than 100 because some species contribute exactly zero. Hover to see that share. Bar lengths show how often a direction occurs across checked species, while contribution magnitude is shown in other charts.",
+        "Compare neighboring rows for similar patterns across the same columns. Clustering orders species by similarity of their gene contribution profiles. Nearby rows indicate similar profiles in this ordering, which you can inspect gene by gene in the heatmap.",
+        "Compare both axes. A gene high on the chart has widely varying contributions across species. Its horizontal position shows whether the average contribution is positive, negative, or near zero. High spread and a near-zero mean can indicate strong contributions that point in different directions.",
+        "Read the numeric trait on the horizontal axis and mean expression on the vertical axis. Compare species at both ends of the trait range, then check for departures from the dashed fitted line. A single extreme species can strongly influence the apparent trend."
     };
     const auto mode = currentMode();
     _guide->setText("Start here: " + tips.value(mode));
-    _guide->setVisible(_showGuide);
+    if (_help->isVisible()) _help->refresh();
     _plot->setReadingGuidePoints({});
     _heatmap->setReadingGuideCell({ -1, -1 });
     if (!_showGuide) return;
@@ -659,10 +655,11 @@ void TraitPlotDialog::render()
         ? ZoomablePlotWidget::LabelMode::Highlighted : ZoomablePlotWidget::LabelMode::None);
     _heatmap->setTraitLegend(mode == Coexpression ? "Pearson correlation" : mode == ExpressionHeatmap
         ? "Standardized expression" : "Species contribution");
+    _plot->setEmptyMessage({});
     if (mode == FocusScatter) {
         QVector<Point> points;
         if (_focus.isEmpty()) {
-            _description->setText("Select a gene in the gene table or another plot.");
+            _description->setText("Select a gene in the gene table or click a gene in another trait chart.");
         } else if (!_focusPlot || _focusPlot->gene != _focus) {
             _description->setText(QString("Preparing expression for %1 across all eligible species.").arg(_focus));
         } else {
@@ -678,6 +675,7 @@ void TraitPlotDialog::render()
                 : QString("%1 across all %2 eligible species. The dashed line is a descriptive linear fit.")
                     .arg(_focus).arg(points.size()));
         }
+        if (points.isEmpty()) _plot->setEmptyMessage(_description->text());
         _plot->setData(points, _focusPlot ? _focusPlot->traitName : QString(), "Mean expression");
         updateReadingGuide();
         return;

@@ -1907,6 +1907,13 @@ public:
     void setHorizontalBars(bool enabled) { _horizontalBars = enabled; }
     void setColorMapImage(const QImage& image) { _plotColorMap = image; update(); }
 
+    void setEmptyMessage(const QString& message)
+    {
+        if (_emptyMessage == message) return;
+        _emptyMessage = message;
+        update();
+    }
+
     void setData(const QVector<Point>& points, const QString& xTitle, const QString& yTitle, bool keepView = false)
     {
         XSC_TRACE("plot.setData");
@@ -2221,7 +2228,8 @@ protected:
         const QRect plot = plotRect();
         if (_points.isEmpty() || !_viewValid || _maxX <= _minX || _maxY <= _minY) {
             painter.setPen(textColor);
-            painter.drawText(rect(), Qt::AlignCenter, "No data to plot");
+            painter.drawText(rect().adjusted(24, 0, -24, 0), Qt::AlignCenter | Qt::TextWordWrap,
+                _emptyMessage.isEmpty() ? QString("No data to plot") : _emptyMessage);
             return;
         }
 
@@ -2508,6 +2516,7 @@ private:
     QSet<int> _highlightedColumns;
     QVector<ColumnSummary> _columnSummaries;
     QVector<GuideLine> _guides;
+    QString _emptyMessage;
     QString _xTitle;
     QString _yTitle;
     double _minX = -1.0, _maxX = 1.0, _minY = -1.0, _maxY = 1.0;
@@ -3162,102 +3171,134 @@ private:
  *  2. Details: one species against the others as a volcano plot (difference against significance) with its top genes in a table.
  * The selected species and the selected gene are highlighted in blue, like everywhere else in the plugin.
  */
-class ChartTextLabel : public QLabel
+class ChartHelpText : public QObject
 {
 public:
-    enum class Section { Overview, Relevance, Guide };
+    using QObject::QObject;
 
-    ChartTextLabel(Section section, QWidget* parent) : QLabel(parent), _section(section)
-    {
-        setTextFormat(Qt::RichText);
-        setWordWrap(true);
-        setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
-        connect(this, &QLabel::linkActivated, this, [this](const QString& link) {
-            if (link == "details") {
-                _expanded = !_expanded;
-                render();
-            }
-        });
-    }
-
-    void setDataExplanation(const QString& explanation)
-    {
-        if (_explanation == explanation) return;
-        _explanation = explanation;
-        _expanded = false;
-        render();
-    }
-
-    QString dataExplanation() const { return _explanation; }
-    QString descriptionText() const { return _plainText.section("\nBiological relevance: ", 0, 0); }
-    QString relevanceText() const { return _plainText.section("\nBiological relevance: ", 1); }
-
-    QString text() const { return _plainText; }
+    const QString& text() const { return _text; }
+    const QString& dataExplanation() const { return _explanation; }
+    QString descriptionText() const { return _text.section("\nBiological relevance: ", 0, 0); }
+    QString relevanceText() const { return _text.section("\nBiological relevance: ", 1); }
 
     void setText(const QString& value)
     {
-        if (_plainText == value) return;
-        _plainText = value;
-        render();
+        if (_text == value) return;
+        _text = value;
+        if (onChanged) onChanged();
     }
+
+    void setDataExplanation(const QString& value)
+    {
+        if (_explanation == value) return;
+        _explanation = value;
+        if (onChanged) onChanged();
+    }
+
+    std::function<void()> onChanged;
 
 private:
-    static QString line(const QString& label, const QString& text)
+    QString _text, _explanation;
+};
+
+class ChartHelpDialog : public QDialog
+{
+public:
+    explicit ChartHelpDialog(QWidget* parent, bool showHighlights) : QDialog(parent)
     {
-        if (text.isEmpty()) return {};
-        return "<b>" + label + "</b>&nbsp;&nbsp;" + text.toHtmlEscaped().replace('\n', "<br>");
+        setWindowTitle("Chart help");
+        auto* layout = new QVBoxLayout(this);
+        _tabs = new QTabWidget(this);
+        layout->addWidget(_tabs);
+
+        _overview = new QTextBrowser(_tabs);
+        _tabs->addTab(_overview, "Overview");
+        _data = new QTextBrowser(_tabs);
+        _tabs->addTab(_data, "Data explanation");
+
+        auto* guidePage = new QWidget(_tabs);
+        auto* guideLayout = new QVBoxLayout(guidePage);
+        _guide = new QTextBrowser(guidePage);
+        guideLayout->addWidget(_guide, 1);
+        auto* highlights = new QCheckBox("Highlight examples on the chart", guidePage);
+        highlights->setChecked(showHighlights);
+        guideLayout->addWidget(highlights);
+        _tabs->addTab(guidePage, "Reading guide");
+        connect(highlights, &QCheckBox::toggled, this, [this](bool checked) {
+            if (onHighlightsChanged) onHighlightsChanged(checked);
+        });
+
+        for (auto* browser : { _overview, _data, _guide }) {
+            browser->setFrameShape(QFrame::NoFrame);
+            browser->document()->setDocumentMargin(16);
+        }
+        auto* close = new QPushButton("Close", this);
+        layout->addWidget(close, 0, Qt::AlignRight);
+        connect(close, &QPushButton::clicked, this, &QDialog::close);
+        resize(fittingWindowSize(540, 460));
     }
 
-    void render()
+    void watch(ChartHelpText* text)
     {
-        if (_section == Section::Relevance) {
-            QLabel::setText(line("Why it matters", _plainText.section("Biological relevance: ", -1)));
-            return;
-        }
-        if (_section == Section::Guide) {
-            QString guide = _plainText.section("Start here: ", -1);
-            static const QRegularExpression observation(R"( (?:Amber marks|Most upregulated:|Most downregulated:))");
-            const auto split = observation.match(guide);
-            const QString note = split.hasMatch() ? guide.mid(split.capturedStart() + 1) : QString();
-            if (split.hasMatch()) guide.truncate(split.capturedStart());
-            QString result = line("Start here", guide);
-            if (!note.isEmpty()) result += "<br>" + line("What stands out", note);
-            QLabel::setText(result);
-            return;
-        }
-
-        constexpr auto relevanceSeparator = "\nBiological relevance: ";
-        const auto overview = _plainText.section(relevanceSeparator, 0, 0).trimmed();
-        const auto relevance = _plainText.section(relevanceSeparator, 1);
-        if (!_explanation.isEmpty()) {
-            QString formatted = line("Description", overview);
-            formatted += _expanded ? " &nbsp;<a href='details'>Hide data explanation</a>"
-                                   : " &nbsp;<a href='details'>Show data explanation</a>";
-            if (_expanded) {
-                for (const auto& part : _explanation.split('\n'))
-                    formatted += "<br>" + line(part.section(": ", 0, 0), part.section(": ", 1));
-            }
-            if (!relevance.isEmpty()) formatted += "<br>" + line("Why it matters", relevance);
-            QLabel::setText(formatted);
-            return;
-        }
-        static const QRegularExpression boundary(R"([.!?]\s+(?=\p{Lu})|\n)");
-        const auto split = boundary.match(overview);
-        const auto summary = split.hasMatch() ? overview.left(split.capturedStart() + 1).trimmed() : overview;
-        const auto details = split.hasMatch() ? overview.mid(split.capturedEnd()).trimmed() : QString();
-        QString formatted = line("What it shows", summary);
-        if (!details.isEmpty()) {
-            formatted += _expanded ? "<br>" + line("How to read it", details) : QString();
-            formatted += _expanded ? " &nbsp;<a href='details'>Hide details</a>" : " &nbsp;<a href='details'>More details</a>";
-        }
-        if (!relevance.isEmpty()) formatted += "<br>" + line("Why it matters", relevance);
-        QLabel::setText(formatted);
+        text->onChanged = [this] { if (isVisible()) refresh(); };
     }
 
-    Section _section;
-    QString _plainText, _explanation;
-    bool _expanded = false;
+    void openHelp()
+    {
+        refresh();
+        show();
+        raise();
+        activateWindow();
+    }
+
+    void refresh()
+    {
+        if (updateContent) updateContent();
+    }
+
+    void setContent(const QString& title, const ChartHelpText& overview, const ChartHelpText& guide,
+        const QString& relevance = {}, const QString& controls = {})
+    {
+        setWindowTitle(title.isEmpty() ? QString("Chart help") : title + " — Chart help");
+        const QString heading = title.isEmpty() ? QString() : "<h2>" + title.toHtmlEscaped() + "</h2>";
+        setPage(_overview, heading + section("Description", overview.descriptionText())
+            + section("Why it matters", relevance.isEmpty() ? overview.relevanceText() : relevance));
+
+        QString data = heading;
+        for (const auto& part : overview.dataExplanation().split('\n', Qt::SkipEmptyParts))
+            data += section(part.section(": ", 0, 0), part.section(": ", 1));
+        setPage(_data, data);
+
+        QString start = guide.text().section("Start here: ", -1);
+        static const QRegularExpression observation(R"( (?:Amber marks|Most upregulated:|Most downregulated:))");
+        const auto split = observation.match(start);
+        const QString note = split.hasMatch() ? start.mid(split.capturedStart() + 1) : QString();
+        if (split.hasMatch()) start.truncate(split.capturedStart());
+        setPage(_guide, heading + section("Start here", start) + section("What stands out", note)
+            + section("Chart controls", controls));
+    }
+
+    std::function<void()> updateContent;
+    std::function<void(bool)> onHighlightsChanged;
+
+private:
+    static QString section(const QString& title, const QString& content)
+    {
+        if (content.isEmpty()) return {};
+        return "<h3 style='margin-top: 16px; margin-bottom: 5px'>" + title.toHtmlEscaped()
+            + "</h3><p style='margin-top: 0; margin-bottom: 12px'>"
+            + content.toHtmlEscaped().replace('\n', "<br>") + "</p>";
+    }
+
+    static void setPage(QTextBrowser* browser, const QString& html)
+    {
+        if (browser->property("chartHelpHtml").toString() == html) return;
+        browser->setProperty("chartHelpHtml", html);
+        browser->setHtml(html);
+    }
+
+    QTabWidget* _tabs = nullptr;
+    QTextBrowser *_overview = nullptr, *_data = nullptr, *_guide = nullptr;
 };
 
 class ChartDataReport
@@ -3482,22 +3523,16 @@ public:
     {
         setWindowTitle("Species differential expression");
         auto* layout = new QVBoxLayout(this);
+        _help = new ChartHelpDialog(this, _showGuide);
+        _help->onHighlightsChanged = [this](bool checked) {
+            _showGuide = checked;
+            updateReadingGuide();
+        };
         const auto addExport = [this](QHBoxLayout* controls) {
-            auto* guide = new QToolButton(this);
-            guide->setText("Reading guide");
-            guide->setToolTip("Show where to start reading the chart. Amber marks are descriptive examples.");
-            guide->setCheckable(true);
-            guide->setChecked(_showGuide);
-            _guideToggles.push_back(guide);
-            controls->addWidget(guide);
-            connect(guide, &QToolButton::toggled, this, [this](bool checked) {
-                _showGuide = checked;
-                for (auto* button : _guideToggles) {
-                    const QSignalBlocker blocker(button);
-                    button->setChecked(checked);
-                }
-                updateReadingGuide();
-            });
+            auto* help = new QPushButton("Chart help", this);
+            help->setToolTip("Open the chart overview, data explanation, and reading guide.");
+            controls->addWidget(help);
+            connect(help, &QPushButton::clicked, _help, &ChartHelpDialog::openHelp);
             auto* exportData = new QPushButton("Export data", this);
             exportData->setToolTip("Save a report with the chart explanation, settings and underlying values.");
             controls->addWidget(exportData);
@@ -3590,7 +3625,7 @@ public:
         overviewBar->addWidget(_heatmap->colorMap().createWidget(overviewPage, 0));
         overviewBar->addStretch(1);
         auto* reset = new QPushButton("Reset view");
-        auto* save = new QPushButton("Save image...");
+        auto* save = new QPushButton("Save image…");
         qttooltipkit::set(*reset, QObject::tr("Reset view"), QObject::tr("Show everything again (double click on the heatmap)"));
         overviewBar->addWidget(reset);
         addExport(overviewBar);
@@ -3602,10 +3637,9 @@ public:
                 _heatmap->grab().save(path);
             });
         overviewLayout->addLayout(overviewBar);
-        _info = new ChartTextLabel(ChartTextLabel::Section::Overview, overviewPage);
-        overviewLayout->addWidget(_info);
-        _overviewGuide = new ChartTextLabel(ChartTextLabel::Section::Guide, overviewPage);
-        overviewLayout->addWidget(_overviewGuide);
+        _info = new ChartHelpText(overviewPage);
+        _info->setDataExplanation(deDataExplanation(0));
+        _overviewGuide = new ChartHelpText(overviewPage);
         overviewLayout->addWidget(_heatmap, 1);
         _tabs->addTab(overviewPage, "Species overview");
         _tabs->setTabToolTip(_tabs->indexOf(overviewPage),
@@ -3629,25 +3663,32 @@ public:
         // ---- tab 2: one species against the others ----
         auto* detailPage = new QWidget(_tabs);
         auto* detailLayout = new QVBoxLayout(detailPage);
-        _groupA = new SpeciesGroupPicker(detailPage);
-        _groupB = new SpeciesGroupPicker(detailPage);
-        auto* compareButton = new QToolButton(detailPage);
-        compareButton->setText("Comparison groups");
-        compareButton->setIcon(mv::util::StyledIcon("layer-group"));
-        compareButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        compareButton->setCheckable(true);
-        compareButton->setToolTip("Show or hide the two species groups. Results update automatically when a group changes.");
-        auto* groupPanel = new QWidget(detailPage);
-        auto* groupForm = new QFormLayout(groupPanel);
-        groupForm->addRow("Group A", _groupA);
-        groupForm->addRow("Group B", _groupB);
-        groupPanel->hide();
-        connect(compareButton, &QToolButton::toggled, groupPanel, &QWidget::setVisible);
+        const auto addComparisonGroups = [this](QWidget* page, QHBoxLayout* bar,
+            SpeciesGroupPicker*& groupA, SpeciesGroupPicker*& groupB, QWidget*& panel) {
+            auto* button = new QToolButton(page);
+            button->setText("Comparison groups");
+            button->setIcon(mv::util::StyledIcon("layer-group"));
+            button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            button->setCheckable(true);
+            button->setToolTip("Show or hide the two species groups. Results update automatically when a group changes.");
+            bar->addWidget(button);
+
+            panel = new QWidget(page);
+            auto* form = new QFormLayout(panel);
+            groupA = new SpeciesGroupPicker(panel);
+            groupB = new SpeciesGroupPicker(panel);
+            form->addRow("Group A", groupA);
+            form->addRow("Group B", groupB);
+            panel->hide();
+            connect(button, &QToolButton::toggled, panel, &QWidget::setVisible);
+            return button;
+        };
         auto* groupBar = new QHBoxLayout();
-        groupBar->addWidget(compareButton);
+        QWidget* groupPanel = nullptr;
+        addComparisonGroups(detailPage, groupBar, _groupA, _groupB, groupPanel);
         groupBar->addStretch(1);
         auto* volcanoReset = new QPushButton("Reset view");
-        auto* volcanoSave = new QPushButton("Save image...");
+        auto* volcanoSave = new QPushButton("Save image…");
         groupBar->addWidget(volcanoReset);
         addExport(groupBar);
         groupBar->addWidget(volcanoSave);
@@ -3706,22 +3747,14 @@ public:
         splitter->setStretchFactor(0, 3);
         splitter->setStretchFactor(1, 2);
         splitter->setChildrenCollapsible(false);
-        _detailInfo = new ChartTextLabel(ChartTextLabel::Section::Overview, detailPage);
-        detailLayout->addWidget(_detailInfo);
-        _detailGuide = new ChartTextLabel(ChartTextLabel::Section::Guide, detailPage);
-        detailLayout->addWidget(_detailGuide);
+        _detailInfo = new ChartHelpText(detailPage);
+        _detailGuide = new ChartHelpText(detailPage);
         detailLayout->addWidget(splitter, 1);
         _tabs->addTab(detailPage, "Details / species groups");
         auto* extraPage = new QWidget(_tabs);
         auto* extraLayout = new QVBoxLayout(extraPage);
         auto* extraBar = new QHBoxLayout();
-        _extraGroupControls = new QWidget(extraPage);
-        auto* extraGroups = new QFormLayout(_extraGroupControls);
-        _extraGroupA = new SpeciesGroupPicker(_extraGroupControls);
-        _extraGroupB = new SpeciesGroupPicker(_extraGroupControls);
-        extraGroups->addRow("Group A", _extraGroupA);
-        extraGroups->addRow("Group B", _extraGroupB);
-        extraBar->addWidget(_extraGroupControls);
+        _extraGroupButton = addComparisonGroups(extraPage, extraBar, _extraGroupA, _extraGroupB, _extraGroupControls);
         _extraSpeciesTimer = new QTimer(this);
         _extraSpeciesTimer->setSingleShot(true);
         _extraSpeciesTimer->setInterval(120);
@@ -3735,7 +3768,7 @@ public:
             groupsChanged();
         };
         _extraGroupB->onSelectionChanged = [groupsChanged](const QStringList&) { groupsChanged(); };
-        _extraInfo = new ChartTextLabel(ChartTextLabel::Section::Overview, extraPage);
+        _extraInfo = new ChartHelpText(extraPage);
         _extraPlot = new ZoomablePlotWidget(extraPage);
         _extraPlot->setWidePlot(true);
         _extraPlot->setShowTrendLine(false);
@@ -3752,9 +3785,8 @@ public:
         addExport(extraBar);
         extraBar->addWidget(extraSave);
         extraLayout->addLayout(extraBar);
-        extraLayout->addWidget(_extraInfo);
-        _extraGuide = new ChartTextLabel(ChartTextLabel::Section::Guide, extraPage);
-        extraLayout->addWidget(_extraGuide);
+        extraLayout->addWidget(_extraGroupControls);
+        _extraGuide = new ChartHelpText(extraPage);
         auto* extraChartArea = new QWidget(extraPage);
         auto* extraCharts = new QVBoxLayout(extraChartArea);
         extraCharts->setContentsMargins(0, 0, 0, 0);
@@ -3770,6 +3802,15 @@ public:
             const auto path = QFileDialog::getSaveFileName(this, "Save plot", "differential_expression.png", "PNG image (*.png)");
             if (!path.isEmpty()) extraChartArea->grab().save(path);
         });
+        for (auto* text : { _info, _overviewGuide, _detailInfo, _detailGuide, _extraInfo, _extraGuide })
+            _help->watch(text);
+        _help->updateContent = [this] {
+            const int row = _navigation->currentRow();
+            if (row < 0) return;
+            const auto* overview = row == 0 ? _info : row <= 2 ? _detailInfo : _extraInfo;
+            const auto* guide = row == 0 ? _overviewGuide : row <= 2 ? _detailGuide : _extraGuide;
+            _help->setContent(dePlotNames().value(row), *overview, *guide);
+        };
         for (int i = 0; i < dePlotNames().size(); ++i) {
             auto* item = new QListWidgetItem(mv::util::StyledIcon(dePlotIcons().value(i)), dePlotNames()[i], _navigation);
             item->setToolTip(dePlotQuestions().value(i));
@@ -3784,6 +3825,7 @@ public:
                 (row == 0 ? overviewBar : row <= 2 ? groupBar : extraBar)->insertWidget(0, optionsButton);
             optionsButton->setVisible(hasTopGenes);
             renderExtra();
+            if (_help->isVisible()) _help->refresh();
         });
         _navigation->setCurrentRow(0);
         _extraPlot->setDetailProvider([this](const Point& point) { return _extraTips.value(point.id); });
@@ -3890,7 +3932,6 @@ public:
         for (const QString& species : _result.species)
             rows << prettyName(species);
         _heatmap->setData(rows, _result.heatmapGenes, _result.heatmapDelta, _result.heatmapOwner);
-        _info->setDataExplanation(deDataExplanation(0));
         _info->setText(_result.message + "\nBiological relevance: " + dePlotQuestions().value(0));
         int comparedCount = 0;
         for (int row = 0; row < _result.species.size(); ++row)
@@ -4266,10 +4307,11 @@ private:
     ChartStatusSidebar* _navigation = nullptr;
     ZoomablePlotWidget* _extraPlot = nullptr;
     HeatmapWidget* _extraHeatmap = nullptr;
-    ChartTextLabel* _extraInfo = nullptr;
-    ChartTextLabel *_overviewGuide = nullptr, *_detailGuide = nullptr, *_extraGuide = nullptr;
-    QList<QToolButton*> _guideToggles;
-    bool _showGuide = true;
+    ChartHelpText* _extraInfo = nullptr;
+    ChartHelpText *_overviewGuide = nullptr, *_detailGuide = nullptr, *_extraGuide = nullptr;
+    ChartHelpDialog* _help = nullptr;
+    bool _showGuide = false;
+    QToolButton* _extraGroupButton = nullptr;
     QWidget* _extraGroupControls = nullptr;
     SpeciesGroupPicker* _extraGroupA = nullptr;
     SpeciesGroupPicker* _extraGroupB = nullptr;
@@ -4282,11 +4324,11 @@ private:
     QHash<int, std::pair<QString, bool>> _countBars;
     QVector<QStringList> _intersectionGenes, _intersectionSpecies;
     HeatmapWidget* _heatmap = nullptr;
-    ChartTextLabel* _info = nullptr;
+    ChartHelpText* _info = nullptr;
     ZoomablePlotWidget* _volcano = nullptr;
     ZoomablePlotWidget* _detectionPlot = nullptr;
     QTableWidget* _table = nullptr;
-    ChartTextLabel* _detailInfo = nullptr;
+    ChartHelpText* _detailInfo = nullptr;
     QString _detailDescription;
 
 };
