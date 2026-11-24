@@ -268,6 +268,7 @@ private:
         return item ? static_cast<Plot>(item->data(Qt::UserRole).toInt()) : FocusScatter;
     }
     static QString relevance(int plot);
+    static QString dataExplanation(Plot mode);
     QString tooltip(const QString& details) const
     {
         return details + "<br><br>" + _description->text().toHtmlEscaped()
@@ -465,13 +466,63 @@ QString TraitPlotDialog::relevance(int plot)
     return relevance.value(plot);
 }
 
+QString TraitPlotDialog::dataExplanation(Plot mode)
+{
+    static const QString contributionInput = "Input: Mean expression per gene and species and the numeric trait value for each species.\n";
+    static const QString contribution = "Center and scale expression and trait values separately across the input species, then multiply them for each species. Spearman uses ranks before scaling. ";
+    static const QStringList explanations{
+        "Input: Mean expression for the checked genes, species trait values, and gene–trait correlations from the analysis.\n"
+        "Processing: Order the displayed species by trait value and compute expression quartiles across checked genes within each species.\n"
+        "Output: Gene expression dots colored by correlation, with expression medians and middle-half ranges for each species.",
+        "Input: Mean expression for each checked gene across all eligible species, plus the species trait values.\n"
+        "Processing: Center each gene on its mean and scale by its standard deviation. Order species by trait value.\n"
+        "Output: Standardized expression values in a species-by-gene heatmap.",
+        "Input: Gene–trait correlation coefficients from the current analysis for the checked genes.\n"
+        "Processing: Sort coefficients into 20 equal-width bins from −1 to +1.\n"
+        "Output: Gene count per correlation interval.",
+        "Input: Mean expression and trait values for the checked species and genes, plus tree relationships for the phylogenetic method.\n"
+        "Processing: Recalculate gene–trait correlations on the selected species using the active method, drop undefined coefficients, and sort by signed value.\n"
+        "Output: One ranked correlation coefficient per gene.",
+        "Input: A matrix with one row per eligible species and one column of mean expression per checked gene.\n"
+        "Processing: Center each gene on its mean and scale by its standard deviation. Principal component analysis (PCA) finds combinations of genes that capture the most variation in this standardized matrix.\n"
+        "Output: Each species gets a score on the first and second principal components (PC1 and PC2). Axis labels give the share of expression variation captured. Trait values supply point colors.",
+        "Input: Mean expression profiles for each checked gene across the analysis species.\n"
+        "Processing: Standardize each profile and calculate Pearson correlation for every gene pair. Constant profiles yield undefined correlations.\n"
+        "Output: A gene-by-gene matrix of correlation coefficients from −1 to +1.",
+        "Input: Mean expression for each checked gene in the displayed species and each species’ trait value.\n"
+        "Processing: Order points by trait value within each gene and connect them.\n"
+        "Output: One expression profile per gene along the trait axis.",
+        contributionInput + "Processing: " + contribution + "Order species by trait value.\n"
+        "Output: One signed contribution score per species and gene, shown as a heatmap.",
+        contributionInput + "Processing: " + contribution + "Summarize scores across checked genes for each species.\n"
+        "Output: One box per species showing the median, middle half, and full range.",
+        contributionInput + "Processing: " + contribution + "Summarize scores across analysis species for each gene.\n"
+        "Output: One box per gene showing the median, middle half, and full range.",
+        contributionInput + "Processing: " + contribution + "Count positive, negative, and zero scores among checked species and convert to percentages.\n"
+        "Output: Positive and negative percentage bars for each gene, with the zero percentage available in the tooltip.",
+        contributionInput + "Processing: " + contribution + "Group species by distance between their score profiles using average-linkage clustering, which uses the average pairwise distance between groups.\n"
+        "Output: A heatmap of contribution scores with similar species profiles placed together.",
+        contributionInput + "Processing: " + contribution + "Calculate each gene’s mean and sample standard deviation across species.\n"
+        "Output: One point per gene, with its mean contribution and how much contributions vary across species.",
+        "Input: Mean expression of the selected gene and the numeric trait value for each eligible species.\n"
+        "Processing: Match expression and trait values by species and fit a straight line to the paired values.\n"
+        "Output: One point per species and a dashed line summarizing the linear trend."
+    };
+    return explanations.value(mode);
+}
+
 void TraitPlotDialog::exportCurrentChart()
 {
     const auto mode = currentMode();
     const auto title = _plots->currentItem()->text();
     saveChartDataReport(this, title, [this, mode](ChartDataReport& report) {
-        report.paragraph(_description->text());
+        report.heading("Description");
+        report.paragraph(_description->descriptionText());
+        report.heading("Data explanation");
+        report.paragraph(_description->dataExplanation());
+        report.heading("Why it matters");
         report.paragraph(_relevance->text());
+        report.heading("Reading guide");
         report.paragraph(_guide->text());
         const auto badge = _plots->currentItem()->toolTip().section("\nStatus: ", 1);
         if (!badge.isEmpty()) report.paragraph("Status: " + badge);
@@ -587,6 +638,7 @@ void TraitPlotDialog::render()
     const bool speciesAxis = mode == Scatter || mode == Profile || mode == Ranking || mode == Sign;
     _speciesButton->setVisible(speciesAxis);
     _geneButton->setVisible(mode != FocusScatter);
+    _description->setDataExplanation(dataExplanation(mode));
     _relevance->setText("Biological relevance: " + relevance(mode));
     const bool tiled = mode == ExpressionHeatmap || mode == Coexpression || mode == ScoreHeatmap || mode == Clustering;
     _plot->setVisible(!tiled);
@@ -934,10 +986,6 @@ void TraitPlotDialog::render()
         }
     }
 
-    if (contributionPlot)
-        description += " Contributions are products of standardized expression and trait values (ranks for Spearman). They are signed scores and may exceed ±1.";
-    if (categories)
-        description += " Drag vertically or Ctrl-scroll to inspect more rows.";
     if (speciesAxis && speciesOrder.size() < speciesCount)
         description += QString(" Showing %1 of %2 species.").arg(speciesOrder.size()).arg(speciesCount);
     _description->setText(description);

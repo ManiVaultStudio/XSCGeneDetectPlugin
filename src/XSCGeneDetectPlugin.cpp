@@ -3181,6 +3181,18 @@ public:
         });
     }
 
+    void setDataExplanation(const QString& explanation)
+    {
+        if (_explanation == explanation) return;
+        _explanation = explanation;
+        _expanded = false;
+        render();
+    }
+
+    QString dataExplanation() const { return _explanation; }
+    QString descriptionText() const { return _plainText.section("\nBiological relevance: ", 0, 0); }
+    QString relevanceText() const { return _plainText.section("\nBiological relevance: ", 1); }
+
     QString text() const { return _plainText; }
 
     void setText(const QString& value)
@@ -3218,6 +3230,18 @@ private:
         constexpr auto relevanceSeparator = "\nBiological relevance: ";
         const auto overview = _plainText.section(relevanceSeparator, 0, 0).trimmed();
         const auto relevance = _plainText.section(relevanceSeparator, 1);
+        if (!_explanation.isEmpty()) {
+            QString formatted = line("Description", overview);
+            formatted += _expanded ? " &nbsp;<a href='details'>Hide data explanation</a>"
+                                   : " &nbsp;<a href='details'>Show data explanation</a>";
+            if (_expanded) {
+                for (const auto& part : _explanation.split('\n'))
+                    formatted += "<br>" + line(part.section(": ", 0, 0), part.section(": ", 1));
+            }
+            if (!relevance.isEmpty()) formatted += "<br>" + line("Why it matters", relevance);
+            QLabel::setText(formatted);
+            return;
+        }
         static const QRegularExpression boundary(R"([.!?]\s+(?=\p{Lu})|\n)");
         const auto split = boundary.match(overview);
         const auto summary = split.hasMatch() ? overview.left(split.capturedStart() + 1).trimmed() : overview;
@@ -3232,7 +3256,7 @@ private:
     }
 
     Section _section;
-    QString _plainText;
+    QString _plainText, _explanation;
     bool _expanded = false;
 };
 
@@ -3534,12 +3558,9 @@ public:
             }
             if (row == 5 || row == 7) {
                 if (_extraSpeciesTimer->isActive()) return ChartUpdateState::Updating;
-                if (!_extraComparisonKey.isEmpty() && !_extraComparison.valid) return ChartUpdateState::Stale;
-                if (_extraSpeciesEdited) {
-                    const auto checked = _extraSpeciesOptions.getSelectedOptions().size();
-                    const auto available = _extraSpeciesOptions.getOptions().size();
-                    if (checked == 0 || checked == available) return ChartUpdateState::Stale;
-                }
+                if (_extraSpeciesEdited && (_extraGroupA->selected().isEmpty() || _extraGroupB->selected().isEmpty()))
+                    return ChartUpdateState::Stale;
+                if (!_extraComparisonA.isEmpty() && !_extraComparison.valid) return ChartUpdateState::Stale;
             }
             if ((row == 8 || row == 11) && _focusGene.isEmpty()) return ChartUpdateState::Stale;
             if ((row == 10 || row == 11) && settings.getReverseSearchTraitSelectionString().getString().isEmpty())
@@ -3694,31 +3715,26 @@ public:
         auto* extraPage = new QWidget(_tabs);
         auto* extraLayout = new QVBoxLayout(extraPage);
         auto* extraBar = new QHBoxLayout();
-        _extraSpeciesButton = new QToolButton(extraPage);
-        _extraSpeciesButton->setText("Species");
-        _extraSpeciesButton->setIcon(mv::util::StyledIcon("filter"));
-        _extraSpeciesButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        _extraSpeciesButton->setPopupMode(QToolButton::InstantPopup);
-        _extraSpeciesButton->setToolTip("Checked species form Group A. The remaining eligible species form Group B.");
-        auto* speciesMenu = new QMenu(_extraSpeciesButton);
-        auto* speciesWidgetAction = new QWidgetAction(speciesMenu);
-        auto* speciesWidget = _extraSpeciesOptions.createWidget(speciesMenu,
-            OptionsAction::ListView | OptionsAction::Selection | OptionsAction::Filter);
-        speciesWidget->setMinimumSize(330, 350);
-        speciesWidgetAction->setDefaultWidget(speciesWidget);
-        speciesMenu->addAction(speciesWidgetAction);
-        _extraSpeciesButton->setMenu(speciesMenu);
-        _extraSpeciesButton->hide();
-        extraBar->addWidget(_extraSpeciesButton);
+        _extraGroupControls = new QWidget(extraPage);
+        auto* extraGroups = new QFormLayout(_extraGroupControls);
+        _extraGroupA = new SpeciesGroupPicker(_extraGroupControls);
+        _extraGroupB = new SpeciesGroupPicker(_extraGroupControls);
+        extraGroups->addRow("Group A", _extraGroupA);
+        extraGroups->addRow("Group B", _extraGroupB);
+        extraBar->addWidget(_extraGroupControls);
         _extraSpeciesTimer = new QTimer(this);
         _extraSpeciesTimer->setSingleShot(true);
         _extraSpeciesTimer->setInterval(120);
         connect(_extraSpeciesTimer, &QTimer::timeout, this, [this] { renderExtra(); });
-        connect(&_extraSpeciesOptions, &OptionsAction::selectedOptionsChanged, this, [this] {
-            if (_updatingExtraSpecies) return;
+        const auto groupsChanged = [this] {
             _extraSpeciesEdited = true;
             _extraSpeciesTimer->start();
-        });
+        };
+        _extraGroupA->onSelectionChanged = [this, groupsChanged](const QStringList& selected) {
+            _extraGroupB->setDisabledSpecies(selected);
+            groupsChanged();
+        };
+        _extraGroupB->onSelectionChanged = [groupsChanged](const QStringList&) { groupsChanged(); };
         _extraInfo = new ChartTextLabel(ChartTextLabel::Section::Overview, extraPage);
         _extraPlot = new ZoomablePlotWidget(extraPage);
         _extraPlot->setWidePlot(true);
@@ -3865,7 +3881,8 @@ public:
     void setResult(const SpeciesDeResult& result, const QSet<QString>& selectedSpecies, const QString& focusGene)
     {
         _result = result;
-        _extraComparisonKey.clear();
+        _extraComparisonA.clear();
+        _extraComparisonB.clear();
         _selectedSpecies = selectedSpecies;
         _focusGene = focusGene;
 
@@ -3873,6 +3890,7 @@ public:
         for (const QString& species : _result.species)
             rows << prettyName(species);
         _heatmap->setData(rows, _result.heatmapGenes, _result.heatmapDelta, _result.heatmapOwner);
+        _info->setDataExplanation(deDataExplanation(0));
         _info->setText(_result.message + "\nBiological relevance: " + dePlotQuestions().value(0));
         int comparedCount = 0;
         for (int row = 0; row < _result.species.size(); ++row)
@@ -3961,8 +3979,7 @@ public:
         }
         _level = significanceLevel;
         _detailDescription = detail.valid
-            ? QString("%1 against %2 other species: %3 genes tested, %4 genes shown. Hover a point for details; click a point or a table row to select the gene. "
-                "Wheel: zoom, drag: move, double click: reset.").arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size())
+            ? QString("%1 against %2 other species: %3 genes tested, %4 top candidates.").arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size())
             : (detail.message.isEmpty() ? QString("No data.") : detail.message);
         if (detail.valid && !detail.message.isEmpty()) _detailDescription += " " + detail.message;
         updateDetailDescription();
@@ -3975,13 +3992,16 @@ private:
     void updateDetailDescription()
     {
         const int row = _navigation->currentRow();
-        if (row == 1 || row == 2)
+        if (row == 1 || row == 2) {
+            _detailInfo->setDataExplanation(deDataExplanation(row));
             _detailInfo->setText((_groupComparisonPending ? QString("Updating comparison (previous results shown)") : _detailDescription)
                 + "\nBiological relevance: " + dePlotQuestions().value(row));
+        }
     }
     static const QStringList& dePlotNames();
     static const QStringList& dePlotIcons();
     static const QStringList& dePlotQuestions();
+    static QString deDataExplanation(int mode);
     void renderExtra();
     void showCountGenes(const QString& species, bool upregulated);
     void showIntersectionGenes(int column);
@@ -4250,12 +4270,12 @@ private:
     ChartTextLabel *_overviewGuide = nullptr, *_detailGuide = nullptr, *_extraGuide = nullptr;
     QList<QToolButton*> _guideToggles;
     bool _showGuide = true;
-    QToolButton* _extraSpeciesButton = nullptr;
-    OptionsAction _extraSpeciesOptions{ this, "Differential expression comparison species" };
+    QWidget* _extraGroupControls = nullptr;
+    SpeciesGroupPicker* _extraGroupA = nullptr;
+    SpeciesGroupPicker* _extraGroupB = nullptr;
     QTimer* _extraSpeciesTimer = nullptr;
-    bool _updatingExtraSpecies = false;
     bool _extraSpeciesEdited = false;
-    QStringList _extraComparisonKey;
+    QStringList _extraComparisonA, _extraComparisonB;
     SpeciesDeDetail _extraComparison;
     QStringList _extraTips, _extraGenes, _extraSpecies, _extraRows, _extraColumns;
     QVector<QStringList> _extraCellTips;
