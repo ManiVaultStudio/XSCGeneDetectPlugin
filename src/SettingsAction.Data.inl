@@ -252,30 +252,29 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         "position 1 counts 1, position N counts 1/N, divided by the number of species. 1 = position 1 in every species.\n"
         "Hover a cell for the best positions and the significance of the rank consistency across species.", Qt::ToolTipRole);
 
-    // ---- 2. Lookup tables: gene -> (species, statistics) and gene -> (species -> rank) ------------------------
-    QHash<QString, QVector<QPair<QString, Stats>>> geneToSpeciesStats;
+    struct RankedSpeciesStats {
+        QString species;
+        Stats stats;
+        int rank;
+    };
+    QHash<QString, QVector<RankedSpeciesStats>> geneToSpeciesStats;
     geneToSpeciesStats.reserve(geneCount);
     for (const auto& [speciesName, innerMap] : map) {
         for (const auto& [geneName, stats] : innerMap) {
-            geneToSpeciesStats[geneName].append(qMakePair(speciesName, stats));
+            geneToSpeciesStats[geneName].append(RankedSpeciesStats{speciesName, stats, 0});
         }
     }
 
-    QHash<QString, QHash<QString, int>> geneToSpeciesRank;
-    geneToSpeciesRank.reserve(static_cast<int>(rankingMap.size()));
-    for (const auto& [geneName, speciesRanks] : rankingMap) {
-        auto& rankMap = geneToSpeciesRank[geneName];
-        rankMap.reserve(static_cast<int>(speciesRanks.size()));
-        for (const auto& [speciesName, rank] : speciesRanks) {
-            rankMap.insert(speciesName, rank);
+    // The statistics and rank rows both follow species-name order.
+    for (const auto& [gene, ranks] : rankingMap) {
+        auto stats = geneToSpeciesStats.find(gene);
+        if (stats == geneToSpeciesStats.end()) continue;
+        auto rank = ranks.begin();
+        for (auto& entry : stats.value()) {
+            while (rank != ranks.end() && rank->first < entry.species) ++rank;
+            if (rank != ranks.end() && rank->first == entry.species) entry.rank = rank->second;
         }
     }
-
-    // ---- 3. "Statistics" text of every gene (parallel) ------------------------------------------------------
-    // Formatting ~20k genes x species strings is the most expensive part of building the model. The lookup tables
-    // are only read here, and every worker writes distinct elements of statisticsText -> no locking required.
-    // The text format is parsed again by convertToStatisticsMap() in the plugin - keep both in sync.
-
 
     // Weighted appearance and rank consistency (computed in the same pass). Rank, as stored by findTopNGenesPerCluster, counts
     // from the other end for the "Negative" type, so the position inside the species' top-N ordering is derived from it.
@@ -304,7 +303,6 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             if (statsIt == geneToSpeciesStats.constEnd()) {
                 continue;
             }
-            const auto rankIt = geneToSpeciesRank.constFind(gene);
 
             // position of the gene in the top-N ordering of every species
             double weightSum = 0.0;
@@ -314,13 +312,13 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
             double differenceSum = 0.0, expressionSum = 0.0;
             int positiveSpecies = 0;
             for (const auto& speciesStats : *statsIt) {
-                const double difference = static_cast<double>(speciesStats.second.meanSelected) - static_cast<double>(speciesStats.second.meanNonSelected);
+                const double difference = static_cast<double>(speciesStats.stats.meanSelected) - static_cast<double>(speciesStats.stats.meanNonSelected);
                 differenceSum += difference;
-                expressionSum += static_cast<double>(speciesStats.second.meanSelected);
+                expressionSum += static_cast<double>(speciesStats.stats.meanSelected);
                 positiveSpecies += difference > 0.0 ? 1 : 0;
 
-                const int storedRank = (rankIt != geneToSpeciesRank.constEnd()) ? rankIt->value(speciesStats.first) : 0;
-                const auto lengthIt = speciesListLength.find(speciesStats.first);
+                const int storedRank = speciesStats.rank;
+                const auto lengthIt = speciesListLength.find(speciesStats.species);
                 if (storedRank < 1 || lengthIt == speciesListLength.end()) {
                     continue;
                 }
@@ -330,8 +328,8 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
                     continue;
                 }
                 normalizedRanks.push_back(static_cast<double>(position) / static_cast<double>(listLength));
-                positions.emplace_back(position, speciesStats.first);
-                if (speciesStats.second.meanSelected > 0) { // same condition as the species appearance
+                positions.emplace_back(position, speciesStats.species);
+                if (speciesStats.stats.meanSelected > 0) { // same condition as the species appearance
                     weightSum += rankWeight(position, topN);
                 }
             }
@@ -363,7 +361,6 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
     // Immutable snapshots keep lazy cells valid until the previous model is deleted.
     // Formatting every gene/species string upfront dominated update time and memory.
     const auto statisticsSnapshot = std::make_shared<const decltype(geneToSpeciesStats)>(std::move(geneToSpeciesStats));
-    const auto rankSnapshot = std::make_shared<const decltype(geneToSpeciesRank)>(std::move(geneToSpeciesRank));
 
     // ---- 4. Fill the model (serial: QStandardItemModel is not thread safe) -----------------------------------
     for (int rowIndex = 0; rowIndex < geneCount; ++rowIndex) {
@@ -392,16 +389,15 @@ QVariant SettingsAction::createModelFromData(const std::map<QString, std::map<QS
         model->setItem(rowIndex, 2, new QStandardItem(speciesGeneAppearancesComb));
 
         // Column 3: per-species statistics text (see step 3)
-        model->setItem(rowIndex, 3, new LazyStatisticsItem([statisticsSnapshot, rankSnapshot, gene]() {
+        model->setItem(rowIndex, 3, new LazyStatisticsItem([statisticsSnapshot, gene]() {
             const auto statsIt = statisticsSnapshot->constFind(gene);
             if (statsIt == statisticsSnapshot->constEnd()) return QString();
-            const auto rankIt = rankSnapshot->constFind(gene);
             QString formattedStatistics;
             formattedStatistics.reserve(statsIt->size() * 96);
             for (const auto& speciesStats : *statsIt) {
-                const auto& species = speciesStats.first;
-                const auto& stats = speciesStats.second;
-                const int rank = (rankIt != rankSnapshot->constEnd()) ? rankIt->value(species) : 0;
+                const auto& species = speciesStats.species;
+                const auto& stats = speciesStats.stats;
+                const int rank = speciesStats.rank;
 
                 formattedStatistics += QString("Species: %1, Rank: %2, AbundanceTop: %3,  AbundanceMiddle: %4,  CountAbundanceNumerator: %5, MeanSelected: %6, CountSelected: %7, MeanNotSelected: %8, CountNotSelected: %9;\n")
                     .arg(species)
@@ -1070,7 +1066,7 @@ void SettingsAction::enableActions()
     _statusColorAction.setDisabled(false);
     _searchBox->setDisabled(false);
     enableDisableButtonsAutomatically();
-    if (_statusColorAction.getString() == "C")
+    if (_statusColorAction.getString() == "C" && !_selectionNeedsUpdate)
     {
         _startComputationTriggerAction.setDisabled(true);
     }
@@ -1194,7 +1190,10 @@ void SettingsAction::populatePointData(QString& datasetId, std::vector<float>& p
 
     if (pointDataset.isValid())
     {
-        pointDataset->setSelectionIndices({});
+        // Derived point data shares the source selection. Refreshing its
+        // coordinates must preserve the cells used for the update.
+        if (!pointDataset->isDerivedData())
+            pointDataset->setSelectionIndices({});
         if (pointVector.size() > 0 && numPoints > 0 && numDimensions > 0) {
             pointDataset->setData(pointVector.data(), numPoints, numDimensions);
             pointDataset->setDimensionNames(dimensionNames);

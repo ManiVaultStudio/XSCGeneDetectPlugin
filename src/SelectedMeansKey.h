@@ -6,6 +6,18 @@
 #include <stdexcept>
 #include <vector>
 
+template<class Rows>
+bool sameCellSelection(const Rows& first, const Rows& second)
+{
+    if (first.size() != second.size()) return false;
+    if (first == second) return true;
+    if (std::is_sorted(first.begin(), first.end()) && std::is_sorted(second.begin(), second.end())) return false;
+    Rows orderedFirst = first, orderedSecond = second;
+    std::sort(orderedFirst.begin(), orderedFirst.end());
+    std::sort(orderedSecond.begin(), orderedSecond.end());
+    return orderedFirst == orderedSecond;
+}
+
 // Identify cells together with their species; selection storage order is irrelevant.
 template<class Rows, class Species>
 QString selectedMeansKey(const QString& datasetId, const Rows& rows, const Species& species,

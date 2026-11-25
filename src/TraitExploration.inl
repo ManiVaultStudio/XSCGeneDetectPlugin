@@ -24,15 +24,20 @@ public:
         auto* shell = new QHBoxLayout(this);
         _plots = new ChartStatusSidebar(this);
         _plots->stateForRow = [this, &settings](int row) {
-            const auto mode = static_cast<Plot>(_plots->item(row)->data(Qt::UserRole).toInt());
             const auto base = settings.traitChartState();
+            if (base == ChartUpdateState::NeedsSelectionUpdate || settings.updateWorkflowRunning())
+                return base;
+            const auto mode = static_cast<Plot>(_plots->item(row)->data(Qt::UserRole).toInt());
             if (mode == FocusScatter) {
                 if (_focus.isEmpty()) return ChartUpdateState::Stale;
                 const auto& focus = settings.getTraitFocus();
                 if (focus.gene == _focus && focus.traitName == settings.getReverseSearchTraitSelectionString().getString()
                     && !focus.points.empty())
                     return ChartUpdateState::Ready;
-                return base == ChartUpdateState::Updating ? base : ChartUpdateState::Stale;
+                if (focus.gene == _focus && !focus.unavailableReason.isEmpty()) return ChartUpdateState::Stale;
+                if (settings.readingTraitFocus(_focus)) return ChartUpdateState::Updating;
+                if (base == ChartUpdateState::Updating || base == ChartUpdateState::Queued) return ChartUpdateState::Queued;
+                return ChartUpdateState::Stale;
             }
             if (base != ChartUpdateState::Ready) return base;
             if (!_geneOptions.hasSelectedOptions()) return ChartUpdateState::Stale;
@@ -50,7 +55,26 @@ public:
         _plots->setWordWrap(true);
         _plots->setMinimumWidth(215);
         _plots->setMaximumWidth(285);
-        shell->addWidget(_plots);
+        auto* side = new QVBoxLayout();
+        side->addWidget(_plots, 1);
+        auto* highlights = new QCheckBox(tr("Highlight chart examples"), this);
+        highlights->setToolTip(tr("Mark a representative value in amber and explain it in Chart help. This only guides chart reading; it does not change the analysis."));
+        side->addWidget(highlights);
+        _status = new QLabel(this);
+        _status->setWordWrap(true);
+        _status->setAccessibleName(tr("Trait analysis status"));
+        side->addWidget(_status);
+        _plots->activeStateChanged = [this](ChartUpdateState state, int) {
+            QString message;
+            if (state == ChartUpdateState::Updating) message = tr("Computing trait correlations…");
+            else if (state == ChartUpdateState::Queued) message = tr("Trait analysis queued");
+            else if (state == ChartUpdateState::NeedsSelectionUpdate) message = tr("Cell selection changed · run Update");
+            else if (state == ChartUpdateState::Ready && _comparisonMatrix && !_comparisonMatrix->empty())
+                message = tr("%1 species · %2 genes").arg(_comparisonMatrix->species.size()).arg(_comparisonMatrix->geneIndex.size());
+            else if (state == ChartUpdateState::Stale) message = tr("This chart needs current trait results or valid selections");
+            if (_status->text() != message) _status->setText(message);
+        };
+        shell->addLayout(side);
         auto* content = new QWidget(this);
         auto* layout = new QVBoxLayout(content);
         shell->addWidget(content, 1);
@@ -96,19 +120,25 @@ public:
         controls->addStretch();
         auto* reset = new QPushButton("Reset view", this);
         auto* exportData = new QPushButton("Export data", this);
+        exportData->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
         exportData->setToolTip("Save the chart explanation, analysis settings and underlying values.");
         auto* save = new QPushButton("Save image…", this);
+        describeViewButtons(*reset, *save);
         auto* helpButton = new QPushButton("Chart help", this);
+        helpButton->setIcon(mv::util::StyledIcon("info-circle"));
         helpButton->setToolTip("Open the chart overview, data explanation, and reading guide.");
         controls->addWidget(reset);
         controls->addWidget(helpButton);
         controls->addWidget(exportData);
         controls->addWidget(save);
+        auto* loadingNotice = new ChartLoadingNotice(this);
+        _plots->setLoadingNotice(loadingNotice);
+        layout->addWidget(loadingNotice);
         layout->addLayout(controls);
         _description = new ChartHelpText(this);
         _relevance = new ChartHelpText(this);
         _guide = new ChartHelpText(this);
-        _help = new ChartHelpDialog(this, _showGuide);
+        _help = new ChartHelpDialog(this);
         for (auto* text : { _description, _relevance, _guide })
             _help->watch(text);
         _help->updateContent = [this] {
@@ -116,10 +146,10 @@ public:
                 _help->setContent(item->text(), *_description, *_guide, _relevance->relevanceText(),
                     "Click to select. Ctrl-click to add or remove. Right-click to pin details.");
         };
-        _help->onHighlightsChanged = [this](bool checked) {
+        connect(highlights, &QCheckBox::toggled, this, [this](bool checked) {
             _showGuide = checked;
             updateReadingGuide();
-        };
+        });
         connect(helpButton, &QPushButton::clicked, _help, &ChartHelpDialog::openHelp);
         _plot = new ZoomablePlotWidget(this);
         _plot->setWidePlot(true);
@@ -437,6 +467,7 @@ private:
     ChartHelpText* _relevance = nullptr;
     ChartHelpText* _guide = nullptr;
     ChartHelpDialog* _help = nullptr;
+    QLabel* _status = nullptr;
     bool _showGuide = false;
     ZoomablePlotWidget* _plot = nullptr;
     HeatmapWidget* _heatmap = nullptr;
@@ -465,7 +496,7 @@ QString TraitPlotDialog::relevance(int plot)
 QString TraitPlotDialog::dataExplanation(Plot mode)
 {
     static const QString contributionInput = "Input: Mean expression per gene and species and the numeric trait value for each species.\n";
-    static const QString contribution = "Center and scale expression and trait values separately across the input species, then multiply them for each species. Spearman uses ranks before scaling. ";
+    static const QString contribution = "Center and scale expression and trait separately across the species used by this chart, then multiply the two standardized values for each species. Spearman uses average ranks for ties before scaling. These plots are available for Pearson and Spearman. Phylogenetic contrasts compare branches and do not assign one score to each species. ";
     static const QStringList explanations{
         "Input: Mean expression for the checked genes, species trait values, and gene–trait correlations from the analysis.\n"
         "Processing: Order the displayed species by trait value and compute expression quartiles across checked genes within each species.\n"
@@ -501,10 +532,29 @@ QString TraitPlotDialog::dataExplanation(Plot mode)
         contributionInput + "Processing: " + contribution + "Calculate each gene’s mean and sample standard deviation across species.\n"
         "Output: One point per gene, with its mean contribution and how much contributions vary across species.",
         "Input: Mean expression of the selected gene and the numeric trait value for each eligible species.\n"
-        "Processing: Match expression and trait values by species and fit a straight line to the paired values.\n"
-        "Output: One point per species and a dashed line summarizing the linear trend."
+        "Processing: Match expression and trait values by species. The dashed line is a descriptive linear fit to the plotted points. It uses the original values even when the analysis uses ranks, a species subset, or phylogenetic contrasts.\n"
+        "Output: One point per eligible species. The plot includes all eligible species with paired values."
     };
-    return explanations.value(mode);
+
+    QString terms;
+    switch (mode) {
+    case Scatter: terms = "The median is the middle value. The first and third quartiles mark the 25th and 75th percentiles. The interval between them describes the middle half."; break;
+    case ExpressionHeatmap: terms = "A standardized value measures distance from the mean of a gene in standard-deviation units. Zero marks the mean."; break;
+    case Distribution: case Ranking:
+        terms = "A correlation ranges from −1 to +1. Its sign gives the direction and its magnitude gives the strength of association. Pearson measures linear association. Spearman applies Pearson correlation to ranks. Phylogenetic independent contrasts use differences on the species tree to account for shared ancestry.";
+        break;
+    case Coexpression: terms = "Pearson correlation measures linear association between two expression profiles. It ranges from −1 to +1 and requires variation in both profiles."; break;
+    case Pca: terms = "PCA means principal component analysis. PC1 and PC2 are the first two principal components. A component score locates a species along that expression pattern. The percentage on the axis gives the fraction of total standardized expression variation that component captures."; break;
+    case SpeciesBoxes: case GeneBoxes:
+        terms = "The interquartile range is the distance between the first and third quartiles. It describes the spread of the middle half. Whiskers extend to the minimum and maximum.";
+        break;
+    case Variability: terms = "SD means standard deviation. The sample SD measures spread across species. Square each deviation from the mean, sum the squares, divide by one fewer than the number of species, and take the square root."; break;
+    case Clustering: terms = "Euclidean distance is the straight-line distance between two contribution profiles. Average linkage merges groups based on the mean distance between their members."; break;
+    case FocusScatter: terms = "A trait is a numeric measurement recorded for each species. Eligible species have a numeric trait value and enough cells from the chosen cell types."; break;
+    default: break;
+    }
+    return terms.isEmpty() ? explanations.value(mode) : explanations.value(mode) + "\n" + terms;
+
 }
 
 void TraitPlotDialog::exportCurrentChart()
@@ -588,7 +638,7 @@ void TraitPlotDialog::updateReadingGuide()
         "Follow one gene’s line from low to high trait values and compare it with other profiles. Each point is an observed species mean. A segment connects neighboring observations in trait order and helps trace the profile between points.",
         "Read across a species row to see how it contributes to different gene–trait associations. A positive contribution means the standardized expression and trait values have the same sign. A negative contribution means their signs differ. For Spearman correlation the same rule applies to standardized ranks.",
         "Compare both the width and center of each species box. A wide box means the species contributes differently across genes. A median near zero can occur alongside a wide spread, so read the center and the middle half together.",
-        "Compare the centers of the gene boxes to see which association direction is typical, then check their spread across species. The whiskers reach the observed minimum and maximum. A box spanning zero shows that the middle half includes contributions on both sides or at zero.",
+        "Compare the medians of the gene boxes to see which contribution sign is typical, then check their spread across species. The whiskers reach the observed minimum and maximum. When the first quartile is below zero and the third is above zero, the middle half spans both signs.",
         "Compare the positive and negative bars for each gene. The two percentages can sum to less than 100 because some species contribute exactly zero. Hover to see that share. Bar lengths show how often a direction occurs across checked species, while contribution magnitude is shown in other charts.",
         "Compare neighboring rows for similar patterns across the same columns. Clustering orders species by similarity of their gene contribution profiles. Nearby rows indicate similar profiles in this ordering, which you can inspect gene by gene in the heatmap.",
         "Compare both axes. A gene high on the chart has widely varying contributions across species. Its horizontal position shows whether the average contribution is positive, negative, or near zero. High spread and a near-zero mean can indicate strong contributions that point in different directions.",
@@ -603,7 +653,16 @@ void TraitPlotDialog::updateReadingGuide()
     if (!_heatmap->isHidden()) {
         const auto cell = strongestGuideCell(*_heatmap, mode == Coexpression);
         _heatmap->setReadingGuideCell(cell);
-        _guide->setText(_guide->text() + guideCellNote(*_heatmap, cell));
+        if (cell.x() >= 0) {
+            const QString reason = mode == Coexpression
+                ? " This example uses a pair of different genes and picks the largest absolute correlation within the first 40 displayed genes."
+                : mode == ExpressionHeatmap
+                    ? " This example shows the departure from the gene's own mean expression, in standard-deviation units."
+                    : mode == Clustering
+                        ? " This cell is one contribution in a species profile. Row order comes from comparing the full profiles across genes."
+                        : " This example shows a signed contribution. Positive values have matching signs on the two standardized inputs.";
+            _guide->setText(_guide->text() + "\n\n" + guideCellNote(*_heatmap, cell).trimmed() + reason);
+        }
         return;
     }
     QSet<int> marks;
@@ -611,18 +670,75 @@ void TraitPlotDialog::updateReadingGuide()
         const int point = strongestGuidePoint(*_plot, score);
         if (point >= 0) marks.insert(point);
     };
+    QString reason;
     if (mode == Scatter || mode == FocusScatter || mode == Pca || mode == Ranking) {
+        reason = mode == Scatter ? " Compare the median and middle half for the species at the two ends of the trait order."
+            : mode == FocusScatter ? " These are observed species at the ends of the trait range."
+            : mode == Pca ? " These species are at the ends of the first principal component. Their trait values are encoded by color."
+            : " These genes show the ends of the signed correlation ranking for the checked species.";
         const auto eligible = [mode](const Point& p) { return mode != Scatter || std::isfinite(p.verticalLow); };
         mark([&](const Point& p) { return eligible(p) ? p.x : std::numeric_limits<double>::quiet_NaN(); });
         mark([&](const Point& p) { return eligible(p) ? -p.x : std::numeric_limits<double>::quiet_NaN(); });
+    } else if (mode == Distribution) {
+        const int index = strongestGuidePoint(*_plot, [](const Point& p) {
+            return p.y > 0 ? p.y : std::numeric_limits<double>::quiet_NaN();
+        });
+        if (index >= 0) {
+            const auto point = _plot->pointData(index);
+            const double lower = point.x - 0.05;
+            const double upper = point.x + 0.05;
+            _guide->setText(_guide->text() + QString("\n\nAmber marks a most populated interval, from %1 to %2, with %3 genes.")
+                .arg(lower, 0, 'f', 1).arg(upper, 0, 'f', 1).arg(point.y));
+            _plot->setReadingGuidePoints(QSet<int>{index});
+        }
+        return;
     } else if (mode == SpeciesBoxes || mode == GeneBoxes) {
         mark([](const Point& p) { return p.boxHigh - p.boxLow; });
+        reason = " This box has a widest middle half among the displayed boxes.";
     } else if (mode == Sign) {
-        mark([](const Point& p) { return std::abs(p.x); });
-    } else {
+        const int largest = strongestGuidePoint(*_plot, [](const Point& p) { return std::abs(p.x); });
+        if (largest < 0) return;
+        const auto gene = _pointGenes.value(_plot->pointData(largest).id);
+        double positive = 0.0, negative = 0.0;
+        for (int i = 0; i < _plot->points().size(); ++i) {
+            const auto& point = _plot->points()[i];
+            if (_pointGenes.value(point.id) != gene) continue;
+            if (point.x > 0) positive = point.x;
+            if (point.x < 0) negative = -point.x;
+            if (point.x != 0) marks.insert(i);
+        }
+        if (marks.isEmpty()) return;
+        _guide->setText(_guide->text() + QString("\n\nAmber marks the nonzero bars for %1. Of the checked species, %2% contribute positively, %3% negatively, and %4% contribute zero.")
+            .arg(gene, number(positive), number(negative), number(std::max(0.0, 100.0 - positive - negative))));
+        _plot->setReadingGuidePoints(std::move(marks));
+        return;
+    } else if (mode == Profile) {
+        const int first = strongestGuidePoint(*_plot, [this](const Point& p) {
+            return p.series < 0 ? std::numeric_limits<double>::quiet_NaN() : _genes[p.series].name == _focus ? 1.0 : 0.0;
+        });
+        if (first < 0) return;
+        const int series = _plot->pointData(first).series;
+        const auto endpoint = [&](double direction) {
+            return strongestGuidePoint(*_plot, [&](const Point& p) {
+                return p.series == series ? direction * p.x : std::numeric_limits<double>::quiet_NaN();
+            });
+        };
+        const int low = endpoint(-1.0), high = endpoint(1.0);
+        if (low < 0 || high < 0) return;
+        for (int index : {low, high}) marks.insert(index);
+        const auto lowPoint = _plot->pointData(low);
+        const auto highPoint = _plot->pointData(high);
+        _guide->setText(_guide->text() + QString("\n\nAmber follows %1 at the lowest and highest displayed trait values. %2 has mean expression %3 at trait value %4. %5 has mean expression %6 at trait value %7.")
+            .arg(_genes[series].name, _matrix->species[lowPoint.species], number(lowPoint.y), number(lowPoint.x),
+                _matrix->species[highPoint.species], number(highPoint.y), number(highPoint.x)));
+        _plot->setReadingGuidePoints(std::move(marks));
+        return;
+    } else if (mode == Variability) {
         mark([](const Point& p) { return p.y; });
+        reason = " This gene has a largest sample standard deviation of contributions among those shown. Its horizontal coordinate gives the mean contribution.";
     }
-    _guide->setText(_guide->text() + guidePointNote(*_plot, marks));
+    if (!marks.isEmpty())
+        _guide->setText(_guide->text() + "\n\n" + guidePointNote(*_plot, marks, mode == Scatter).trimmed() + reason);
     _plot->setReadingGuidePoints(std::move(marks));
 }
 
@@ -660,8 +776,12 @@ void TraitPlotDialog::render()
         QVector<Point> points;
         if (_focus.isEmpty()) {
             _description->setText("Select a gene in the gene table or click a gene in another trait chart.");
+        } else if (_plots->stateForRow(_plots->currentRow()) == ChartUpdateState::NeedsSelectionUpdate) {
+            _description->setText("Run Update in Gene Identification to calculate expression for the current cell selection.");
         } else if (!_focusPlot || _focusPlot->gene != _focus) {
-            _description->setText(QString("Preparing expression for %1 across all eligible species.").arg(_focus));
+            _description->setText(QString("Expression for %1 across eligible species is unavailable.").arg(_focus));
+        } else if (!_focusPlot->unavailableReason.isEmpty()) {
+            _description->setText(_focusPlot->unavailableReason);
         } else {
             for (size_t i = 0; i < _focusPlot->points.size(); ++i) {
                 const auto& row = _focusPlot->points[i];

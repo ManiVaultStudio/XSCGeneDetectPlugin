@@ -496,7 +496,7 @@ inline void forEachBlockParallel(std::vector<State>& states, const std::size_t b
  *                                          rowIds, row indexes the view, offset is the absolute column position of
  *                                          the view's first column.
  *  - merge(into, from)                     combines two states
- *  - progress(completed, total)             optional serialized callback after each block;
+ *  - progress(completed, total)             optional serialized callback with completed and total rows;
  *                                          may run on a worker thread, so must not touch UI objects
  *
  * Throws std::out_of_range / std::runtime_error when the delivered views do not match the request.
@@ -645,7 +645,8 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             });
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
-                progress(++completed, jobs.size());
+                completed += jobs[job].second - jobs[job].first;
+                progress(completed, rowCount);
             }
         });
         const auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - scanStart).count();
@@ -857,7 +858,7 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
     };
 
     std::mutex progressMutex;
-    std::size_t completedBlocks = 0;
+    std::size_t completedRows = 0;
     const auto scanStart = std::chrono::steady_clock::now();
     const auto processBlocks = [&](const void* denseData, const std::uint32_t elementType,
                                    const std::uint32_t elementSize, const std::uint64_t pointCount) {
@@ -873,7 +874,9 @@ inline auto reduceRows(Points* points, const RowContainer& rowIds, int threads, 
             });
             if (progress) {
                 const std::lock_guard<std::mutex> lock(progressMutex);
-                progress(++completedBlocks, blockCount);
+                const auto first = b * rowsPerBlock;
+                completedRows += std::min(rowsPerBlock, rowCount - first);
+                progress(completedRows, rowCount);
             }
         });
     };
@@ -1189,7 +1192,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
         const auto cache = PackedTileAccess::columnsFor(storage);
         const bool sparseRows = rows.size() <= storage->rows() / 8;
         const bool narrow = uniqueColumns.size() * 4 < storage->columns();
-        if (cache && ((narrow && cache->enabled()) || (includeDetection && sparseRows && cache->complete()))) {
+        if (narrow || (cache && includeDetection && sparseRows && cache->complete())) {
             XSC_TRACE("analysis.gene-blocks.aggregate");
             std::vector<std::pair<std::size_t, std::size_t>> jobs;
             const auto rowAt = [&](std::size_t i) { return static_cast<std::uint64_t>(rows[i]); };
@@ -1223,7 +1226,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
                 if (stripe != previousStripe) ++requestedStripes;
                 previousStripe = stripe;
             }
-            const bool readAhead = storage->columnTileSize() >= storage->columns() &&
+            const bool readAhead = cache && cache->enabled() && storage->columnTileSize() >= storage->columns() &&
                 requestedStripes >= 8 && requestedStripes * 4 >= stripeCount * 3;
             forEachBlockParallel(states, jobs.size(), [&](std::size_t job, State& state) {
                 const auto [begin, end] = jobs[job];
@@ -1243,7 +1246,7 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
                     // Bound cancellation latency without serializing every stripe read.
                     if (progress && blocksRead++ % 8 == 0) {
                         const std::lock_guard<std::mutex> lock(progressMutex);
-                        progress(completed, jobs.size());
+                        progress(completed, rows.size());
                     }
                     const auto tile = uniqueColumns.size() == 1
                         ? PackedTileAccess::readColumn(points, storage, tileRow, uniqueColumns[next], state.reader.get())
@@ -1265,7 +1268,11 @@ inline GroupAggregates aggregateDisjointRows(Points* points, const Rows& rows, c
                         throw std::runtime_error("Analysis gene block does not cover its requested column");
                     do { ++next; } while (next < uniqueColumns.size() && uniqueColumns[next] < limit);
                 }
-                if (progress) { const std::lock_guard<std::mutex> lock(progressMutex); progress(++completed, jobs.size()); }
+                if (progress) {
+                    const std::lock_guard<std::mutex> lock(progressMutex);
+                    completed += end - begin;
+                    progress(completed, rows.size());
+                }
             });
             for (std::size_t w = 1; w < states.size(); ++w) mergeState(states[0], states[w]);
             return std::move(states[0].result);

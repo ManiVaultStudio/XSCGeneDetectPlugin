@@ -349,9 +349,10 @@ struct TraitFocus {
     struct Point { QString species; double trait; double expression; };
     QString gene, traitName;
     std::vector<Point> points;
+    QString unavailableReason;
 };
 
-enum class ChartUpdateState { Stale, Updating, Ready };
+enum class ChartUpdateState { Stale, Updating, Ready, NeedsSelectionUpdate, Queued };
 
 /** Additional statistics of the trait correlation of one gene (NaN = not available). */
 struct GeneTraitExtras {
@@ -467,6 +468,8 @@ public: // Action getters
     void setSpeciesDeActive(bool active);
     void prepareExplorationAnalysis();
     void setTraitAnalysisActive(bool active);
+    QString traitPlotFocusGene() const;
+    void traitPlotSelectionChanged();
     void requestTraitForSelectedGene();
     void cancelExplorationAnalysis();
     void shutdownBackgroundWork();
@@ -487,27 +490,39 @@ public: // Action getters
     TriggerAction& getSaveTraitMatrix() { return _saveTraitMatrix; }   /** save the species x genes expression matrix with the trait */
     TriggerAction& getShowTraitPlot() { return _showTraitPlot; }       /** plot the expression of the selected gene against the trait */
     const TraitMatrix& getTraitMatrix() const { return _traitMatrix; }
+    bool selectionNeedsUpdate() const { return _selectionNeedsUpdate; }
     ChartUpdateState traitChartState() const
     {
+        if (_updateWorkflowRunning) return ChartUpdateState::Queued;
+        if (_selectionNeedsUpdate) return ChartUpdateState::NeedsSelectionUpdate;
         if (_explorationSuspended) return ChartUpdateState::Stale;
-        if (_traitWorkflow.busy() || (_traitWorkflow.pending && _deWorkflow.busy()) || (_traitCorrelationTimer && _traitCorrelationTimer->isActive()))
+        if (_traitWorkflow.busy())
             return ChartUpdateState::Updating;
+        if (_traitWorkflow.pending || (_traitCorrelationTimer && _traitCorrelationTimer->isActive())) return ChartUpdateState::Queued;
         return !_traitPublishedKey.isEmpty() && !_traitMatrix.empty() ? ChartUpdateState::Ready : ChartUpdateState::Stale;
     }
     ChartUpdateState speciesDeChartState() const
     {
+        if (_updateWorkflowRunning) return ChartUpdateState::Queued;
+        if (_selectionNeedsUpdate) return ChartUpdateState::NeedsSelectionUpdate;
         if (_explorationSuspended) return ChartUpdateState::Stale;
-        if (_deWorkflow.busy() || (_deWorkflow.pending && _traitWorkflow.busy()) || (_deTimer && _deTimer->isActive()))
+        if (_deWorkflow.busy())
             return ChartUpdateState::Updating;
+        if (_deWorkflow.pending || (_deTimer && _deTimer->isActive())) return ChartUpdateState::Queued;
         return !_dePublishedKey.isEmpty() && _deResult.valid ? ChartUpdateState::Ready : ChartUpdateState::Stale;
     }
     const TraitMatrix& getAllSpeciesTraitMatrix() const
     {
         return _traitMatrix.empty() || _traitAllSpeciesMatrix.empty() ? _traitMatrix : _traitAllSpeciesMatrix;
     }
+    bool speciesDeStatisticsReady() const { return _deOverviewPending && !_selectionNeedsUpdate && !_updateWorkflowRunning && !_explorationSuspended; }
     SpeciesDePlotData speciesDePlotData() const;
     QJsonObject numericTraitData(QString traitName);
     const TraitFocus& getTraitFocus() const { return _traitFocus; }
+    bool readingTraitFocus(const QString& gene) const
+    {
+        return _traitWorkflow.phase() == AnalysisWorkflow::Phase::Reading && _traitFocusReadGene == gene;
+    }
     std::pair<std::vector<double>, size_t> traitSubsetCorrelations(
         const std::vector<size_t>& species, const std::vector<size_t>& geneColumns) const;
     const std::unordered_map<QString, float>& getGeneTraitValues() const { return _geneTraitValuesComputed; }
@@ -703,10 +718,12 @@ private:
     struct DeCache {
         struct Entry {
             int cellCount = 0;                   /** cells that were read (after the cell cap) */
+            bool sampled = false;
             std::vector<float> means;            /** mean expression of every gene */
             std::vector<float> detection;        /** fraction of the cells in which every gene is detected */
         };
         QString key;
+        QString datasetKey;
         bool sortedBuilt = false;
         std::unordered_map<QString, std::vector<int>> speciesSorted;
         std::unordered_map<QString, std::vector<int>> cellTypeSorted;
@@ -739,7 +756,7 @@ private:
 
     void updateSelectedSpeciesCounts(QJsonObject& node, const std::map<QString, int>& speciesCountMap);
     void updateButtonTriggered();
-    void updateButtonTriggeredCore(const OperationProgress::State& operationProgress, float publicationStart);
+    bool updateButtonTriggeredCore(const OperationProgress::State& operationProgress);
     void setModifiedTriggeredData(QVariant geneListTable);
 public: // Serialization
 
@@ -764,7 +781,7 @@ protected:
     OptionSelectionAction         _optionSelectionAction;
     TriggerAction              _startComputationTriggerAction;
     DatasetPickerAction    _referenceTreeDataset;
-    std::unordered_map<QString, std::unordered_map<QString, std::pair<int, float>>> _clusterGeneMeanExpressionMap;
+    std::unordered_map<QString, std::unordered_map<QString, std::pair<int, double>>> _clusterGeneMeanExpressionMap;
 
     std::unordered_map<QString, std::unordered_map<QString, int>> _clusterSpeciesFrequencyMap;
     DatasetPickerAction    _mainPointsDataset;
@@ -819,7 +836,13 @@ protected:
     OptionAction           _scatterplotReembedColorOption;
     StringAction    _statusColorAction;
     std::vector<std::seed_seq::result_type> _selectedIndicesFromStorage;
+    QString _publishedSelectionDatasetId;
+    std::vector<std::seed_seq::result_type> _publishedCellSelection;
+    bool _selectionNeedsUpdate = true;
     QStatusBar* _statusBarActionWidget = nullptr;
+    QLabel* _statusBadge = nullptr;
+    QTimer* _statusBadgeTimer = nullptr;
+    int _statusBadgePhase = 0;
     QMessageBox* _popupMessageInit = nullptr;
     QMessageBox* _popupMessageTreeCreationCompletion = nullptr;
     mv::gui::FlowLayout* _selectedCellClusterInfoStatusBar = nullptr;
@@ -893,7 +916,7 @@ protected:
     /** Species means of the selected cells (stage 1 of the expression statistics) and the key they were computed for. */
     struct SelectedMeansCache {
         QString key;
-        std::vector<std::vector<float>> means;   // [species][gene]
+        std::vector<std::vector<double>> means;  // [species][gene]
     };
     SelectedMeansCache _selectedMeansCache;
     TriggerAction                 _saveGeneTable;
@@ -914,7 +937,8 @@ protected:
     QPointer<mv::plugin::AnalysisPlugin> _selectedTsneAnalysisPlugin; /** t-SNE of the selected cells (destroyed with its datasets) */
     QPointer<mv::plugin::AnalysisPlugin> _geneTsneAnalysisPlugin;     /** t-SNE of the gene similarity points */
     DeCache     _deCache;
-    DeState     _deState;
+    std::shared_ptr<const DeState> _dePooledState;
+    std::shared_ptr<const DeState> _deState = std::make_shared<DeState>();
     std::shared_ptr<DeStatisticsCacheImpl> _deStats; /** species statistics of the last comparison (see the .cpp) */
     struct DeOverviewBatch { QString key; SpeciesDeResult result; };
     std::shared_ptr<DeOverviewBatch> _deOverview;
@@ -934,6 +958,7 @@ protected:
     std::function<void()> _speciesDeFinished;
     TraitCache  _traitCache;
     TraitFocus _traitFocus;
+    QString _traitFocusReadGene;
     TraitMatrix _traitAllSpeciesMatrix;
     struct TraitStatisticsBatch;
     std::shared_ptr<TraitStatisticsBatch> _traitStatistics;
@@ -941,6 +966,7 @@ protected:
     QByteArray _traitPublishedKey;
     QPointer<QAbstractItemModel> _traitPublishedModel;
     QString _dePublishedKey;
+    bool _deOverviewPending = false;
     std::shared_ptr<std::vector<TraitEntryJob>> _traitJobs;  /** reading in the background (see computeTraitCorrelation) */
     QFutureWatcher<void> _traitJobWatcher;
     mv::Dataset<Points> _traitJobDataset;                    /** keeps the dataset alive while the background job reads it */

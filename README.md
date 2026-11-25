@@ -35,16 +35,16 @@ From these inputs, it computes:
 See [workflow and state inventory](docs/WORKFLOWS.md) for on-demand analysis,
 cancellation, cache publication, state ownership, and regression checks.
 
-- [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/CMakeLists.txt): CMake target definition and ManiVault/Qt integration.
-- [src/XSCGeneDetectPlugin.h](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.h): plugin class declaration.
-- [src/XSCGeneDetectPlugin.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/XSCGeneDetectPlugin.cpp): plugin wiring, view integration, table rendering, and scatterplot/tree coordination.
-- [src/SettingsAction.h](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.h): main state container and action declarations.
-- [src/SettingsAction.cpp](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.cpp): shared helpers and compilation unit for the split inline implementation.
-- [src/SettingsAction.Ui.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Ui.inl): UI/action wiring.
-- [src/SettingsAction.Analysis.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Analysis.inl): main analysis and ranking logic.
-- [src/SettingsAction.Data.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Data.inl): dataset creation, model generation, and export helpers.
-- [src/SettingsAction.Tree.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Tree.inl): tree-related logic.
-- [src/SettingsAction.Serialization.inl](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/src/SettingsAction.Serialization.inl): serialization support.
+- [CMakeLists.txt](CMakeLists.txt): CMake target definition and ManiVault/Qt integration.
+- [src/XSCGeneDetectPlugin.h](src/XSCGeneDetectPlugin.h): plugin class declaration.
+- [src/XSCGeneDetectPlugin.cpp](src/XSCGeneDetectPlugin.cpp): plugin wiring, view integration, table rendering, and scatterplot/tree coordination.
+- [src/SettingsAction.h](src/SettingsAction.h): main state container and action declarations.
+- [src/SettingsAction.cpp](src/SettingsAction.cpp): shared helpers and compilation unit for the split inline implementation.
+- [src/SettingsAction.Ui.inl](src/SettingsAction.Ui.inl): UI/action wiring.
+- [src/SettingsAction.Analysis.inl](src/SettingsAction.Analysis.inl): main analysis and ranking logic.
+- [src/SettingsAction.Data.inl](src/SettingsAction.Data.inl): dataset creation, model generation, and export helpers.
+- [src/SettingsAction.Tree.inl](src/SettingsAction.Tree.inl): tree-related logic.
+- [src/SettingsAction.Serialization.inl](src/SettingsAction.Serialization.inl): serialization support.
 
 ## Build Requirements
 
@@ -70,7 +70,7 @@ cmake -S . -B build -DManiVault_INSTALL_DIR="C:\Path\To\ManiVault"
 cmake --build build --config Release
 ```
 
-On successful build, the plugin is installed into the ManiVault `Plugins` directory via the post-build install step defined in [CMakeLists.txt](E:/Coding/DevBundle/GenerateTHESISImages/source/XSCGeneDetectPlugin/CMakeLists.txt).
+On successful build, the plugin is installed into the ManiVault `Plugins` directory via the post-build install step defined in [CMakeLists.txt](CMakeLists.txt).
 
 ## Runtime Data Expectations
 

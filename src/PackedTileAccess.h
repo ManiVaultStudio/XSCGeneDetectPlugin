@@ -112,13 +112,16 @@ public:
             }
         }
         XSC_TIMING_VALUE("gene.block-cache.miss", 1);
-        return read(points, storage, tileRow, column / storage->columnTileSize());
+        // Interactive reads should not build the full-width disk cache on a
+        // miss. A subsequent bulk scan can still pack the decoded tile.
+        return read(points, storage, tileRow, column / storage->columnTileSize(), false);
     }
     static Lease readColumn(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t column,
         ColumnTileCache::Reader* reader = nullptr) {
         return readStripe(points, storage, tileRow, column, reader, true);
     }
-    static Lease read(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t tileColumn) {
+    static Lease read(Points* points, const std::shared_ptr<Storage>& storage, std::uint64_t tileRow, std::uint64_t tileColumn,
+        bool prepareColumnCache = true) {
         XSC_TRACE("packed.tile.acquire");
         const auto tileColumns = (storage->columns() + storage->columnTileSize() - 1) / storage->columnTileSize();
         const auto index = static_cast<std::size_t>(tileRow * tileColumns + tileColumn);
@@ -133,7 +136,7 @@ public:
                 entry->changed.wait(lock, [&] { return entry->state != Entry::State::Loading; });
                 if (entry->error) std::rethrow_exception(entry->error);
                 lock.unlock();
-                if (const auto columns = columnsFor(storage))
+                if (const auto columns = prepareColumnCache ? columnsFor(storage) : nullptr)
                     columns->offer(index, descriptor.rows, descriptor.columns, entry->bytes.constData());
                 return Lease(entry);
             }
@@ -189,7 +192,7 @@ public:
                 if (first != descriptor.rows || offset) throw std::runtime_error("Incomplete generated tile");
             }
             if (static_cast<std::uint64_t>(entry->bytes.size()) != expected) throw std::runtime_error("Decoded tile size mismatch");
-            if (const auto columns = columnsFor(storage)) {
+            if (const auto columns = prepareColumnCache ? columnsFor(storage) : nullptr) {
                 XSC_TRACE("gene.block-cache.build");
                 columns->offer(index, descriptor.rows, descriptor.columns, entry->bytes.constData());
             }

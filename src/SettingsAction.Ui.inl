@@ -535,12 +535,12 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         });
     const auto changetooltipTopN = [this]() -> void
         {
-            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
+            _topNGenesFilter.setToolTip("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list. Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + ". Current value: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
+            _topNGenesFilter.setToolTip("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list. Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + ". Current value: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list.");
         };
     connect(&_topNGenesFilter, &IntegralAction::valueChanged, this, changetooltipTopN);
 
@@ -627,9 +627,40 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         };
     connect(&_startComputationTriggerAction, &TriggerAction::triggered, this, updateGeneFilteringTrigger);
 
-    const auto updateMainPointsDataset = [this]() -> void {
+    const auto refreshSelectionStatus = [this]() {
+        if (!_watchedMainPointsDataset.isValid() || _updateWorkflowRunning || mv::projects().isOpeningProject())
+            return;
+        const auto& selection = _watchedMainPointsDataset->getSelectionIndices();
+        const bool sameOrder = selection == _publishedCellSelection;
+        const bool wasStale = _selectionNeedsUpdate;
+        _selectionNeedsUpdate = _watchedMainPointsDataset->getId() != _publishedSelectionDatasetId
+            || (!sameOrder && !sameCellSelection(selection, _publishedCellSelection));
+        if (!_selectionNeedsUpdate && !sameOrder) {
+            // Cache equivalent order changes for the next inexpensive equality check.
+            _publishedCellSelection = selection;
+        }
+        // Cell freshness and settings freshness have different lifetimes.
+        // Returning to the published cells can clear only the former.
+        if (_selectionNeedsUpdate != wasStale && _statusColorAction.getString() == "C") {
+            _startComputationTriggerAction.setDisabled(!_selectionNeedsUpdate);
+            if (_selectionNeedsUpdate)
+                showStatusMessage(QStringLiteral("Selection changed. Run Update."), QStringLiteral("#ffc107"));
+            else
+                showStatusMessage(QStringLiteral("Data ready"), QStringLiteral("#28a745"));
+        }
+    };
+    auto* selectionStatusTimer = new QTimer(this);
+    selectionStatusTimer->setInterval(750);
+    connect(selectionStatusTimer, &QTimer::timeout, this, [this, refreshSelectionStatus]() {
+        // Some selection writers change the shared indices without notifying listeners.
+        if (_statusColorAction.getString() == "C") refreshSelectionStatus();
+    });
+    selectionStatusTimer->start();
+
+    const auto updateMainPointsDataset = [this, refreshSelectionStatus]() -> void {
         QObject::disconnect(_mainSelectionConnection);
         _watchedMainPointsDataset = {};
+        _selectionNeedsUpdate = true;
 
         if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
@@ -655,36 +686,23 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
                 _topNGenesFilter.setValue(0);
             }
 
-            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
+            _topNGenesFilter.setToolTip("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list. Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + ". Current value: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list.");
             // Watch the selection of the main dataset. The handle is kept in a member so the connection stays alive
             // (connecting a local copy ended it immediately), and the previous connection is dropped first so that
             // changing the dataset repeatedly never stacks up duplicate listeners.
             _watchedMainPointsDataset = fullDataset;
-            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this, datasetId = fullDataset.getDatasetId()] {
+            _selectionNeedsUpdate = fullDataset->getId() != _publishedSelectionDatasetId
+                || !sameCellSelection(fullDataset->getSelectionIndices(), _publishedCellSelection);
+            _mainSelectionConnection = connect(&_watchedMainPointsDataset, &Dataset<Points>::dataSelectionChanged, this, [this, refreshSelectionStatus, datasetId = fullDataset.getDatasetId()] {
                 if (!_watchedMainPointsDataset.isValid() || _watchedMainPointsDataset.getDatasetId() != datasetId)
                     return;
 
                 _toggleScatterplotSelection.setChecked(true);
-                if (_updateWorkflowRunning || mv::projects().isOpeningProject())
-                    return;
-
-                auto selection = _watchedMainPointsDataset->getSelectionIndices();
-                if (selection == _selectedIndicesFromStorage)
-                    return;
-
-                // Results store sorted indices. A selection notification may use the click order.
-                std::sort(selection.begin(), selection.end());
-                if (selection != _selectedIndicesFromStorage)
-                {
-                    if (_statusColorAction.getString() != "M")
-                        _statusColorAction.setString("M");
-                    else if (!_selectedGene.getString().isEmpty())
-                        _removeRowSelection.trigger();
-                }
+                refreshSelectionStatus();
             }, Qt::QueuedConnection);
 
         }
@@ -693,11 +711,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             _topNGenesFilter.setMinimum(0);
             _topNGenesFilter.setMaximum(0);
             _topNGenesFilter.setValue(0);
-            _topNGenesFilter.setToolTip("Maximum ranked genes per cell type (0 = none). Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + "; current: " + QString::number(_topNGenesFilter.getValue()));
+            _topNGenesFilter.setToolTip("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list. Range: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + ". Current value: " + QString::number(_topNGenesFilter.getValue()));
             _topNGenesFilter.setText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setIconText("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
             _topNGenesFilter.setObjectName("Top N genes: 0 to " + QString::number(_topNGenesFilter.getMaximum()) + " (Current: " + QString::number(_topNGenesFilter.getValue()) + ")");
-            _topNGenesFilter.setWhatsThis("Maximum ranked genes per cell type (0 = none).");
+            _topNGenesFilter.setWhatsThis("Maximum ranked genes per comparison. Update ranks genes separately for each species. Zero clears the top-gene list.");
 
         }
 
@@ -936,6 +954,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
             return;
         }
         auto string = _statusColorAction.getString();
+        if (string == "C" && _selectionNeedsUpdate) string = "M";
         QString labelText = "";
         QString backgroundColor = "none";
         if (string == "C")
@@ -982,9 +1001,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
 
 
-        // Update the _statusBarActionWidget with the new label text and background color
-        _statusBarActionWidget->showMessage(labelText);
-        _statusBarActionWidget->setStyleSheet("QStatusBar{padding-left:8px;background:" + backgroundColor + ";color:white;}");
+        showStatusMessage(labelText, backgroundColor);
 
 
         };
@@ -1408,17 +1425,19 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     debounceTimer->setSingleShot(true);
     debounceTimer->setInterval(500); // 500 milliseconds wait time
 
-    const auto debouncelambda = [this]() -> void { // Capture debounceTimer by 
-        if (mv::projects().isOpeningProject() || _updateWorkflowRunning)
+    const auto debouncelambda = [this, refreshSelectionStatus]() {
+        refreshSelectionStatus();
+        if (mv::projects().isOpeningProject() || _updateWorkflowRunning || _selectionNeedsUpdate)
             return;
 
-        _statusColorAction.setString("M");
+        const QString previousStatus = _statusColorAction.getString();
         disableActions();
-
-        findTopNGenesPerCluster();
-        if (_projectOpened)
-        {
-            _statusColorAction.setString("C");
+        try {
+            findTopNGenesPerCluster();
+            _statusColorAction.setString(previousStatus);
+        } catch (const std::exception& error) {
+            qWarning() << "Could not refresh the top-gene results:" << error.what();
+            _statusColorAction.setString("E");
         }
 
         enableActions();

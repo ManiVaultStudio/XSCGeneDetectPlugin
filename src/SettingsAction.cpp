@@ -1,3 +1,5 @@
+#include "StatusBadge.h"
+#include <QLabel>
 #include "StreamedPointData.h"
 #include "SettingsAction.h"
 #include "SelectedMeansKey.h"
@@ -956,12 +958,13 @@ namespace {
             return;
         }
 
-        std::vector<double> geneValues(speciesCount), subset, scratch, contrasts;
+        std::vector<double> geneValues(speciesCount), subset, scratch, contrasts, geneRanks;
         subset.reserve(speciesCount);
 
         // a gene without any variation across the species has no correlation. (Without this check the contrasts of such a
         // gene are pure rounding noise and would give an arbitrary correlation.)
         bool constantGene = false;
+        bool ranksCanBeAdjusted = false;
 
         double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumYY = 0.0, sumXY = 0.0;
         double originX = 0.0, originY = 0.0;
@@ -997,14 +1000,23 @@ namespace {
                 }
                 return std::clamp((xy - sx*sy/count) / std::sqrt(vx*vy), -1.0, 1.0);
             }
+            if (omit == 0)
+                return pearsonOfVectors(geneRanks, context.subsetTrait[0]);
             subset.clear();
-            for (size_t i = 0; i < speciesCount; ++i) {
-                if (omit == 0 || i != omit - 1) {
-                    subset.push_back(geneValues[i]);
-                }
+            const size_t omitted = omit - 1;
+            if (!ranksCanBeAdjusted) {
+                for (size_t i = 0; i < speciesCount; ++i)
+                    if (i != omitted) subset.push_back(geneValues[i]);
+                return pearsonOfVectors(averageRanks(subset), context.subsetTrait[omit]);
             }
-            if (context.method == TraitMethod::Spearman) {
-                subset = averageRanks(subset);
+            const double omittedRank = geneRanks[omitted];
+            // Removing a lower observation shifts ranks by one. Removing
+            // a tied observation shifts the remaining tied ranks by half.
+            for (size_t i = 0; i < speciesCount; ++i) {
+                if (i != omitted) {
+                    const double rank = geneRanks[i];
+                    subset.push_back(rank - (rank > omittedRank ? 1.0 : rank == omittedRank ? 0.5 : 0.0));
+                }
             }
             return pearsonOfVectors(subset, context.subsetTrait[omit]);
             };
@@ -1048,6 +1060,10 @@ namespace {
                     sumX += x; sumY += y; sumXX += x*x; sumYY += y*y; sumXY += x*y;
                 }
             }
+            if (context.method == TraitMethod::Spearman && !constantGene) {
+                geneRanks = averageRanks(geneValues);
+                ranksCanBeAdjusted = std::none_of(geneValues.begin(), geneValues.end(), [](double value) { return std::isnan(value); });
+            }
             GeneTraitStatistics& result = out[gene];
             const double r = correlationFor(0);
             result.correlation = static_cast<float>(r);
@@ -1061,7 +1077,7 @@ namespace {
             if (!context.selected.empty() && context.method != TraitMethod::Phylogenetic) {
                 double score = 0.0;
                 if (!constantGene && context.traitStdDev > 0.0) {
-                    const std::vector<double> ranked = (context.method == TraitMethod::Spearman) ? averageRanks(geneValues) : geneValues;
+                    const auto& ranked = context.method == TraitMethod::Spearman ? geneRanks : geneValues;
                     double geneMean = 0.0;
                     for (const double value : ranked) {
                         geneMean += value;
@@ -1243,9 +1259,24 @@ namespace {
         std::vector<double> restVariance(geneCount, 0.0);
         for (size_t g = 0; g < geneCount; ++g) {
             const double own = static_cast<double>((*speciesMeans[species])[g]);
-            const double restMean = (totalSum[g] - own) / others;
+            double restMean = (totalSum[g] - own) / others;
             const double restSumSq = totalSumSq[g] - own * own;
-            const double variance = std::max(0.0, (restSumSq - others * restMean * restMean) / restDf);
+            double centeredSumSq = restSumSq - others * restMean * restMean;
+            // Removing a dominant species or subtracting nearly equal
+            // squared totals can erase the variance of the remaining group.
+            if (totalSumSq[g] > 0.0 && centeredSumSq <= 1e-10 * totalSumSq[g]) {
+                restMean = 0.0;
+                centeredSumSq = 0.0;
+                size_t count = 0;
+                for (size_t s = 0; s < speciesCount; ++s) {
+                    if (s == species) continue;
+                    const double value = (*speciesMeans[s])[g];
+                    const double difference = value - restMean;
+                    restMean += difference / ++count;
+                    centeredSumSq += difference * (value - restMean);
+                }
+            }
+            const double variance = std::max(0.0, centeredSumSq / restDf);
             out.delta[g] = static_cast<float>(own - restMean);
             out.restMean[g] = static_cast<float>(restMean);
             out.restSd[g] = static_cast<float>(std::sqrt(variance));

@@ -13,11 +13,13 @@ class OperationProgress {
 public:
     using State = std::shared_ptr<OperationProgressState>;
     ~OperationProgress() { if (_task) delete _task; }
-    State begin(QObject* parent, const QString& name) {
+    State begin(QObject* parent, const QString& name, bool measuredPhases = false) {
+        _measuredPhases = measuredPhases;
         if (!_task) {
             _task = new mv::Task(parent, name, {mv::Task::GuiScope::Foreground});
             _task->setProgressMode(mv::Task::ProgressMode::Manual);
             _task->setProgressTextFormatter([](mv::Task& task) {
+                if (task.isRunningIndeterminate()) return task.getProgressDescription();
                 return QStringLiteral("%1 (%2%)").arg(task.getProgressDescription())
                     .arg(static_cast<int>(task.getProgress() * 100.0f));
             });
@@ -26,7 +28,10 @@ public:
             QObject::connect(_timer, &QTimer::timeout, _task, [this] { publish(); });
         }
         _state = std::make_shared<OperationProgressState>();
-        _task->setName(name); _task->setRunning(); _task->setProgress(0);
+        _task->setName(name);
+        if (_measuredPhases) _task->setRunningIndeterminate();
+        else _task->setRunning();
+        _task->setProgress(0);
         _task->setProgressDescription(QStringLiteral("Queued"));
         _timer->start();
         return _state;
@@ -36,6 +41,7 @@ public:
     void finish() {
         if (!_task) return;
         _timer->stop();
+        if (_task->isRunningIndeterminate()) _task->setRunning();
         _task->setProgressDescription(QStringLiteral("Results ready"));
         _task->setProgress(1);
         _task->setFinished();
@@ -51,17 +57,28 @@ private:
         if (!_task || !_state) return;
         QString text;
         float fraction;
+        bool hasTotal;
         {
             const std::lock_guard<std::mutex> lock(_state->mutex);
             text = _state->stage;
             const auto total = _state->total.load();
-            if (total) text += QString(" (%1 / %2)").arg(_state->done.load()).arg(total);
-            fraction = _state->value.load();
+            const auto done = _state->done.load();
+            hasTotal = total != 0;
+            if (hasTotal) {
+                text += _measuredPhases ? QString(" (%1 / %2 rows)").arg(done).arg(total)
+                    : QString(" (%1 / %2)").arg(done).arg(total);
+            }
+            fraction = _measuredPhases && hasTotal ? static_cast<float>(double(done) / double(total)) : _state->value.load();
         }
         if (_task->getProgressDescription() != text) _task->setProgressDescription(text);
+        if (_measuredPhases) {
+            if (!hasTotal && !_task->isRunningIndeterminate()) _task->setRunningIndeterminate();
+            if (hasTotal && !_task->isRunning()) _task->setRunning();
+        }
         _task->setProgress(fraction);
     }
     QPointer<mv::Task> _task;
     QPointer<QTimer> _timer;
     State _state;
+    bool _measuredPhases = false;
 };

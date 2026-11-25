@@ -1,3 +1,5 @@
+#include <QStyle>
+#include "StatusBadge.h"
 #include "QtTooltipKit.h"
 #include "ChartNumerics.h"
 #include <QSaveFile>
@@ -326,6 +328,7 @@ static void pinHoverDetails(QWidget* widget, const QString& text)
     browser->setHtml(text);
     layout->addWidget(browser);
     auto* close = new QPushButton("Close", dialog);
+    close->setIcon(close->style()->standardIcon(QStyle::SP_DialogCloseButton));
     layout->addWidget(close, 0, Qt::AlignRight);
     QObject::connect(close, &QPushButton::clicked, dialog, &QDialog::close);
     dialog->resize(640, 420);
@@ -1905,6 +1908,7 @@ public:
     void setHistogramWidth(double width) { _histogramWidth = width; }
     void setReadingGuidePoints(QSet<int> points) { _readingGuidePoints = std::move(points); update(); }
     void setHorizontalBars(bool enabled) { _horizontalBars = enabled; }
+    void setCenteredXAxis(bool enabled) { _centeredXAxis = enabled; }
     void setColorMapImage(const QImage& image) { _plotColorMap = image; update(); }
 
     void setEmptyMessage(const QString& message)
@@ -1992,6 +1996,10 @@ public:
                 high += 0.06 * span;
             }
             };
+        if (_centeredXAxis) {
+            maxX = std::max(std::abs(minX), std::abs(maxX));
+            minX = -maxX;
+        }
         pad(minX, maxX);
         pad(minY, maxY);
         if (_spaceForCategories && !_points.isEmpty()) {
@@ -2409,7 +2417,13 @@ protected:
             if (_horizontalBars && std::isfinite(point.low) && std::isfinite(point.high)) {
                 const auto from = toPixel(point.low, point.y + 0.27);
                 const auto to = toPixel(point.high, point.y - 0.27);
-                painter.fillRect(QRectF(from, to).normalized(), color);
+                const auto bar = QRectF(from, to).normalized();
+                painter.fillRect(bar, color);
+                if (_centeredXAxis && point.highlighted) {
+                    painter.setPen(QPen(textColor, 2));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawRect(bar);
+                }
                 continue;
             }
             if (_histogramWidth > 0.0) {
@@ -2524,6 +2538,8 @@ private:
     QImage _plotColorMap;
     QColor pointColor(const Point& point) const
     {
+        if (_horizontalBars && point.color.isValid())
+            return point.color;
         if (!_plotColorMap.isNull()) {
             return _plotColorMap.pixelColor(static_cast<int>(std::lround(std::clamp(point.colorFraction, 0.0, 1.0)
                 * (_plotColorMap.width() - 1))), 0);
@@ -2533,6 +2549,7 @@ private:
     bool _connectedSeries = false;
     double _histogramWidth = 0.0;
     bool _horizontalBars = false;
+    bool _centeredXAxis = false;
     QSet<int> _readingGuidePoints;
     bool _clickedOnLine = false;
     LabelMode _labelMode = LabelMode::Highlighted;
@@ -2566,8 +2583,8 @@ public:
         auto* layout = new QVBoxLayout(content);
         _list = new QListWidget(content);
         _list->setMinimumSize(220, 180);
-        auto* all = new QPushButton("Select all", content);
-        auto* none = new QPushButton("Clear", content);
+        auto* all = new QPushButton(mv::util::StyledIcon("check-double"), "Select all", content);
+        auto* none = new QPushButton(mv::util::StyledIcon("times-circle"), "Clear", content);
         layout->addWidget(all); layout->addWidget(none); layout->addWidget(_list);
         action->setDefaultWidget(content); menu->addAction(action); setMenu(menu);
         connect(all, &QPushButton::clicked, this, [this]() { checkAll(Qt::Checked); });
@@ -2668,8 +2685,13 @@ public:
 
     ColorMap1DAction& colorMap() { return _colorMap; }
     void setTraitLegend(const QString& title) { _traitLegend = title; }
+    const QString& traitLegend() const { return _traitLegend; }
+    void setMembershipMode(bool enabled) { _membershipMode = enabled; update(); }
+    void setEmptyMessage(const QString& message) { _emptyMessage = message; update(); }
+    void setIntersectionCounts(QVector<int> counts) { _intersectionCounts = std::move(counts); update(); }
     void setShowAllRowLabels(bool enabled) { _showAllRowLabels = enabled; }
     void setReadingGuideCell(QPoint cell) { _readingGuideCell = cell; update(); }
+    void setReadingGuideColumn(int column) { setReadingGuideCell({column, -1}); }
     void setDotSizes(QVector<QVector<float>> sizes) { _dotSizes = std::move(sizes); update(); }
 
     float valueAt(int row, int column) const
@@ -2751,6 +2773,7 @@ protected:
     void updateLabelMetrics()
     {
         const QFontMetrics metrics(font());
+
         _lineHeight = metrics.height();
         _rowLabelWidth = 0;
         for (const QString& label : _rowLabels) // (the selected species are drawn in bold: leave room for that)
@@ -2770,12 +2793,17 @@ protected:
     }
 
     int leftMargin() const { return std::max(40, std::min(_rowLabelWidth + 14, width() * 2 / 5)); }
-    int bottomMargin() const { return _columnLabels.isEmpty() ? 20 : 14 + std::max(40, std::min(_columnLabelWidth + 8, height() * 2 / 5)); }
+    int bottomMargin() const
+    {
+        if (_membershipMode) return fontMetrics().height() + 12;
+        return _columnLabels.isEmpty() ? 20 : 14 + std::max(40, std::min(_columnLabelWidth + 8, height() * 2 / 5));
+    }
     QRect plotRect() const
     {
         const int left = leftMargin();
         const int right = _traitLegend.isEmpty() ? left : 30;
-        return QRect(left, 34, std::max(10, width() - left - right), std::max(10, height() - 34 - bottomMargin()));
+        const int top = _membershipMode ? std::clamp(height() / 4, 70, 150) : 34;
+        return QRect(left, top, std::max(10, width() - left - right), std::max(10, height() - top - bottomMargin()));
     }
 
     /** Every how many rows a label is drawn: 1 when every row has room for its label (the labels never overlap). */
@@ -2823,6 +2851,9 @@ protected:
     QString labelDetailsAt(const QPointF& pixel) const
     {
         const auto plot = plotRect();
+        const int intersection = intersectionBarColumnAt(pixel);
+        if (intersection >= 0 && _detailProvider)
+            return _detailProvider(0, intersection);
         if (pixel.x() < plot.left() && pixel.y() >= plot.top() && pixel.y() <= plot.bottom()) {
             const int row = static_cast<int>(std::floor(_row0 + (pixel.y() - plot.top()) / cellHeight()));
             if (row >= 0 && row < _rowLabels.size())
@@ -2834,6 +2865,16 @@ protected:
                 return "<b>Column</b><br>" + _columnLabels[column].toHtmlEscaped();
         }
         return {};
+    }
+
+    int intersectionBarColumnAt(const QPointF& pixel) const
+    {
+        const auto plot = plotRect();
+        if (!_membershipMode || pixel.y() < 0 || pixel.y() >= plot.top() ||
+            pixel.x() < plot.left() || pixel.x() > plot.right())
+            return -1;
+        const int column = static_cast<int>(std::floor(_col0 + (pixel.x() - plot.left()) / cellWidth()));
+        return column >= 0 && column < _intersectionCounts.size() ? column : -1;
     }
 
     void contextMenuEvent(QContextMenuEvent* event) override
@@ -2945,7 +2986,11 @@ protected:
         const QRect plot = plotRect();
         const QPointF pixel = event->position();
         const QPoint cell = cellAt(pixel);
-        if (cell.x() >= 0 && _onCellClicked) {
+        const int intersection = intersectionBarColumnAt(pixel);
+        if (intersection >= 0 && _onColumnLabelClicked) {
+            _onColumnLabelClicked(intersection);
+        }
+        else if (cell.x() >= 0 && _onCellClicked) {
             _onCellClicked(cell.y(), cell.x());
         }
         else if (pixel.x() < plot.left() && pixel.y() >= plot.top() && pixel.y() <= plot.bottom() && _onRowLabelClicked) {
@@ -2992,7 +3037,8 @@ protected:
 
         if (_rowLabels.isEmpty() || _columnLabels.isEmpty()) {
             painter.setPen(textColor);
-            painter.drawText(rect(), Qt::AlignCenter, "No data to show");
+            painter.drawText(rect().adjusted(12, 0, -12, 0), Qt::AlignCenter | Qt::TextWordWrap,
+                _emptyMessage.isEmpty() ? tr("No data to show") : _emptyMessage);
             return;
         }
 
@@ -3004,6 +3050,8 @@ protected:
         const int lastRow = std::min(static_cast<int>(_rowLabels.size()) - 1, static_cast<int>(std::ceil(_row1)));
         const QFontMetrics metrics(font());
 
+        const auto included = StatusBadge::readableColor(QColor("#16647a"), palette().color(QPalette::Base));
+
         // ---- cells ----
         painter.save();
         painter.setClipRect(plot);
@@ -3012,6 +3060,17 @@ protected:
         for (int row = firstRow; row <= lastRow; row += sampleRows) {
             for (int column = firstColumn; column <= lastColumn; column += sampleColumns) {
                 const float value = valueAt(row, column);
+                if (_membershipMode) {
+                    const QRectF cell(plot.left() + (column - _col0) * cw, plot.top() + (row - _row0) * ch, cw, ch);
+                    if (row % 2) painter.fillRect(cell, palette().alternateBase());
+                    if (value > 0) {
+                        painter.setPen(Qt::NoPen);
+                        painter.setBrush(included);
+                        const double side = std::max(1.0, std::min(cw, ch) * 0.66);
+                        painter.drawEllipse(cell.center(), side / 2, side / 2);
+                    }
+                    continue;
+                }
                 if (!_dotSizes.isEmpty()) {
                     const auto size = std::clamp(_dotSizes[row][column], 0.0f, 1.0f);
                     const double radius = std::sqrt(size) * std::min(cw, ch) * 0.44;
@@ -3037,14 +3096,14 @@ protected:
 
         // selected species: a light blue band over the whole row, so that the selection is visible from a distance
         for (const int row : _highlightRows) {
-            if (row >= firstRow && row <= lastRow)
+            if (!_membershipMode && row >= firstRow && row <= lastRow)
                 painter.fillRect(QRectF(plot.left(), plot.top() + (row - _row0) * ch, plot.width(), ch), QColor(0, 162, 237, 60));
         }
         // selected species (rows) and gene (columns): outlined in blue
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(selectionBlue, 2));
         for (const int row : _highlightRows) {
-            if (row >= firstRow && row <= lastRow)
+            if (!_membershipMode && row >= firstRow && row <= lastRow)
                 painter.drawRect(QRectF(plot.left(), plot.top() + (row - _row0) * ch, plot.width(), ch));
         }
         for (const int column : _highlightColumns) {
@@ -3055,12 +3114,14 @@ protected:
             painter.setPen(QPen(Qt::black, 2));
             painter.drawRect(QRectF(plot.left() + (_hovered.x() - _col0) * cw, plot.top() + (_hovered.y() - _row0) * ch, cw, ch));
         }
+        const bool guideColumn = _readingGuideCell.y() < 0;
         if (_readingGuideCell.x() >= firstColumn && _readingGuideCell.x() <= lastColumn
-            && _readingGuideCell.y() >= firstRow && _readingGuideCell.y() <= lastRow) {
+            && (guideColumn || (_readingGuideCell.y() >= firstRow && _readingGuideCell.y() <= lastRow))) {
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(QColor("#ae650c"), 2));
-            painter.drawRect(QRectF(plot.left() + (_readingGuideCell.x() - _col0) * cw,
-                plot.top() + (_readingGuideCell.y() - _row0) * ch, cw, ch));
+            const double left = plot.left() + (_readingGuideCell.x() - _col0) * cw;
+            const double top = guideColumn ? plot.top() : plot.top() + (_readingGuideCell.y() - _row0) * ch;
+            painter.drawRect(QRectF(left, top, cw, guideColumn ? plot.height() : ch));
         }
         painter.restore();
 
@@ -3083,7 +3144,7 @@ protected:
         QFont rowBold = rowFont;
         rowBold.setBold(true);
         for (int row = firstRow; row <= lastRow; ++row) {
-            const bool selected = _highlightRows.contains(row);
+            const bool selected = !_membershipMode && _highlightRows.contains(row);
             if ((!selected || !_traitLegend.isEmpty()) && row != _hovered.y() && (row - firstRow) % rowStep != 0)
                 continue;
             const bool hasValues = row < _rowHasValues.size() && _rowHasValues[row];
@@ -3107,6 +3168,12 @@ protected:
             painter.setPen(selected ? selectionBlue : textColor);
             const double centerX = std::clamp(plot.left() + (column + 0.5 - _col0) * cw,
                 plot.left() + metrics.height()/2.0, plot.right() - metrics.height()/2.0);
+            if (_membershipMode) {
+                painter.drawText(QRectF(centerX - cw / 2, plot.bottom() + 4, cw, metrics.height()),
+                    Qt::AlignCenter, _columnLabels[column]);
+                painter.restore();
+                continue;
+            }
             painter.translate(centerX, plot.bottom() + 6);
             painter.rotate(90);
             painter.drawText(QPointF(0, (metrics.ascent() - metrics.descent()) / 2.0), metrics.elidedText(_columnLabels[column], Qt::ElideRight, labelLength));
@@ -3114,6 +3181,36 @@ protected:
         }
 
         // ---- colour legend ----
+        if (_membershipMode) {
+            painter.setPen(textColor);
+            painter.drawText(QRect(4, 0, plot.left() - 12, plot.top() - 8),
+                Qt::AlignRight | Qt::AlignVCenter | Qt::TextWordWrap, tr("Genes per group\nDots mark species comparisons"));
+            if (_intersectionCounts.isEmpty()) return;
+            const double maximum = *std::max_element(_intersectionCounts.cbegin(), _intersectionCounts.cend());
+            const double baseline = plot.top() - 6;
+            painter.save();
+            painter.setClipRect(QRect(plot.left(), 0, plot.width(), plot.top()));
+            for (int column = firstColumn; column <= lastColumn; ++column) {
+                const int count = _intersectionCounts[column];
+                const double centerX = plot.left() + (column + 0.5 - _col0) * cw;
+                const double barHeight = std::max(1.0, count / maximum * (baseline - metrics.height() - 4));
+                const QRectF bar(centerX - cw * 0.32, baseline - barHeight, cw * 0.64, barHeight);
+                painter.fillRect(bar, included);
+                if (_readingGuideCell.x() == column) {
+                    painter.setPen(QPen(QColor("#ae650c"), 2));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawRect(bar);
+                }
+                const auto label = QString::number(count);
+                if (metrics.horizontalAdvance(label) + 2 <= cw) {
+                    painter.setPen(textColor);
+                    painter.drawText(QRectF(centerX - cw / 2, bar.top() - metrics.height() - 2, cw, metrics.height()),
+                        Qt::AlignCenter, label);
+                }
+            }
+            painter.restore();
+            return;
+        }
         const int legendWidth = std::max(60, std::min(180, plot.width() / 2));
         const int legendLeft = std::max(plot.left(), plot.right() - legendWidth);
         for (int x = 0; x < legendWidth; ++x) {
@@ -3135,8 +3232,10 @@ protected:
 
 private:
     QStringList _rowLabels;
-    QString _traitLegend;
+    QString _traitLegend, _emptyMessage;
     bool _showAllRowLabels = false;
+    bool _membershipMode = false;
+    QVector<int> _intersectionCounts;
     QPoint _readingGuideCell{ -1, -1 };
     QStringList _columnLabels;
     QVector<QVector<float>> _values;
@@ -3204,7 +3303,7 @@ private:
 class ChartHelpDialog : public QDialog
 {
 public:
-    explicit ChartHelpDialog(QWidget* parent, bool showHighlights) : QDialog(parent)
+    explicit ChartHelpDialog(QWidget* parent) : QDialog(parent)
     {
         setWindowTitle("Chart help");
         auto* layout = new QVBoxLayout(this);
@@ -3216,23 +3315,15 @@ public:
         _data = new QTextBrowser(_tabs);
         _tabs->addTab(_data, "Data explanation");
 
-        auto* guidePage = new QWidget(_tabs);
-        auto* guideLayout = new QVBoxLayout(guidePage);
-        _guide = new QTextBrowser(guidePage);
-        guideLayout->addWidget(_guide, 1);
-        auto* highlights = new QCheckBox("Highlight examples on the chart", guidePage);
-        highlights->setChecked(showHighlights);
-        guideLayout->addWidget(highlights);
-        _tabs->addTab(guidePage, "Reading guide");
-        connect(highlights, &QCheckBox::toggled, this, [this](bool checked) {
-            if (onHighlightsChanged) onHighlightsChanged(checked);
-        });
+        _guide = new QTextBrowser(_tabs);
+        _tabs->addTab(_guide, "Reading guide");
 
         for (auto* browser : { _overview, _data, _guide }) {
             browser->setFrameShape(QFrame::NoFrame);
             browser->document()->setDocumentMargin(16);
         }
         auto* close = new QPushButton("Close", this);
+        close->setIcon(close->style()->standardIcon(QStyle::SP_DialogCloseButton));
         layout->addWidget(close, 0, Qt::AlignRight);
         connect(close, &QPushButton::clicked, this, &QDialog::close);
         resize(fittingWindowSize(540, 460));
@@ -3259,7 +3350,7 @@ public:
     void setContent(const QString& title, const ChartHelpText& overview, const ChartHelpText& guide,
         const QString& relevance = {}, const QString& controls = {})
     {
-        setWindowTitle(title.isEmpty() ? QString("Chart help") : title + " — Chart help");
+        setWindowTitle(title.isEmpty() ? QString("Chart help") : QString("Chart help for %1").arg(title));
         const QString heading = title.isEmpty() ? QString() : "<h2>" + title.toHtmlEscaped() + "</h2>";
         setPage(_overview, heading + section("Description", overview.descriptionText())
             + section("Why it matters", relevance.isEmpty() ? overview.relevanceText() : relevance));
@@ -3270,7 +3361,7 @@ public:
         setPage(_data, data);
 
         QString start = guide.text().section("Start here: ", -1);
-        static const QRegularExpression observation(R"( (?:Amber marks|Most upregulated:|Most downregulated:))");
+        static const QRegularExpression observation(R"( Amber (?:marks|follows))");
         const auto split = observation.match(start);
         const QString note = split.hasMatch() ? start.mid(split.capturedStart() + 1) : QString();
         if (split.hasMatch()) start.truncate(split.capturedStart());
@@ -3279,7 +3370,6 @@ public:
     }
 
     std::function<void()> updateContent;
-    std::function<void(bool)> onHighlightsChanged;
 
 private:
     static QString section(const QString& title, const QString& content)
@@ -3406,13 +3496,15 @@ static int strongestGuidePoint(const ZoomablePlotWidget& chart,
     double best = -std::numeric_limits<double>::infinity();
     int index = -1;
     for (int i = 0; i < chart.points().size(); ++i) {
-        const double value = score(chart.points()[i]);
+        const auto& point = chart.points()[i];
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) continue;
+        const double value = score(point);
         if (std::isfinite(value) && value > best) { index = i; best = value; }
     }
     return index;
 }
 
-static QPoint strongestGuideCell(const HeatmapWidget& chart, bool omitDiagonal = false)
+static QPoint strongestGuideCell(const HeatmapWidget& chart, bool omitDiagonal = false, bool visibleDotsOnly = false)
 {
     QPoint best(-1, -1);
     double magnitude = -1;
@@ -3421,6 +3513,7 @@ static QPoint strongestGuideCell(const HeatmapWidget& chart, bool omitDiagonal =
     for (int row = 0; row < rows; ++row)
         for (int column = 0; column < columns; ++column) {
             if (omitDiagonal && row == column) continue;
+            if (visibleDotsOnly && !(chart.dotSizes().value(row).value(column) > 0)) continue;
             const double value = std::abs(chart.valueAt(row, column));
             if (std::isfinite(value) && value > magnitude) { magnitude = value; best = QPoint(column, row); }
         }
@@ -3430,21 +3523,81 @@ static QPoint strongestGuideCell(const HeatmapWidget& chart, bool omitDiagonal =
 static QString guideCellNote(const HeatmapWidget& chart, const QPoint& cell)
 {
     if (cell.x() < 0 || cell.y() < 0) return {};
-    return QString(" Amber marks %1 × %2 (%3).").arg(chart.rowLabels().value(cell.y()),
-        chart.columnLabels().value(cell.x()), QString::number(chart.valueAt(cell.y(), cell.x()), 'g', 4));
+    const auto quantity = chart.traitLegend().isEmpty() ? QStringLiteral("Mean expression difference") : chart.traitLegend();
+    return QString(" Amber marks %1 × %2. %3 = %4.").arg(chart.rowLabels().value(cell.y()),
+        chart.columnLabels().value(cell.x()), quantity, QString::number(chart.valueAt(cell.y(), cell.x()), 'g', 4));
 }
 
-static QString guidePointNote(const ZoomablePlotWidget& chart, const QSet<int>& marks)
+static QString guidePointNote(const ZoomablePlotWidget& chart, const QSet<int>& marks, bool categoricalX = false)
 {
     auto indices = marks.values();
     std::sort(indices.begin(), indices.end());
     QStringList notes;
     for (const auto index : indices) {
         const auto point = chart.pointData(index);
-        const auto label = point.label.isEmpty() ? QString("x = %1").arg(point.x, 0, 'g', 4) : point.label;
-        notes << QString("%1 (%2)").arg(label).arg(chart.yTitle().isEmpty() ? point.x : point.y, 0, 'g', 4);
+        QStringList values;
+        if (!categoricalX && !chart.xTitle().isEmpty())
+            values << QString("%1 = %2").arg(chart.xTitle()).arg(point.x, 0, 'g', 4);
+        if (!chart.yTitle().isEmpty())
+            values << QString("%1 = %2").arg(chart.yTitle()).arg(point.y, 0, 'g', 4);
+        if (std::isfinite(point.boxLow) && std::isfinite(point.boxHigh))
+            values << QString("middle half %1 to %2").arg(point.boxLow, 0, 'g', 4).arg(point.boxHigh, 0, 'g', 4);
+        if (std::isfinite(point.verticalLow) && std::isfinite(point.verticalHigh))
+            values << QString("middle half %1 to %2").arg(point.verticalLow, 0, 'g', 4).arg(point.verticalHigh, 0, 'g', 4);
+        if (!values.isEmpty())
+            notes << (point.label.isEmpty() ? values.join(", ") : QString("%1 (%2)").arg(point.label, values.join(", ")));
     }
     return notes.isEmpty() ? QString() : " Amber marks: " + notes.join(", ") + ".";
+}
+
+class ChartLoadingNotice : public QWidget
+{
+public:
+    explicit ChartLoadingNotice(QWidget* parent) : QWidget(parent)
+    {
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(6, 2, 6, 2);
+        _icon = new QLabel(this);
+        _icon->setFixedSize(17, 17);
+        _text = new QLabel(this);
+        _text->setTextFormat(Qt::PlainText);
+        _text->setWordWrap(true);
+        layout->addWidget(_icon);
+        layout->addWidget(_text, 1);
+        setFixedHeight(sizeHint().height());
+    }
+
+    void setStatus(ChartUpdateState state, const QString& chartTitle, int phase, const QString& failure = {})
+    {
+        const bool updating = state == ChartUpdateState::Updating;
+        const QString message = !failure.isEmpty() ? failure
+            : updating ? tr("Updating %1").arg(chartTitle)
+            : state == ChartUpdateState::Queued ? tr("%1 is queued for update").arg(chartTitle)
+            : state == ChartUpdateState::NeedsSelectionUpdate ? tr("Cell selection changed. Run Update.") : QString();
+        _icon->setVisible(updating);
+        if (_text->text() != message) _text->setText(message);
+        if (!updating) return;
+        QPixmap icon(_icon->size());
+        icon.fill(Qt::transparent);
+        QPainter painter(&icon);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QColor color = StatusBadge::readableColor(palette().color(QPalette::WindowText), palette().color(QPalette::Window));
+        StatusBadge::paint(painter, color, StatusBadge::State::Busy, phase);
+        painter.end();
+        _icon->setPixmap(icon);
+    }
+
+private:
+    QLabel* _icon = nullptr;
+    QLabel* _text = nullptr;
+};
+
+static void describeViewButtons(QPushButton& reset, QPushButton& save)
+{
+    reset.setIcon(mv::util::StyledIcon("undo"));
+    reset.setToolTip("Reset zoom and pan to show the whole chart.");
+    save.setIcon(save.style()->standardIcon(QStyle::SP_DialogSaveButton));
+    save.setToolTip("Save the chart as an image. Use Export data for the values and analysis settings.");
 }
 
 class ChartStatusSidebar : public QListWidget
@@ -3459,17 +3612,33 @@ public:
     }
 
     std::function<ChartUpdateState(int)> stateForRow;
+    std::function<QString(int)> failureNotice;
+    std::function<void(ChartUpdateState, int)> activeStateChanged;
+    void setLoadingNotice(ChartLoadingNotice* notice) { _notice = notice; }
 
 private:
     void updateBadges()
     {
         if (!isVisible() || !stateForRow) return;
         _phase = (_phase + 45) % 360;
+        const int active = currentRow();
+        if (_notice && active < 0) _notice->setStatus(ChartUpdateState::Stale, {}, _phase);
+        if (active >= 0 && activeStateChanged)
+            activeStateChanged(stateForRow(active), active);
         for (int row = 0; row < count(); ++row) {
             auto* entry = item(row);
             const auto state = stateForRow(row);
-            const int stamp = static_cast<int>(state) * 360 + (state == ChartUpdateState::Updating ? _phase : 0);
-            if (entry->data(Qt::UserRole + 1).isValid() && entry->data(Qt::UserRole + 1).toInt() == stamp)
+            if (_notice && row == active)
+                _notice->setStatus(state, entry->text(), _phase, failureNotice ? failureNotice(row) : QString());
+            const auto group = isEnabled() ? (isActiveWindow() ? QPalette::Active : QPalette::Inactive) : QPalette::Disabled;
+            const bool selected = entry->isSelected();
+            const auto background = palette().color(group, selected ? QPalette::Highlight
+                : alternatingRowColors() && row % 2 ? QPalette::AlternateBase : QPalette::Base);
+            const auto text = palette().color(group, selected ? QPalette::HighlightedText : QPalette::Text);
+            quint64 stamp = static_cast<quint64>(background.rgb()) << 32 | text.rgb();
+            const auto animation = static_cast<int>(state) * 360 + (state == ChartUpdateState::Updating ? _phase : 0);
+            const auto previous = entry->data(Qt::UserRole + 1).toList();
+            if (previous.size() == 2 && previous[0].toULongLong() == stamp && previous[1].toInt() == animation)
                 continue;
             if (!entry->data(Qt::UserRole + 2).isValid()) {
                 entry->setData(Qt::UserRole + 2, entry->icon());
@@ -3480,29 +3649,33 @@ private:
             QPainter painter(&pixmap);
             painter.setRenderHint(QPainter::Antialiasing);
             entry->data(Qt::UserRole + 2).value<QIcon>().paint(&painter, QRect(0, 0, 21, 21));
-            QString status;
-            if (state == ChartUpdateState::Ready) {
-                status = "Up to date";
-                painter.setPen(QPen(QColor("#16803c"), 2.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                painter.drawPolyline(QPolygonF{ QPointF(23, 11), QPointF(27, 15), QPointF(33, 7) });
-            } else if (state == ChartUpdateState::Updating) {
-                status = "Updating";
-                painter.setPen(QPen(QColor("#2377b8"), 2.2, Qt::SolidLine, Qt::RoundCap));
-                painter.drawArc(QRectF(24, 6, 9, 9), _phase * 16, 250 * 16);
-            } else {
-                status = "Outdated, unavailable, or failed";
-                painter.setPen(QPen(QColor("#c52c35"), 2.2, Qt::SolidLine, Qt::RoundCap));
-                painter.drawLine(QPointF(24, 7), QPointF(32, 15));
-                painter.drawLine(QPointF(32, 7), QPointF(24, 15));
-            }
+            painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            painter.fillRect(QRect(0, 0, 21, 21), StatusBadge::readableColor(text, background));
+            painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+            const QString status = state == ChartUpdateState::Ready ? "Up to date"
+                : state == ChartUpdateState::Updating ? "Updating"
+                : state == ChartUpdateState::Queued ? "Waiting to update"
+                : state == ChartUpdateState::NeedsSelectionUpdate ? "Cell selection changed. Run Update." : "Outdated, unavailable, or failed";
+            const auto glyph = state == ChartUpdateState::Ready ? StatusBadge::State::Ready
+                : state == ChartUpdateState::Updating ? StatusBadge::State::Busy
+                : (state == ChartUpdateState::NeedsSelectionUpdate || state == ChartUpdateState::Queued) ? StatusBadge::State::Warning : StatusBadge::State::Error;
+            const QColor accent(state == ChartUpdateState::Ready ? "#16803c"
+                : state == ChartUpdateState::Updating ? "#2377b8"
+                : (state == ChartUpdateState::NeedsSelectionUpdate || state == ChartUpdateState::Queued) ? "#875800" : "#c52c35");
+            painter.translate(20, 2);
+            painter.setPen(StatusBadge::readableColor(text, background));
+            painter.setBrush(accent);
+            painter.drawEllipse(QRectF(0.5, 0.5, 16, 16));
+            StatusBadge::paint(painter, StatusBadge::readableColor(Qt::white, accent), glyph, _phase);
             painter.end();
             entry->setIcon(QIcon(pixmap));
-            entry->setData(Qt::UserRole + 1, stamp);
+            entry->setData(Qt::UserRole + 1, QVariantList{QVariant::fromValue(stamp), animation});
             entry->setToolTip(entry->data(Qt::UserRole + 3).toString() + "\nStatus: " + status);
         }
     }
 
     int _phase = 0;
+    QPointer<ChartLoadingNotice> _notice;
 };
 
 class SpeciesDeDialog : public QDialog
@@ -3523,17 +3696,21 @@ public:
     {
         setWindowTitle("Species differential expression");
         auto* layout = new QVBoxLayout(this);
-        _help = new ChartHelpDialog(this, _showGuide);
-        _help->onHighlightsChanged = [this](bool checked) {
+        _help = new ChartHelpDialog(this);
+        auto* highlights = new QCheckBox(tr("Highlight chart examples"), this);
+        highlights->setToolTip(tr("Mark a representative value in amber and explain it in Chart help. This only guides chart reading; it does not change the analysis."));
+        connect(highlights, &QCheckBox::toggled, this, [this](bool checked) {
             _showGuide = checked;
             updateReadingGuide();
-        };
+        });
         const auto addExport = [this](QHBoxLayout* controls) {
             auto* help = new QPushButton("Chart help", this);
+            help->setIcon(mv::util::StyledIcon("info-circle"));
             help->setToolTip("Open the chart overview, data explanation, and reading guide.");
             controls->addWidget(help);
             connect(help, &QPushButton::clicked, _help, &ChartHelpDialog::openHelp);
             auto* exportData = new QPushButton("Export data", this);
+            exportData->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
             exportData->setToolTip("Save a report with the chart explanation, settings and underlying values.");
             controls->addWidget(exportData);
             connect(exportData, &QPushButton::clicked, this, [this] { exportCurrentChart(); });
@@ -3542,10 +3719,10 @@ public:
         // ---- parameters (they are the settings of the "Species differential expression" group) ----
         auto* optionsButton = new QToolButton(this);
         optionsButton->setIcon(mv::util::StyledIcon("sliders-h"));
-        optionsButton->setText("DE options");
+        optionsButton->setText("Expression options");
         optionsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         optionsButton->setPopupMode(QToolButton::InstantPopup);
-        optionsButton->setToolTip("Choose which genes appear in top-gene results and candidate heatmaps.");
+        optionsButton->setToolTip("Set the direction, ranking method and maximum number of genes for differential expression results.");
         auto* optionsMenu = new QMenu(optionsButton);
         auto* optionsWidgetAction = new QWidgetAction(optionsMenu);
         auto* optionsContent = new QWidget(optionsMenu);
@@ -3567,9 +3744,6 @@ public:
         optionsButton->setMenu(optionsMenu);
         _status = new QLabel(this);
         _status->setWordWrap(true);
-        _updateStatus = new QLabel(this);
-        _updateStatus->setWordWrap(true);
-        _updateStatus->hide();
 
         const auto emitParameters = [this]() {
             if (onParametersChanged)
@@ -3584,9 +3758,10 @@ public:
         auto* body = new QHBoxLayout();
         _navigation = new ChartStatusSidebar(this);
         _navigation->stateForRow = [this, &settings](int row) {
-            if (_updateStatus->text().startsWith("Update failed")) return ChartUpdateState::Stale;
             const auto base = settings.speciesDeChartState();
-            if (base != ChartUpdateState::Ready) return base;
+            const bool independent = row >= 3 && row != 6 && row != 10;
+            if (base != ChartUpdateState::Ready && !(independent && settings.speciesDeStatisticsReady())) return base;
+            if (!independent && _updateStatus.startsWith("Update failed")) return ChartUpdateState::Stale;
             if (row == 1 || row == 2) {
                 if (_groupComparisonPending) return ChartUpdateState::Updating;
                 if (!_detail.valid) return ChartUpdateState::Stale;
@@ -3610,10 +3785,20 @@ public:
         auto* sideLayout = new QVBoxLayout(side);
         sideLayout->setContentsMargins(0, 0, 0, 0);
         sideLayout->addWidget(_navigation, 1);
+        sideLayout->addWidget(highlights);
         sideLayout->addWidget(_status);
-        sideLayout->addWidget(_updateStatus);
         body->addWidget(side);
-        body->addWidget(_tabs, 1);
+        auto* chartColumn = new QVBoxLayout();
+        auto* loadingNotice = new ChartLoadingNotice(this);
+        _navigation->setLoadingNotice(loadingNotice);
+        _navigation->failureNotice = [this, &settings](int row) {
+            if (settings.speciesDeStatisticsReady() && row >= 3 && row != 6 && row != 10)
+                return QString();
+            return _updateStatus.startsWith("Update failed") ? _updateStatus : QString();
+        };
+        chartColumn->addWidget(loadingNotice);
+        chartColumn->addWidget(_tabs, 1);
+        body->addLayout(chartColumn, 1);
         layout->addLayout(body, 1);
 
         // ---- tab 1: overview heatmap ----
@@ -3626,6 +3811,7 @@ public:
         overviewBar->addStretch(1);
         auto* reset = new QPushButton("Reset view");
         auto* save = new QPushButton("Save image…");
+        describeViewButtons(*reset, *save);
         qttooltipkit::set(*reset, QObject::tr("Reset view"), QObject::tr("Show everything again (double click on the heatmap)"));
         overviewBar->addWidget(reset);
         addExport(overviewBar);
@@ -3689,6 +3875,7 @@ public:
         groupBar->addStretch(1);
         auto* volcanoReset = new QPushButton("Reset view");
         auto* volcanoSave = new QPushButton("Save image…");
+        describeViewButtons(*volcanoReset, *volcanoSave);
         groupBar->addWidget(volcanoReset);
         addExport(groupBar);
         groupBar->addWidget(volcanoSave);
@@ -3698,7 +3885,7 @@ public:
         _groupCompareTimer->setSingleShot(true);
         _groupCompareTimer->setInterval(250);
         connect(_groupCompareTimer, &QTimer::timeout, this, [this]() {
-            if (_updateStatus->text().isEmpty() && onGroupsChosen)
+            if (_updateStatus.isEmpty() && onGroupsChosen)
                 onGroupsChosen(_groupA->selected(), _groupB->selected());
         });
         _groupA->onSelectionChanged = [this](const QStringList& selected) {
@@ -3716,6 +3903,7 @@ public:
         auto* detailPlots = new QTabWidget(splitter);
         detailPlots->tabBar()->hide();
         _volcano = new ZoomablePlotWidget(detailPlots);
+        _volcano->setWidePlot(true);
         _volcano->setShowTrendLine(false);
         _volcano->setPointSize(6);
         _volcano->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
@@ -3723,6 +3911,7 @@ public:
         detailPlots->setTabToolTip(detailPlots->indexOf(_volcano),
             qttooltipkit::markup(tr("Expression difference"), tr("Horizontal position shows the difference in mean expression between groups.\nHigher points have stronger evidence after false discovery rate correction."), {}));
         _detectionPlot = new ZoomablePlotWidget(detailPlots);
+        _detectionPlot->setWidePlot(true);
         _detectionPlot->setShowTrendLine(false);
         _detectionPlot->setPointSize(6);
         _detectionPlot->setLabelMode(ZoomablePlotWidget::LabelMode::Highlighted);
@@ -3744,9 +3933,10 @@ public:
         _table->verticalHeader()->hide();
         _table->horizontalHeader()->setStretchLastSection(true);
         splitter->addWidget(_table);
-        splitter->setStretchFactor(0, 3);
-        splitter->setStretchFactor(1, 2);
+        splitter->setStretchFactor(0, 1);
+        splitter->setStretchFactor(1, 0);
         splitter->setChildrenCollapsible(false);
+        fitDetailTable();
         _detailInfo = new ChartHelpText(detailPage);
         _detailGuide = new ChartHelpText(detailPage);
         detailLayout->addWidget(splitter, 1);
@@ -3775,12 +3965,14 @@ public:
         _extraPlot->setLabelMode(ZoomablePlotWidget::LabelMode::None);
         _extraPlot->setPointSize(5);
         _extraHeatmap = new HeatmapWidget(extraPage);
-        extraBar->addWidget(_extraHeatmap->colorMap().createWidget(extraPage, 0));
+        _extraColorMap = _extraHeatmap->colorMap().createWidget(extraPage, 0);
+        extraBar->addWidget(_extraColorMap);
         extraBar->addStretch();
         _extraPlot->setColorMapImage(_extraHeatmap->colorMap().getColorMapImage());
         connect(&_extraHeatmap->colorMap(), &ColorMapAction::imageChanged, _extraPlot, &ZoomablePlotWidget::setColorMapImage);
         auto* extraReset = new QPushButton("Reset view", extraPage);
         auto* extraSave = new QPushButton("Save image…", extraPage);
+        describeViewButtons(*extraReset, *extraSave);
         extraBar->addWidget(extraReset);
         addExport(extraBar);
         extraBar->addWidget(extraSave);
@@ -3831,10 +4023,6 @@ public:
         _extraPlot->setDetailProvider([this](const Point& point) { return _extraTips.value(point.id); });
         _extraPlot->setOnClick([this](int index) {
             const auto id = _extraPlot->pointData(index).id;
-            if (_navigation->currentRow() == 4) {
-                showIntersectionGenes(id);
-                return;
-            }
             if (const auto bar = _countBars.constFind(id); bar != _countBars.cend()) {
                 showCountGenes(bar.value().first, bar.value().second);
                 return;
@@ -3908,9 +4096,7 @@ public:
 
     void setUpdateStatus(const QString& status)
     {
-        _updateStatus->setText(status);
-        _updateStatus->setVisible(!status.isEmpty());
-        _status->setVisible(status.isEmpty());
+        _updateStatus = status;
         if (status.isEmpty() && _groupComparisonPending)
             _groupCompareTimer->start();
     }
@@ -3920,9 +4106,21 @@ public:
     QStringList groupB() const { return _groupB->selected(); }
     QString currentSpecies() const { return QString(); }
 
+    void refreshCompletedStatistics(const QSet<QString>& selectedSpecies, const QString& focusGene, double level)
+    {
+        _level = level;
+        _overviewPending = true;
+        _selectedSpecies = selectedSpecies;
+        _focusGene = focusGene;
+        _extraComparisonA.clear();
+        _extraComparisonB.clear();
+        renderExtra();
+    }
+
     void setResult(const SpeciesDeResult& result, const QSet<QString>& selectedSpecies, const QString& focusGene)
     {
         _result = result;
+        _overviewPending = false;
         _extraComparisonA.clear();
         _extraComparisonB.clear();
         _selectedSpecies = selectedSpecies;
@@ -4020,7 +4218,11 @@ public:
         }
         _level = significanceLevel;
         _detailDescription = detail.valid
-            ? QString("%1 against %2 other species: %3 genes tested, %4 top candidates.").arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size())
+            ? (_useGroups
+                ? QString("%1 vs %2: %3 genes tested, %4 top candidates.")
+                    .arg(prettyName(detail.species), detail.comparison.join(", ")).arg(detail.genes.size()).arg(detail.top.size())
+                : QString("%1 against %2 other species: %3 genes tested, %4 top candidates.")
+                    .arg(prettyName(detail.species)).arg(detail.comparison.size()).arg(detail.genes.size()).arg(detail.top.size()))
             : (detail.message.isEmpty() ? QString("No data.") : detail.message);
         if (detail.valid && !detail.message.isEmpty()) _detailDescription += " " + detail.message;
         updateDetailDescription();
@@ -4058,7 +4260,7 @@ private:
     {
         _groupComparisonPending = true;
         updateDetailDescription();
-        if (_updateStatus->text().isEmpty())
+        if (_updateStatus.isEmpty())
             _groupCompareTimer->start();
     }
 
@@ -4116,12 +4318,19 @@ private:
         if (_useGroups) {
             const QString sdA = _detail.groupACount > 1 ? QString::number(static_cast<double>(_detail.focusSd[gene]), 'f', 3) : QStringLiteral("n/a (one species)");
             const QString sdB = _detail.groupBCount > 1 ? QString::number(static_cast<double>(_detail.restSd[gene]), 'f', 3) : QStringLiteral("n/a (one species)");
-            return QString("<b>%1</b><br>Mean A - mean B: %2<br>Group A mean: %3 (SD %4)<br>Group B mean: %5 (SD %6)<br>Moderated t = %7, p = %8, FDR = %9<br>Detected in A: %10%; in B: %11%")
+            const bool hasTest = _detail.groupACount + _detail.groupBCount > 2;
+            const QString evidence = hasTest
+                ? QString("Moderated t = %1, p = %2, FDR = %3")
+                    .arg(static_cast<double>(_detail.t[gene]), 0, 'f', 2)
+                    .arg(static_cast<double>(_detail.pValue[gene]), 0, 'g', 3)
+                    .arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3)
+                : QStringLiteral("Statistical significance unavailable (one species per group)");
+            return QString("<b>%1</b><br>Mean A - mean B: %2<br>Group A mean: %3 (SD %4)<br>Group B mean: %5 (SD %6)<br>%7<br>Detected in A: %8%; in B: %9%")
                 .arg(_detail.genes[gene].toHtmlEscaped())
                 .arg(static_cast<double>(_detail.delta[gene]), 0, 'f', 3)
                 .arg(static_cast<double>(_detail.restMean[gene] + _detail.delta[gene]), 0, 'f', 3).arg(sdA)
                 .arg(static_cast<double>(_detail.restMean[gene]), 0, 'f', 3).arg(sdB)
-                .arg(static_cast<double>(_detail.t[gene]), 0, 'f', 2).arg(static_cast<double>(_detail.pValue[gene]), 0, 'g', 3).arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3)
+                .arg(evidence)
                 .arg(static_cast<double>(_detail.detection[gene]) * 100.0, 0, 'f', 0).arg(static_cast<double>(_detail.restDetection[gene]) * 100.0, 0, 'f', 0);
         }
         return QString("<b>%1</b> in <b>%2</b><br>Difference to the other species: %3<br>Species: %4, others: %5 (SD %6)<br>Moderated t = %7, p = %8, FDR = %9<br>"
@@ -4140,12 +4349,15 @@ private:
             return QString();
         const double detectionA = static_cast<double>(_detail.detection[gene]) * 100.0;
         const double detectionB = static_cast<double>(_detail.restDetection[gene]) * 100.0;
-        return QString("<b>%1</b><br>Mean-expression difference (A - B): %2<br>Detected in A: %3%<br>Detected in B: %4%<br>Detection difference (A - B): %5 percentage points<br>FDR: %6")
+        const QString evidence = _useGroups && _detail.groupACount + _detail.groupBCount == 2
+            ? QStringLiteral("Statistical significance unavailable (one species per group)")
+            : QString("FDR: %1").arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3);
+        return QString("<b>%1</b><br>Mean-expression difference (A - B): %2<br>Detected in A: %3%<br>Detected in B: %4%<br>Detection difference (A - B): %5 percentage points<br>%6")
             .arg(_detail.genes[gene].toHtmlEscaped())
             .arg(static_cast<double>(_detail.delta[gene]), 0, 'f', 3)
             .arg(detectionA, 0, 'f', 1).arg(detectionB, 0, 'f', 1)
             .arg(detectionA - detectionB, 0, 'f', 1)
-            .arg(static_cast<double>(_detail.fdr[gene]), 0, 'g', 3);
+            .arg(evidence);
     }
 
     void rebuildPlots(bool labelAll, bool keepView = true)
@@ -4157,10 +4369,19 @@ private:
     void rebuildVolcano(bool labelAll, bool keepView)
     {
         _labelAll = labelAll;
+        _volcano->setEmptyMessage({});
         if (!_detail.valid) {
+            _volcano->setGuideLines({});
             _volcano->setData({}, "Difference to the other species", "-log10 FDR", true);
             return;
         }
+        if (_useGroups && _detail.groupACount + _detail.groupBCount == 2) {
+            _volcano->setGuideLines({});
+            _volcano->setEmptyMessage("A significance axis is unavailable with one species in each group. Use Detection vs effect or Ranked DE genes to inspect expression differences.");
+            _volcano->setData({}, "Mean A - mean B", "Statistical significance unavailable", keepView);
+            return;
+        }
+        _volcano->setEmptyMessage({});
         QVector<Point> points;
         points.reserve(_detail.genes.size());
         const QSet<int> topSet(_detail.top.begin(), _detail.top.end());
@@ -4197,6 +4418,7 @@ private:
     {
         _labelAll = labelAll;
         if (!_detail.valid) {
+            _detectionPlot->setGuideLines({});
             _detectionPlot->setData({}, "Mean A - mean B", "Detection shift (pp)", true);
             return;
         }
@@ -4236,6 +4458,18 @@ private:
             "Detection shift (pp)", keepView);
     }
 
+    void fitDetailTable()
+    {
+        constexpr int maximumVisibleRows = 8;
+        const int visibleRows = std::min(_table->rowCount(), maximumVisibleRows);
+        int height = _table->horizontalHeader()->sizeHint().height() + 2 * _table->frameWidth();
+        for (int row = 0; row < visibleRows; ++row)
+            height += _table->rowHeight(row);
+        // Keep the last visible row readable if the columns need horizontal scrolling.
+        height += _table->horizontalScrollBar()->sizeHint().height();
+        _table->setMaximumHeight(height);
+    }
+
     void rebuildTable()
     {
         const QSignalBlocker blocker(_table);
@@ -4257,8 +4491,8 @@ private:
                     << (_detail.groupACount > 1 ? number(static_cast<double>(_detail.focusSd[g]), 'f', 3) : new QTableWidgetItem("n/a"))
                     << number(static_cast<double>(_detail.restMean[g]), 'f', 3)
                     << (_detail.groupBCount > 1 ? number(static_cast<double>(_detail.restSd[g]), 'f', 3) : new QTableWidgetItem("n/a"))
-                    << number(static_cast<double>(_detail.t[g]), 'f', 2)
-                    << number(static_cast<double>(_detail.fdr[g]), 'g', 3)
+                    << (_detail.groupACount + _detail.groupBCount > 2 ? number(static_cast<double>(_detail.t[g]), 'f', 2) : new QTableWidgetItem("n/a"))
+                    << (_detail.groupACount + _detail.groupBCount > 2 ? number(static_cast<double>(_detail.fdr[g]), 'g', 3) : new QTableWidgetItem("n/a"))
                     << number(static_cast<double>(_detail.detection[g]) * 100.0, 'f', 0)
                     << number(static_cast<double>(_detail.restDetection[g]) * 100.0, 'f', 0);
             }
@@ -4283,6 +4517,7 @@ private:
         }
         _table->setSortingEnabled(true);
         _table->resizeColumnsToContents();
+        fitDetailTable();
     }
 
     bool _useGroups = false;
@@ -4302,12 +4537,14 @@ private:
     QSpinBox* _topCount = nullptr;
     QComboBox* _rank = nullptr;
     QLabel* _status = nullptr;
-    QLabel* _updateStatus = nullptr;
+    QString _updateStatus;
+    bool _overviewPending = false;
     QTabWidget* _tabs = nullptr;
     ChartStatusSidebar* _navigation = nullptr;
     ZoomablePlotWidget* _extraPlot = nullptr;
     HeatmapWidget* _extraHeatmap = nullptr;
     ChartHelpText* _extraInfo = nullptr;
+    QWidget* _extraColorMap = nullptr;
     ChartHelpText *_overviewGuide = nullptr, *_detailGuide = nullptr, *_extraGuide = nullptr;
     ChartHelpDialog* _help = nullptr;
     bool _showGuide = false;
@@ -4848,7 +5085,8 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     }
 
     // ---- 5. Sorting, widths, Trait Correlation bar delegate ------------------------------------------------------
-    proxyModel->sort(1, Qt::DescendingOrder);
+    proxyModel->sort(kWeightedAppearanceColumn, Qt::DescendingOrder);
+    geneTableView->horizontalHeader()->setSortIndicator(kWeightedAppearanceColumn, Qt::DescendingOrder);
     geneTableView->setColumnWidth(0, 85);
     geneTableView->setColumnWidth(1, 80);
     geneTableView->setColumnWidth(2, 220);
@@ -4880,6 +5118,7 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
     // The selection model is new for every model, so the connection cannot be duplicated.
     connect(geneTableView->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& current, const QModelIndex&) {
         onGeneRowChanged(current);
+        _settingsAction.traitPlotSelectionChanged();
         refreshTraitPlot();
         });
 
@@ -4888,6 +5127,7 @@ void XSCGeneDetectPlugin::installGeneTableModel(QStandardItemModel* model)
         for (const auto& row : geneTableView->selectionModel()->selectedRows(0))
             rows << QString::number(row.row());
         _settingsAction.getSelectedRowIndexAction().setString(rows.join(","));
+        _settingsAction.traitPlotSelectionChanged();
         refreshTraitPlot();
     });
 
@@ -5011,6 +5251,10 @@ void XSCGeneDetectPlugin::refreshSpeciesDe()
     const QStringList selected = _settingsAction.getSpeciesExplorerInMap().getSelectedOptions();
     _speciesDeLastGene = _settingsAction.getSelectedGeneAction().getString();
 
+    if (_settingsAction.speciesDeStatisticsReady()) {
+        dialog->refreshCompletedStatistics(QSet<QString>(selected.begin(), selected.end()), _speciesDeLastGene, _settingsAction.significanceLevel());
+        return;
+    }
     dialog->setControls(_settingsAction.getDeDirection().getCurrentIndex(), _settingsAction.getDeTopGenes().getValue(), _settingsAction.getDeRankBy().getCurrentIndex());
     dialog->setResult(result, QSet<QString>(selected.begin(), selected.end()), _speciesDeLastGene);
     if (!result.valid)
@@ -5115,7 +5359,7 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
     auto* dialog = static_cast<TraitPlotDialog*>(_traitPlotDialog.data());
     QStringList selectedGenes;
     QStringList tableGenes;
-    QString focus;
+    const QString focus = _settingsAction.traitPlotFocusGene();
     if (const auto* view = _settingsAction.getGeneTableView(); view && view->selectionModel()) {
         if (const auto* model = view->model(); model && model->columnCount() > 1) {
             for (int row = 0; row < model->rowCount(); ++row)
@@ -5125,11 +5369,6 @@ void XSCGeneDetectPlugin::refreshTraitPlot()
         const auto* selection = view->selectionModel();
         for (const auto& row : selection->selectedRows(0))
             selectedGenes << row.data().toString();
-        const auto current = selection->currentIndex().siblingAtColumn(0);
-        if (selection->isSelected(current))
-            focus = current.data().toString();
-        else if (!selectedGenes.isEmpty())
-            focus = selectedGenes.first();
     }
     dialog->setResults(_settingsAction.getTraitMatrix(), _settingsAction.getAllSpeciesTraitMatrix(), _settingsAction.getTraitFocus(), _settingsAction.getGeneTraitValues(),
         _settingsAction.getGeneTraitExtras(), _settingsAction.traitContributionShown(),

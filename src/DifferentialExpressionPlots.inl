@@ -20,7 +20,7 @@ const QStringList& SpeciesDeDialog::dePlotQuestions()
         "Which genes show relatively higher or lower expression in each species?",
         "Which genes show the largest statistically supported expression differences?",
         "Are expression differences associated with the fraction of expressing cells?",
-        "Which species have the most upregulated and downregulated genes?",
+        "Which species have the most genes with higher or lower expression than the other species?",
         "Which genes are identified as differentially expressed in multiple species comparisons?",
         "Which genes show the strongest expression changes between the selected groups?",
         "How do mean expression and the fraction of expressing cells vary across species?",
@@ -35,24 +35,24 @@ const QStringList& SpeciesDeDialog::dePlotQuestions()
 QString SpeciesDeDialog::deDataExplanation(int mode)
 {
     static const QString groupInput = "Input: Mean expression for each gene and species in Groups A and B, from the selected cell types.";
-    static const QString groupTest = "Each species has equal weight. Where significance can be estimated, a moderated species-level test stabilizes variance estimates and the Benjamini–Hochberg correction adjusts p-values across genes.";
+    static const QString groupTest = "Each species has equal weight. A moderated species-level test stabilizes variance estimates by partly pooling information across genes where the groups support a test. Its t statistic expresses the mean difference in units of estimated standard error. The Benjamini–Hochberg correction adjusts p-values across genes to account for multiple testing. With one species in each group, only the expression differences are available.";
     static const QStringList explanations{
         "Input: Per-gene species-versus-rest expression differences, detection fractions, and test results.\n"
         "Processing: Apply the analysis filters and ranking to choose candidate genes across species.\n"
-        "Output: One cell per species and candidate gene, colored by mean expression in that species minus the mean of the other species.",
+        "Output: One cell per species and candidate gene, colored by mean expression in that species minus the mean of the other species. The gene may have been selected for a different species. Use the cell tooltip to evaluate the effect and adjusted p-value for this row.",
         groupInput + "\nProcessing: " + groupTest + "\n"
-        "Output: Each gene is plotted at its mean difference (A minus B) and negative base-10 logarithm of its adjusted p-value (FDR). Smaller adjusted p-values appear higher.",
+        "Output: Each gene is plotted at its mean difference (A minus B) and the negative base-10 logarithm of its adjusted p-value. Smaller adjusted p-values appear higher. Values at or below 10⁻¹² share the same height.",
         groupInput + " This chart also uses the fraction of cells expressing each gene in each species.\n"
         "Processing: Average expression means and detection fractions separately within each group, then subtract Group B from Group A.\n"
-        "Output: Each point shows a gene’s mean expression difference and detection difference in percentage points (pp).",
+        "Output: Each point shows a gene’s mean expression difference and detection difference in percentage points (pp). For example, 30% in Group A and 20% in Group B gives a shift of +10 percentage points.",
         "Input: Per-gene expression differences and adjusted p-values (FDR) from each species-versus-rest comparison.\n"
         "Processing: Keep nonzero effects below the FDR threshold and count positive and negative effects separately.\n"
         "Output: Two gene counts per species, shown as opposing bars.",
         "Input: Per-gene expression differences and adjusted p-values (FDR) from each species-versus-rest comparison.\n"
         "Processing: Group genes by the exact set of species in which their nonzero effects pass the FDR threshold.\n"
         "Output: Up to 20 largest intersections, shown as gene counts and a species membership matrix. UpSet is the name of this set-intersection display.",
-        groupInput + "\nProcessing: " + groupTest + " Keep genes with a nonzero difference and an adjusted p-value below the FDR threshold, then sort by signed difference.\n"
-        "Output: Ranked genes and their Group A minus Group B mean expression differences.",
+        groupInput + "\nProcessing: " + groupTest + " When significance can be estimated, keep genes with a nonzero difference and an adjusted p-value below the FDR threshold. With one species per group, show all finite, nonzero differences without a significance filter.\n"
+        "Output: Genes ranked by the absolute size of their difference. Bar direction shows the signed Group A minus Group B mean expression difference.",
         "Input: Mean expression and fraction of expressing cells by species and gene, for candidate genes from the differential expression heatmap and the selected gene.\n"
         "Processing: Pair each mean with its detection fraction.\n"
         "Output: One dot per species and gene, colored by mean expression and sized by detection fraction.",
@@ -63,7 +63,7 @@ QString SpeciesDeDialog::deDataExplanation(int mode)
         "Output: One signed expression difference per species.",
         "Input: Species-versus-rest expression differences for all tested genes.\n"
         "Processing: For each species, calculate the median, first and third quartiles, minimum, and maximum of finite differences.\n"
-        "Output: One box per species. Its box spans the middle half and its whiskers span the full range.",
+        "Output: One box per species. Its box spans the middle half, from the first quartile (25th percentile) to the third quartile (75th percentile). The line marks the median and the whiskers span the full range.",
         "Input: Species mean expression for candidate genes and the selected gene, plus numeric trait values.\n"
         "Processing: Match species to valid trait values and sort them from low to high.\n"
         "Output: A species-by-gene heatmap colored by mean expression.",
@@ -73,7 +73,7 @@ QString SpeciesDeDialog::deDataExplanation(int mode)
     };
     return explanations.value(mode) + "\nTerms: DE means differential expression, or a difference in gene expression between groups. "
         "FDR means false discovery rate, the expected proportion of false positives among results called significant. "
-        "The chart labels per-gene adjusted p-values as FDR.";
+        "The chart labels Benjamini–Hochberg adjusted p-values as FDR. A gene's adjusted p-value is the threshold at which that gene enters the significant set.";
 }
 
 static bool significantDeEffect(float effect, float fdr, double threshold)
@@ -87,9 +87,9 @@ void SpeciesDeDialog::updateReadingGuide()
         "Read down one gene column to see which species have higher or lower expression relative to their own comparison groups. A value near zero means the species mean is close to the mean of the other species. Check the cell tooltip for its adjusted p-value before treating a large difference as statistically supported.",
         "Read horizontally for the size and direction of the expression difference. Points right of zero favor Group A. Read vertically for statistical evidence, with higher points representing smaller adjusted p-values. The horizontal line marks the selected false discovery rate threshold.",
         "Find a point far above or below zero. It marks a gene with a large change in the percentage of cells expressing it. Then check the horizontal axis. A strong detection shift with a small mean-expression difference can occur when a gene is expressed weakly in many cells.",
-        "Compare bars on the same side across species. Left counts genes with lower mean expression and right counts genes with higher mean expression. Counts depend on the false discovery rate threshold. Click a bar to see the genes behind it.",
-        "Start with the tallest bar and find the column with the same intersection number. A filled cell marks a species included in that exact set. For example, an intersection containing two species excludes genes that also passed the threshold in a third species. Click the bar to see the gene list.",
-        "Compare genes at the two ends of the ranking. Positive differences favor Group A and negative differences favor Group B. Ranking is by signed expression difference among genes that pass the adjusted p-value filter. Hover to check the adjusted p-value and group comparison.",
+        "Compare bars on the same side across species. Left counts genes with lower mean expression and right counts genes with higher mean expression. Counts use nonzero effects that pass the FDR threshold across all tested genes. Click a bar to see the genes behind it.",
+        "Each bar gives the number of genes in the column directly below it. A dot marks a species-versus-rest comparison in which those genes had a nonzero expression difference and passed the FDR threshold. If only species A and B have dots, the genes passed in both comparisons and met the criteria in no other tested species. Click a bar or column to see the gene names.",
+        "Read from the top for the largest differences in either direction. Bars left of zero show higher mean expression in Group B. Bars right of zero show higher mean expression in Group A. Hover for the two means and the adjusted p-value.",
         "Compare dot size and color separately. A large dot means many cells express the gene. Its color shows the mean expression, so a large dot can still have a low mean. Compare the same gene column across species to see which quantity changes.",
         "Compare genes near and far from the horizontal zero line. Distance from zero shows the size of the difference, and its sign shows which group has the higher mean. Scan left to right to see whether the biggest differences occur at low or high average expression. Color marks results that pass the adjusted p-value threshold.",
         "Compare species above and below zero for the same gene. Each point uses the other species as its reference, so every point has a different comparison group. The horizontal order follows the tree. Hover for the adjusted p-value behind each effect.",
@@ -108,9 +108,17 @@ void SpeciesDeDialog::updateReadingGuide()
     if (!_showGuide) return;
 
     if (mode == 0 || mode == 6 || mode == 10) {
-        const auto cell = strongestGuideCell(*heatmap);
+        const auto cell = strongestGuideCell(*heatmap, false, mode == 6);
         heatmap->setReadingGuideCell(cell);
-        label->setText(label->text() + guideCellNote(*heatmap, cell));
+        if (cell.x() < 0) return;
+        label->setText(label->text() + "\n\n" + guideCellNote(*heatmap, cell).trimmed());
+        if (mode == 6)
+            label->setText(label->text() + QString(" The dot area represents %1% of cells expressing the gene.")
+                .arg(100.0 * heatmap->dotSizes()[cell.y()][cell.x()], 0, 'g', 4));
+        else if (mode == 0)
+            label->setText(label->text() + " The value compares this species with the mean of the other species. See the tooltip for the adjusted p-value.");
+        else
+            label->setText(label->text() + " This value is the species mean. Trait values determine the row order.");
         return;
     }
     QSet<int> marks;
@@ -120,43 +128,70 @@ void SpeciesDeDialog::updateReadingGuide()
         return index;
     };
     const auto noScore = std::numeric_limits<double>::quiet_NaN();
+    QString reason;
     if (mode == 3 || mode == 5 || mode == 11 || mode == 8) {
         if (mode == 8) {
             mark([](const Point& point) { return point.y; });
             mark([](const Point& point) { return -point.y; });
+            reason = QString(" These are the lowest and highest species effects for %1. Point color separately indicates whether each effect passes the threshold.").arg(_focusGene);
         } else {
             const int positive = mark([&](const Point& point) { return mode == 11 || point.x > 0 ? point.x : noScore; });
             const int negative = mark([&](const Point& point) { return mode == 11 || point.x < 0 ? -point.x : noScore; });
             if (mode == 3) {
                 if (positive >= 0) {
                     const auto point = plot->pointData(positive);
-                    label->setText(label->text() + QString(" Most upregulated: %1 (%2).").arg(_extraSpecies.value(point.id)).arg(point.x));
+                    label->setText(label->text() + QString("\n\nAmber marks %1, which has a highest count of genes with higher expression (%2).").arg(_extraSpecies.value(point.id)).arg(point.x));
                 }
                 if (negative >= 0) {
                     const auto point = plot->pointData(negative);
-                    label->setText(label->text() + QString(" Most downregulated: %1 (%2).").arg(_extraSpecies.value(point.id)).arg(-point.x));
+                    label->setText(label->text() + QString("\n\nAmber marks %1, which has a highest count of genes with lower expression (%2).").arg(_extraSpecies.value(point.id)).arg(-point.x));
                 }
             }
+            if (mode == 5) reason = " The examples mark the largest effects in the directions present among the displayed genes.";
+            if (mode == 11) reason = " The examples are species at the ends of the displayed trait range. Point color is based on their species-versus-rest tests.";
         }
+    } else if (mode == 1) {
+        mark([&](const Point& point) {
+            if (point.id < 0 || point.id >= _detail.fdr.size()) return noScore;
+            const auto adjusted = _detail.fdr[point.id];
+            return adjusted >= 0 ? -static_cast<double>(adjusted) : noScore;
+        });
     } else if (mode == 2) {
-        mark([](const Point& point) { return std::abs(point.y); });
+        mark([&](const Point& point) { return point.y == 0 ? noScore : std::abs(point.y); });
     } else if (mode == 7) {
         mark([&](const Point& point) { return point.colorFraction > 0.5 ? std::abs(point.y) : noScore; });
+        reason = " This example has a largest absolute expression difference among genes passing the threshold.";
     } else if (mode == 9) {
         mark([](const Point& point) { return point.boxHigh - point.boxLow; });
+        reason = " This species has a widest middle half of gene effects.";
     } else {
         const int top = mark([](const Point& point) { return point.y; });
         if (mode == 4 && top >= 0) {
             const int column = plot->pointData(top).id;
-            for (int row = 0; row < heatmap->rowLabels().size(); ++row) {
-                if (heatmap->valueAt(row, column) > 0) {
-                    heatmap->setReadingGuideCell({ column, row });
-                    break;
-                }
+            const auto members = _intersectionSpecies.value(column);
+            const auto count = _intersectionGenes.value(column).size();
+            if (!members.isEmpty()) {
+                heatmap->setReadingGuideColumn(column);
+                QString example = QString("\n\nAmber marks bar and column %1. %2 %3 had a nonzero effect and an adjusted p-value below %4 in the comparisons for %5.")
+                    .arg(column + 1).arg(count).arg(count == 1 ? "gene" : "genes").arg(_level).arg(members.join(", "));
+                if (members.size() < heatmap->rowLabels().size())
+                    example += " Blank rows show tested species where those genes did not meet both conditions.";
+                label->setText(label->text() + example);
             }
         }
     }
-    if (mode != 3) label->setText(label->text() + guidePointNote(*plot, marks));
+    if ((mode == 1 || mode == 2) && !marks.isEmpty()) {
+        const auto point = plot->pointData(*marks.cbegin());
+        const auto gene = _detail.genes.value(point.id);
+        const auto note = mode == 1
+            ? QString("\n\nAmber marks %1, a gene with the smallest adjusted p-value. Mean difference is %2 and the adjusted p-value is %3.")
+                .arg(gene, QString::number(point.x, 'g', 5), QString::number(_detail.fdr[point.id], 'g', 4))
+            : QString("\n\nAmber marks %1, a gene with the largest absolute detection shift. Mean difference is %2 and the detection shift is %3 percentage points.")
+                .arg(gene, QString::number(point.x, 'g', 5), QString::number(point.y, 'g', 5));
+        label->setText(label->text() + note);
+    } else if (mode != 3 && mode != 4 && !marks.isEmpty()) {
+        label->setText(label->text() + "\n\n" + guidePointNote(*plot, marks, mode == 8).trimmed() + reason);
+    }
     plot->setReadingGuidePoints(std::move(marks));
 }
 
@@ -190,15 +225,17 @@ void SpeciesDeDialog::exportCurrentChart()
             const auto groupA = mode <= 2 ? _groupA->selected() : _extraComparisonA;
             report.paragraph(QString("Group A: %1\nGroup B: %2").arg(groupA.join(", "), (mode <= 2 ? comparison.comparison : _extraComparisonB).join(", ")));
             if (!comparison.valid) return;
-            report.heading("All tested genes in the comparison");
+            const bool significanceAvailable = comparison.groupACount + comparison.groupBCount > 2;
+            report.heading(significanceAvailable ? "All tested genes in the comparison" : "Effect sizes for all genes (significance unavailable)");
             report.beginTable({ "Gene", "Mean A", "Mean B", "Difference (A minus B)", "Detection A (%)",
                 "Detection B (%)", "Moderated t", "p-value", "FDR" });
             for (int g = 0; g < comparison.genes.size(); ++g) {
                 const double difference = comparison.delta[g], meanB = comparison.restMean[g];
                 report.row({ comparison.genes[g], ChartDataReport::number(meanB + difference), ChartDataReport::number(meanB),
                     ChartDataReport::number(difference), ChartDataReport::number(100.0 * comparison.detection[g]),
-                    ChartDataReport::number(100.0 * comparison.restDetection[g]), ChartDataReport::number(comparison.t[g]),
-                    ChartDataReport::number(comparison.pValue[g]), ChartDataReport::number(comparison.fdr[g]) });
+                    ChartDataReport::number(100.0 * comparison.restDetection[g]), significanceAvailable ? ChartDataReport::number(comparison.t[g]) : QStringLiteral("n/a"),
+                    significanceAvailable ? ChartDataReport::number(comparison.pValue[g]) : QStringLiteral("n/a"),
+                    significanceAvailable ? ChartDataReport::number(comparison.fdr[g]) : QStringLiteral("n/a") });
             }
             report.endTable();
             if (mode <= 2) return;
@@ -226,7 +263,7 @@ void SpeciesDeDialog::exportCurrentChart()
                 for (size_t g = 0; g < data.genes->size(); ++g) {
                     const float effect = (*row.difference)[g], fdr = (*row.fdr)[g];
                     if (significantDeEffect(effect, fdr, _level))
-                        report.row({ row.species, effect > 0 ? "Upregulated" : "Downregulated", (*data.genes)[g],
+                        report.row({ row.species, effect > 0 ? "Higher in species" : "Lower in species", (*data.genes)[g],
                             ChartDataReport::number(effect), ChartDataReport::number(fdr) });
                 }
             }
@@ -248,7 +285,7 @@ void SpeciesDeDialog::showIntersectionGenes(int column)
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QString("Genes in intersection %1").arg(column + 1));
     auto* layout = new QVBoxLayout(dialog);
-    auto* description = new QLabel(QString("%1 genes at FDR < %2.\nSpecies: %3")
+    auto* description = new QLabel(QString("%1 genes with a nonzero expression difference and an adjusted p-value below %2 in exactly these species comparisons: %3.")
         .arg(genes.size()).arg(_level).arg(_intersectionSpecies.value(column).join(", ")), dialog);
     description->setTextFormat(Qt::PlainText);
     description->setWordWrap(true);
@@ -256,7 +293,8 @@ void SpeciesDeDialog::showIntersectionGenes(int column)
     auto* list = new QListWidget(dialog);
     list->addItems(genes);
     layout->addWidget(list, 1);
-    auto* copy = new QPushButton("Copy all genes", dialog);
+    auto* copy = new QPushButton(mv::util::StyledIcon("copy"), "Copy all genes", dialog);
+    copy->setToolTip("Copy every gene name in this group to the clipboard, one name per line.");
     layout->addWidget(copy, 0, Qt::AlignRight);
     connect(copy, &QPushButton::clicked, dialog, [genes] { QGuiApplication::clipboard()->setText(genes.join('\n')); });
     connect(list, &QListWidget::itemDoubleClicked, dialog, [this](QListWidgetItem* item) { selectExtra(item->text(), {}); });
@@ -270,10 +308,10 @@ void SpeciesDeDialog::showCountGenes(const QString& species, bool upregulated)
     const auto row = std::find_if(data.rows.begin(), data.rows.end(), [&](const auto& item) { return item.species == species; });
     if (!data.genes || row == data.rows.end()) return;
 
-    const QString direction = upregulated ? "Upregulated" : "Downregulated";
+    const QString direction = upregulated ? "higher expression in" : "lower expression in";
     auto* dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(QString("%1 genes in %2").arg(direction, prettyName(species)));
+    dialog->setWindowTitle(QString("Genes with %1 %2").arg(direction, prettyName(species)));
     auto* layout = new QVBoxLayout(dialog);
     auto* description = new QLabel(dialog);
     description->setWordWrap(true);
@@ -360,7 +398,8 @@ void SpeciesDeDialog::renderExtra()
     _extraGroupControls->setVisible(hasGroups && _extraGroupButton->isChecked());
     _extraInfo->setDataExplanation(deDataExplanation(mode));
     _extraHeatmap->setShowAllRowLabels(mode == 4 || mode == 6);
-    const auto data = plotData ? plotData() : SpeciesDePlotData{};
+    const bool waitingForOverview = _overviewPending && (mode == 6 || mode == 10);
+    const auto data = plotData && !waitingForOverview ? plotData() : SpeciesDePlotData{};
     _extraTips.clear(); _extraGenes.clear(); _extraSpecies.clear();
     _extraRows.clear(); _extraColumns.clear(); _extraCellTips.clear();
     _countBars.clear();
@@ -368,14 +407,18 @@ void SpeciesDeDialog::renderExtra()
     _intersectionSpecies.clear();
     _extraPlot->setGuideLines({});
     _extraPlot->setColumns({}, {}, {});
-    _extraPlot->setHistogramWidth(0);
-    _extraPlot->setHorizontalBars(mode == 3);
+    _extraPlot->setHorizontalBars(mode == 3 || mode == 5);
+    _extraPlot->setCenteredXAxis(mode == 5);
     const bool categories = mode == 3 || mode == 5 || mode == 9;
     _extraPlot->setGeneLabels(categories);
     _extraPlot->setSpaceForCategories(categories && mode != 3);
     _extraPlot->setConnectedSeries(mode == 8);
     const bool heatmap = mode == 4 || mode == 6 || mode == 10;
-    _extraPlot->setVisible(!heatmap || mode == 4);
+    _extraHeatmap->setMembershipMode(mode == 4);
+    _extraHeatmap->setIntersectionCounts({});
+    _extraHeatmap->setEmptyMessage({});
+    _extraColorMap->setVisible(mode != 4 && mode != 5);
+    _extraPlot->setVisible(!heatmap);
     _extraHeatmap->setVisible(heatmap);
     QVector<Point> points;
     QString xTitle, yTitle, info;
@@ -412,7 +455,11 @@ void SpeciesDeDialog::renderExtra()
         _extraInfo->setText("Waiting for differential-expression results.\nBiological relevance: " + question);
         _extraPlot->setEmptyMessage("Run differential expression analysis to populate this chart.");
         _extraPlot->setData({}, {}, {});
-        if (heatmap) setHeatmap({}, {}, {}, "Differential expression");
+        if (heatmap) {
+            _extraHeatmap->setEmptyMessage(waitingForOverview ? "Candidate genes become available after the DE overview."
+                : "Run differential expression analysis to populate this chart.");
+            setHeatmap({}, {}, {}, "Differential expression");
+        }
         updateReadingGuide();
         return;
     }
@@ -437,16 +484,16 @@ void SpeciesDeDialog::renderExtra()
                 if (!pass(row, g)) continue;
                 if ((*row.difference)[g] > 0.0) ++up; else ++down;
             }
-            const auto tip = QString("<b>%1</b><br>Upregulated: %2<br>Downregulated: %3<br>FDR threshold: %4")
+            const auto tip = QString("<b>%1</b><br>Higher expression: %2<br>Lower expression: %3<br>FDR threshold: %4")
                 .arg(row.species.toHtmlEscaped()).arg(up).arg(down).arg(_level);
-            auto& positive = add(up, i + 1, row.species, tip + "<br>Click for the upregulated genes.", {}, row.species, 0.9);
+            auto& positive = add(up, i + 1, row.species, tip + "<br>Click for genes with higher expression in this species.", {}, row.species, 0.9);
             if (up > 0) _countBars.insert(positive.id, { row.species, true });
             positive.low = 0; positive.high = up;
-            auto& negative = add(-down, i + 1, {}, tip + "<br>Click for the downregulated genes.", {}, row.species, 0.1);
+            auto& negative = add(-down, i + 1, {}, tip + "<br>Click for genes with lower expression in this species.", {}, row.species, 0.1);
             if (down > 0) _countBars.insert(negative.id, { row.species, false });
             negative.low = -down; negative.high = 0;
         }
-        xTitle = "Significant genes (downregulated to upregulated)";
+        xTitle = "Significant genes (lower to higher expression)";
         info = QString("All %1 tested species are shown at FDR < %2.")
             .arg(data.rows.size()).arg(_level);
     } else if (mode == 4) {
@@ -464,20 +511,23 @@ void SpeciesDeDialog::renderExtra()
         std::sort(groups.begin(), groups.end(), [](const Intersection& a, const Intersection& b) {
             return a.genes.size() != b.genes.size() ? a.genes.size() > b.genes.size() : a.mask < b.mask;
         });
-        if (groups.size() > 20) groups.resize(20);
+        const auto totalGroups = groups.size();
+        if (totalGroups > 20) groups.resize(20);
         QStringList columns;
+        QVector<int> counts;
         QVector<QVector<float>> membership(static_cast<qsizetype>(data.rows.size()));
         _extraCellTips.resize(static_cast<qsizetype>(data.rows.size()));
         for (int j = 0; j < groups.size(); ++j) {
             const auto& group = groups[j];
             const auto label = QString::number(j + 1);
             columns << label;
+            counts << static_cast<int>(group.genes.size());
             QStringList members;
             for (int i = 0; i < group.mask.size(); ++i)
                 if (group.mask[i] == '1') members << data.rows[i].species;
             _intersectionGenes.push_back(group.genes);
             _intersectionSpecies.push_back(members);
-            const auto tip = QString("<b>Intersection %1</b><br>%2 genes<br>Species: %3<br>Examples: %4<br>Click to see all genes.")
+            const auto tip = QString("<b>Group %1 · %2 genes</b><br>Passed only in: %3<br>Example genes: %4<br>Click to see all genes.")
                 .arg(label).arg(group.genes.size()).arg(members.join(", ").toHtmlEscaped(), group.genes.mid(0, 10).join(", ").toHtmlEscaped());
             add(j + 1, group.genes.size(), label, tip);
             for (int i = 0; i < group.mask.size(); ++i) {
@@ -486,12 +536,27 @@ void SpeciesDeDialog::renderExtra()
             }
         }
         for (const auto& row : data.rows) _extraRows << row.species;
-        setHeatmap(_extraRows, columns, membership, "Intersection membership (1 = included)");
-        _extraPlot->setHistogramWidth(0.65);
-        _extraPlot->setGuideLines({ { true, 0.0, {} } });
-        xTitle = "Intersection ID";
+        setHeatmap(_extraRows, columns, membership, "Species-versus-rest comparisons that passed");
+        _extraHeatmap->setIntersectionCounts(std::move(counts));
+        xTitle = "Intersection group";
         yTitle = "Gene count";
-        info = QString("Up to 20 largest exact intersections at FDR < %1.").arg(_level);
+        info = QString("Each bar counts genes that passed in exactly the species-versus-rest comparisons marked by dots. "
+            "Passing requires a nonzero mean-expression difference and FDR < %1. A blank cell means the gene did not meet both criteria. "
+            "The chart combines higher and lower expression. Click a bar or column to see the genes.").arg(_level);
+        if (groups.isEmpty()) {
+            _extraHeatmap->setEmptyMessage(QString("No genes passed FDR < %1 with a nonzero expression difference.").arg(_level));
+        } else {
+            const auto largest = _intersectionSpecies.front();
+            const auto count = _intersectionGenes.front().size();
+            const auto example = largest.size() <= 3
+                ? QString("%1 only").arg(largest.join(", "))
+                : QString("exactly %1 species comparisons").arg(largest.size());
+            QString summary = QString("Largest group: %1 %2 passed in %3.").arg(count)
+                .arg(count == 1 ? "gene" : "genes", example);
+            if (totalGroups > groups.size())
+                summary += QString(" Showing the %1 largest of %2 groups.").arg(groups.size()).arg(totalGroups);
+            info += "\n\n" + summary;
+        }
     } else if (mode == 5 || mode == 7) {
         const auto& comparison = extraComparison(data);
         if (!comparison.valid) {
@@ -501,23 +566,43 @@ void SpeciesDeDialog::renderExtra()
             const QString scope = group.size() == 1 ? group.front() : QString("%1 species in Group A").arg(group.size());
             const QString label = scope + QString(" vs %1 species in Group B").arg(comparison.groupBCount);
             if (mode == 5) {
+                const bool effectsOnly = comparison.groupACount + comparison.groupBCount == 2;
                 std::vector<int> ranked;
                 for (int g = 0; g < comparison.genes.size(); ++g)
-                    if (std::isfinite(comparison.delta[g]) && comparison.delta[g] != 0 && comparison.fdr[g] < _level)
+                    if (std::isfinite(comparison.delta[g]) && comparison.delta[g] != 0
+                        && (effectsOnly || comparison.fdr[g] < _level))
                         ranked.push_back(g);
-                std::sort(ranked.begin(), ranked.end(), [&](int a, int b) { return comparison.delta[a] < comparison.delta[b]; });
+                std::stable_sort(ranked.begin(), ranked.end(), [&](int a, int b) {
+                    return std::abs(comparison.delta[a]) > std::abs(comparison.delta[b]);
+                });
+                int higherInA = 0;
                 for (size_t row = 0; row < ranked.size(); ++row) {
                     const int g = ranked[row];
                     const auto effect = comparison.delta[g];
                     const auto& gene = comparison.genes[g];
-                    auto& point = add(effect, row + 1, gene, detail(gene, label, effect, comparison.fdr[g]),
-                        gene, {}, effect > 0 ? 0.9 : 0.1);
+                    const auto meanB = comparison.restMean[g];
+                    const auto tip = (effectsOnly
+                        ? QString("<b>%1</b><br>%2<br>Mean-expression difference: %3<br>Significance unavailable (one species per group)")
+                            .arg(gene.toHtmlEscaped(), label.toHtmlEscaped(), number(effect))
+                        : detail(gene, label, effect, comparison.fdr[g]))
+                        + QString("<br>Group A mean: %1<br>Group B mean: %2").arg(number(meanB + effect), number(meanB));
+                    auto& point = add(effect, ranked.size() - row, gene, tip, gene);
+                    point.color = effect > 0 ? QColor("#2377b8") : QColor("#a65327");
+                    higherInA += effect > 0;
                     point.low = std::min(0.0f, effect);
                     point.high = std::max(0.0f, effect);
                 }
                 _extraPlot->setGuideLines({ { false, 0.0, {} } });
                 xTitle = "Mean expression difference (Group A minus Group B)";
-                info = QString("%1. %2 genes pass FDR < %3.").arg(label).arg(ranked.size()).arg(_level);
+                info = effectsOnly
+                    ? QString("%1. Showing %2 of %3 genes with finite, nonzero expression differences. With one species per group, significance cannot be estimated.")
+                        .arg(label).arg(ranked.size()).arg(comparison.genes.size())
+                    : QString("%1. %2 of %3 tested genes have a nonzero difference and FDR < %4.")
+                        .arg(label).arg(ranked.size()).arg(comparison.genes.size()).arg(_level);
+                if (!ranked.empty()) {
+                    info += QString("\n\nHigher in Group B: %1 genes. Higher in Group A: %2 genes. Bars are ordered by absolute difference.")
+                        .arg(ranked.size() - higherInA).arg(higherInA);
+                }
             } else {
                 for (int g = 0; g < comparison.genes.size(); ++g) {
                     const double effect = comparison.delta[g];
@@ -525,7 +610,11 @@ void SpeciesDeDialog::renderExtra()
                     const double average = (meanA + meanB) / 2.0;
                     if (!std::isfinite(effect) || !std::isfinite(average)) continue;
                     const auto& gene = comparison.genes[g];
-                    const auto tip = detail(gene, label, effect, comparison.fdr[g])
+                    const bool significanceAvailable = comparison.groupACount + comparison.groupBCount > 2;
+                    const auto tip = (significanceAvailable
+                        ? detail(gene, label, effect, comparison.fdr[g])
+                        : QString("<b>%1</b><br>%2<br>Mean-expression difference: %3<br>Significance unavailable (one species per group)")
+                            .arg(gene.toHtmlEscaped(), label.toHtmlEscaped(), number(effect)))
                         + QString("<br>Group A mean: %1<br>Group B mean: %2").arg(number(meanA), number(meanB));
                     add(average, effect, gene, tip, gene, {}, comparison.fdr[g] < _level ? 0.9 : 0.3);
                 }
@@ -534,8 +623,8 @@ void SpeciesDeDialog::renderExtra()
                 yTitle = "Mean expression difference (Group A minus Group B)";
                 info = QString("%1. Color highlights genes passing FDR < %2.").arg(label).arg(_level);
             }
-            if (comparison.groupACount + comparison.groupBCount == 2)
-                info += " One species per group supports expression differences only.";
+            if (comparison.groupACount + comparison.groupBCount == 2 && mode != 5)
+                info += " One species per group supports expression differences only; no genes pass a significance filter because significance cannot be estimated.";
         }
     } else if (mode == 8) {
         QStringList labels;
@@ -581,9 +670,8 @@ void SpeciesDeDialog::renderExtra()
         }
         if (mode != 6)
             std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
-        auto candidates = candidateGenes();
+        auto candidates = mode == 11 ? std::vector<size_t>{} : candidateGenes();
         if (mode == 11) {
-            candidates.clear();
             if (focus < genes.size()) candidates.push_back(focus);
         }
         QStringList labels;

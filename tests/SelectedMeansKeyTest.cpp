@@ -12,6 +12,9 @@ int main()
     const std::vector<int> memberships{ 1, 0, 1, -1 };
     const std::vector<unsigned> sorted{ 2, 3, 7, 9 };
     const std::vector<int> sortedMemberships{ 0, -1, 1, 1 };
+    require(sameCellSelection(unsorted, sorted), "Reordering the same selected cells must not invalidate an update");
+    require(!sameCellSelection(sorted, std::vector<unsigned>{2,3,7,8}), "Different cells with the same count must invalidate an update");
+    require(!sameCellSelection(sorted, std::vector<unsigned>{}), "Clearing the selection must invalidate an update");
     const auto background = selectedMeansKey("dataset", unsorted, memberships, 7754, 25);
     const auto publication = selectedMeansKey("dataset", sorted, sortedMemberships, 7754, 25);
     require(background == publication, "Publication must reuse background means for an unsorted selection");
