@@ -11,6 +11,12 @@ inline TraitRequestScope traitRequestScope(bool windowOpen, bool allGenes) {
 inline bool includesTraitGene(TraitRequestScope scope, bool listed, bool selected) {
     return selected || scope == TraitRequestScope::AllGenes || (scope == TraitRequestScope::ListedGenes && listed);
 }
+inline TraitRequestScope traitRefreshScope(bool windowOpen, bool allGenes, TraitRequestScope lastScope) {
+    return windowOpen ? traitRequestScope(true, allGenes) : lastScope;
+}
+inline TraitRequestScope traitGeneRequestScope(bool windowOpen, TraitRequestScope lastScope) {
+    return windowOpen ? lastScope : TraitRequestScope::SelectedGene;
+}
 
 // GUI-owned request identity. Row/gene equality alone cannot distinguish an
 // old A result from a new A request after the user clicked A, B, then A again.

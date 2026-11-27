@@ -681,6 +681,11 @@ void XSCGeneDetectPlugin::init()
         static_cast<std::uint32_t>(EventType::DatasetDataDimensionsChanged),
         static_cast<std::uint32_t>(EventType::DatasetAboutToBeRemoved) });
     _geneExpressionListener.registerDataEvent([this](mv::DatasetEvent* event) {
+        const QString changedDatasetId = event->getDataset()->getId();
+        if (event->getType() == EventType::DatasetDataChanged ||
+            event->getType() == EventType::DatasetDataDimensionsChanged) {
+            _settingsAction.refreshAnalysesForChangedDataset(changedDatasetId);
+        }
         if (event->getDataset()->getId() == _embeddingVisibleSpeciesSource) _embeddingVisibleRows.clear();
         if (event->getDataset()->getId() == _geneCacheSignature) {
             PackedTileAccess::clearColumns();
@@ -775,8 +780,9 @@ void XSCGeneDetectPlugin::init()
 
     const auto updateSelectedGene = [this]() -> void
         {
-
-
+            refreshSpeciesDeHighlights();
+            refreshTraitPlot();
+            _settingsAction.requestTraitForSelectedGene();
         };
 
     connect(&_settingsAction.getSelectedGeneAction(), &StringAction::stringChanged, this, updateSelectedGene);

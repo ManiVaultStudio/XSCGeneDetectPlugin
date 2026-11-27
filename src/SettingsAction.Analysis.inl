@@ -2793,8 +2793,18 @@ void SettingsAction::invalidateTraitResults()
 void SettingsAction::updateTraitReverseSearchFeature()
 {
     XSC_TRACE("SettingsAction::updateTraitReverseSearchFeature");
-    if (!_traitWorkflow.active) { invalidateTraitResults(); return; }
+    if (!_traitWorkflow.active) {
+        // Keep already-published correlations current after the plot is closed.
+        // The selected trait and species selection are shared with other views,
+        // so leaving the old table values visible would misrepresent the inputs.
+        const bool hasPublishedResults = !_geneTraitValuesComputed.empty() || !_traitMatrix.empty();
+        if (!hasPublishedResults) { invalidateTraitResults(); return; }
+        _traitWorkflow.setActive(true);
+    }
     if (_explorationSuspended) return;
+    // The table must never keep showing correlations for the previous trait,
+    // gene set, or species scope while the replacement is being computed.
+    invalidateTraitResults();
     if (_deWorkflow.busy()) {
         _traitWorkflow.pending = true;
         if (!_traitProgress.running()) _traitProgress.begin(this, QStringLiteral("Trait correlation"));
@@ -2830,7 +2840,7 @@ void SettingsAction::onTraitJobsFinished()
         return;
     }
     if (failed) {
-        _traitPublishedKey.clear();
+        invalidateTraitResults();
         _traitProgress.cancel();
         QString reason = QStringLiteral("The expression read did not finish.");
         try {
@@ -2911,8 +2921,13 @@ void SettingsAction::computeTraitCorrelation()
     };
 
     // ---- 1. Validate inputs ---------------------------------------------------------------------------
-    if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
+    const auto pointsPicker = _mainPointsDataset.getCurrentDataset();
+    const auto speciesPicker = _speciesNamesDataset.getCurrentDataset();
+    const auto cellTypePicker = _bottomClusterNamesDataset.getCurrentDataset();
+    if (!pointsPicker.isValid() || !speciesPicker.isValid() || !cellTypePicker.isValid() ||
+        speciesPicker->getParent() != pointsPicker || cellTypePicker->getParent() != pointsPicker) {
         showFocusUnavailable(QStringLiteral("Expression, species, and cell-type datasets are required."));
+        invalidateTraitResults();
         return;
     }
 
@@ -2946,13 +2961,15 @@ void SettingsAction::computeTraitCorrelation()
     const std::vector<QString> allGeneNames = mainPointsDataset->getDimensionNames();
     if (allGeneNames.empty()) {
         showFocusUnavailable(QStringLiteral("The expression dataset has no genes."));
+        invalidateTraitResults();
         return;
     }
 
     // Genes to correlate. The gene table lists the top-N genes (a few hundred): reading only their expression instead of all
     // ~20,000 genes is what makes the analysis fast. The selected gene is always included (it feeds the plot).
     const bool allGenes = _traitWindowOpen && (_traitGeneScope.getCurrentText() == "All genes (slower)");
-    const auto requestScope = traitRequestScope(_traitWindowOpen, allGenes);
+    const auto requestScope = traitRefreshScope(_traitWindowOpen, allGenes, _lastTraitRequestScope);
+    _lastTraitRequestScope = requestScope;
     const QString selectedGeneName = _traitWindowOpen ? focusGene : _selectedGene.getString();
     std::vector<int> geneDims;
     std::vector<QString> geneNames;
@@ -2966,6 +2983,7 @@ void SettingsAction::computeTraitCorrelation()
     const size_t geneCount = geneNames.size();
     if (geneCount == 0) {
         showFocusUnavailable(QStringLiteral("This gene is unavailable in the expression dataset."));
+        invalidateTraitResults();
         return;
     }
     const auto progress = _traitProgress.running() ? _traitProgress.state()
@@ -3492,7 +3510,7 @@ void SettingsAction::computeTraitCorrelation()
                 return;
             }
             if (!*cancel && batch->key.isEmpty()) {
-                _traitPublishedKey.clear();
+                invalidateTraitResults();
                 _traitProgress.cancel();
                 showStatusMessage(QStringLiteral("Trait calculation could not finish. Run Update to retry."), QStringLiteral("#dc3545"));
                 if (_deWorkflow.active) requestSpeciesDifferentialExpression();
@@ -4306,10 +4324,44 @@ void SettingsAction::cancelExplorationAnalysis()
     invalidateTraitResults();
     if (_deTimer) _deTimer->stop();
     if (_traitCorrelationTimer) _traitCorrelationTimer->stop();
+    // Update can rewrite cluster memberships while preserving dataset IDs.
+    // Drop summaries computed for the previous cell selection.
+    _traitCache = TraitCache();
+    _deCache = DeCache();
+    _dePooledState.reset();
     _traitStatistics.reset();
     _traitPublishedKey.clear(); _dePublishedKey.clear();
     _deStats.reset();
     _deOverview.reset();
+}
+
+void SettingsAction::refreshAnalysesForChangedDataset(const QString& datasetId)
+{
+    if (datasetId.isEmpty() || _updateWorkflowRunning || mv::projects().isOpeningProject())
+        return;
+
+    const auto matches = [&datasetId](const auto& picker) {
+        const auto dataset = picker.getCurrentDataset();
+        return dataset.isValid() && dataset.getDatasetId() == datasetId;
+    };
+    const bool expressionInputChanged = matches(_mainPointsDataset) || matches(_speciesNamesDataset) || matches(_bottomClusterNamesDataset);
+    const bool traitInputChanged = expressionInputChanged || matches(_referenceTreeDataset);
+    if (!traitInputChanged)
+        return;
+
+    if (expressionInputChanged) {
+        _traitCache = TraitCache();
+        _deCache = DeCache();
+        _dePooledState.reset();
+        _deStats.reset();
+        _deOverview.reset();
+        _dePublishedKey.clear();
+    }
+    _traitStatistics.reset();
+    _traitPublishedKey.clear();
+    updateTraitReverseSearchFeature();
+    if (expressionInputChanged)
+        requestSpeciesDifferentialExpression();
 }
 
 void SettingsAction::prepareExplorationAnalysis()
@@ -4359,6 +4411,7 @@ void SettingsAction::setTraitAnalysisActive(bool active)
 void SettingsAction::requestTraitForSelectedGene()
 {
     if (_selectedGene.getString().isEmpty()) return;
+    _lastTraitRequestScope = traitGeneRequestScope(_traitWindowOpen, _lastTraitRequestScope);
     _traitWorkflow.setActive(true);
     updateTraitReverseSearchFeature();
 }
@@ -4462,8 +4515,15 @@ void SettingsAction::computeSpeciesDifferentialExpression()
         };
 
     // ---- 1. Inputs -------------------------------------------------------------------------------------------
-    if (!_mainPointsDataset.getCurrentDataset().isValid() || !_speciesNamesDataset.getCurrentDataset().isValid() || !_bottomClusterNamesDataset.getCurrentDataset().isValid()) {
+    const auto pointsPicker = _mainPointsDataset.getCurrentDataset();
+    const auto speciesPicker = _speciesNamesDataset.getCurrentDataset();
+    const auto cellTypePicker = _bottomClusterNamesDataset.getCurrentDataset();
+    if (!pointsPicker.isValid() || !speciesPicker.isValid() || !cellTypePicker.isValid()) {
         finishWith("The datasets are not available yet.");
+        return;
+    }
+    if (speciesPicker->getParent() != pointsPicker || cellTypePicker->getParent() != pointsPicker) {
+        finishWith("Choose species and cell-type datasets derived from the selected expression dataset.");
         return;
     }
 
