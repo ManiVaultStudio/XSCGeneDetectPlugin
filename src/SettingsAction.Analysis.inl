@@ -2968,7 +2968,7 @@ void SettingsAction::computeTraitCorrelation()
     // Genes to correlate. The gene table lists the top-N genes (a few hundred): reading only their expression instead of all
     // ~20,000 genes is what makes the analysis fast. The selected gene is always included (it feeds the plot).
     const bool allGenes = _traitWindowOpen && (_traitGeneScope.getCurrentText() == "All genes (slower)");
-    const auto requestScope = _traitWindowOpen ? traitRequestScope(true, allGenes) : _lastTraitRequestScope;
+    const auto requestScope = traitRefreshScope(_traitWindowOpen, allGenes, _lastTraitRequestScope);
     _lastTraitRequestScope = requestScope;
     const QString selectedGeneName = _traitWindowOpen ? focusGene : _selectedGene.getString();
     std::vector<int> geneDims;
@@ -4411,8 +4411,7 @@ void SettingsAction::setTraitAnalysisActive(bool active)
 void SettingsAction::requestTraitForSelectedGene()
 {
     if (_selectedGene.getString().isEmpty()) return;
-    if (!_traitWindowOpen)
-        _lastTraitRequestScope = TraitRequestScope::SelectedGene;
+    _lastTraitRequestScope = traitGeneRequestScope(_traitWindowOpen, _lastTraitRequestScope);
     _traitWorkflow.setActive(true);
     updateTraitReverseSearchFeature();
 }

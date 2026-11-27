@@ -10,6 +10,14 @@ int main()
     require(includesTraitGene(traitRequestScope(true, false), true, false) && !includesTraitGene(traitRequestScope(true, false), false, false),
         "An explicit listed-gene analysis must preserve its scope");
     require(includesTraitGene(traitRequestScope(true, true), false, false), "Explicit all-gene analysis must remain available");
+    require(traitRefreshScope(false, false, TraitRequestScope::ListedGenes) == TraitRequestScope::ListedGenes,
+        "Input changes after closing the plot must refresh the same listed-gene result set");
+    require(traitRefreshScope(false, false, TraitRequestScope::AllGenes) == TraitRequestScope::AllGenes,
+        "Input changes after closing an all-gene plot must preserve its result scope");
+    require(traitGeneRequestScope(false, TraitRequestScope::AllGenes) == TraitRequestScope::SelectedGene,
+        "A gene request with the plot closed must remain scoped to the selected gene");
+    require(traitGeneRequestScope(true, TraitRequestScope::ListedGenes) == TraitRequestScope::ListedGenes,
+        "Selecting a gene while the plot is open must retain its active plot scope");
     RequestGeneration clicks;
     clicks.advance(); const auto firstA = clicks.current();
     clicks.advance(); const auto b = clicks.current();
