@@ -472,6 +472,7 @@ public: // Action getters
     void traitPlotSelectionChanged();
     void requestTraitForSelectedGene();
     void cancelExplorationAnalysis();
+    void refreshAnalysesForChangedDataset(const QString& datasetId);
     void shutdownBackgroundWork();
     bool updateWorkflowRunning() const { return _updateWorkflowRunning; }
     /** Recompute changed inputs only while its analysis window is open. */
@@ -536,6 +537,7 @@ public: // Action getters
     StringAction& getRightClickedCluster() { return _rightClickedCluster; }
     StringAction& getTopSelectedHierarchyStatus() { return _topSelectedHierarchyStatus; }
     TriggerAction& getClearRightClickedCluster() { return _clearRightClickedCluster; }
+    TriggerAction& getRefreshTraitAnalysis() { return _refreshTraitAnalysis; }
     StringAction& getReverseSearchTraitSelectionString() { return _reverseSearchTraitSelectionString; }
     OptionAction& getTraitPoolingMode() { return _traitPoolingMode; }   /** how several selected cell types are combined */
     OptionAction& getTraitCorrelationMethod() { return _traitCorrelationMethod; } /** Pearson / Spearman / phylogenetic contrasts */
@@ -892,6 +894,7 @@ protected:
     //std::vector<QString> _speciesOrder;
     StringAction              _rightClickedCluster;
     TriggerAction              _clearRightClickedCluster;
+    TriggerAction              _refreshTraitAnalysis;
     StringAction              _reverseSearchTraitSelectionString;
     OptionAction              _traitPoolingMode;      /** "Pool cells" (default) or "Equal cell-type weighting" */
     OptionAction              _traitCorrelationMethod;/** "Pearson" (default), "Spearman (rank)" or "Phylogenetic contrasts" */
@@ -949,6 +952,7 @@ protected:
     QTimer* _deTimer = nullptr;
     AnalysisWorkflow _deWorkflow, _traitWorkflow;
     bool _traitWindowOpen = false;
+    TraitRequestScope _lastTraitRequestScope = TraitRequestScope::SelectedGene;
     bool        _explorationSuspended = false;
     std::shared_ptr<std::atomic_bool> _deReadCancel, _traitReadCancel;
     QFutureWatcher<void> _deStatisticsWatcher;

@@ -66,6 +66,7 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     _rightClickedCluster(this, "Right Clicked Cluster"),
     _topSelectedHierarchyStatus(this, "Top Selected Hierarchy Status"),
     _clearRightClickedCluster(this, "Clear Right Clicked Cluster"),
+    _refreshTraitAnalysis(this, "Refresh Trait Analysis"),
     _toggleScatterplotSelection(this, "Show Scatterplot Selection"),
     _mapForHierarchyItemsChangeMethodStopForProjectLoadBlocker(this, "Map For Hierarchy Items Change Method Stop For Project Load Blocker"),
     _saveSpeciesTable(this, "Save Gene Table"),
@@ -719,9 +720,18 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
 
         }
 
+        if (!mv::projects().isOpeningProject()) {
+            updateTraitReverseSearchFeature();
+            requestSpeciesDifferentialExpression();
+        }
+
         };
 
     connect(&_mainPointsDataset, &DatasetPickerAction::currentIndexChanged, this, updateMainPointsDataset);
+    connect(&_referenceTreeDataset, &DatasetPickerAction::currentIndexChanged, this, [this]() {
+        if (!mv::projects().isOpeningProject())
+            updateTraitReverseSearchFeature();
+    });
 
 
     const auto updateSpeciesNameDataset = [this]() -> void {
@@ -761,6 +771,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         if (!mv::projects().isOpeningProject() && (!_meanMapComputed || _meanMapSignature != currentMeanMapSignature()))
         {
             computeGeneMeanExpressionMap(); // (also when the datasets changed: the cached means belong to the old ones)
+        }
+
+        if (!mv::projects().isOpeningProject()) {
+            updateTraitReverseSearchFeature();
+            requestSpeciesDifferentialExpression();
         }
         };
 
@@ -808,8 +823,11 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
     connect(&_middleClusterNamesDataset, &DatasetPickerAction::currentIndexChanged, this, updateMiddleHierarchyDatasetChanged);
 
     const auto updateBottomHierarchyDatasetChanged = [this]() -> void {
+        if (mv::projects().isOpeningProject())
+            return;
 
-
+        updateTraitReverseSearchFeature();
+        requestSpeciesDifferentialExpression();
         };
 
     connect(&_bottomClusterNamesDataset, &DatasetPickerAction::currentIndexChanged, this, updateBottomHierarchyDatasetChanged);
@@ -1184,6 +1202,13 @@ SettingsAction::SettingsAction(XSCGeneDetectPlugin& XSCGeneDetectPlugin) :
         };
 
     connect(&_reverseSearchTraitSelectionString, &StringAction::stringChanged, this, updateReverseSearchTraitSelectionString);
+    _refreshTraitAnalysis.setVisible(false);
+    connect(&_refreshTraitAnalysis, &TriggerAction::triggered, this, [this]() {
+        updateTraitReverseSearchFeature();
+        requestSpeciesDifferentialExpression();
+        _XSCGeneDetectPlugin.refreshSpeciesDe();
+        _XSCGeneDetectPlugin.refreshTraitPlot();
+    });
 
     const auto updateTopSelectedHierarchyStatus = [this]() {
         if (!mv::projects().isOpeningProject() && !_updateWorkflowRunning)
